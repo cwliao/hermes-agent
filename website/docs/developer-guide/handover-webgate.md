@@ -213,3 +213,4 @@ Do not change Telegram token/user allowlist values unless explicitly requested.
 - External path 只在 non-secret `config.yaml`，未 hardcode 進 Hermes source
 
 Baseline ready 表示 Hermes 可由 active config 選擇 `subprocess_json`、呼叫 local CLI、保留原 target，並對 allow、policy deny 與 adapter failure 做 fail-closed 判定。Web、browser、vision 已在 CLI/Telegram rollout；強制所有 web-capable calls 經 gate 現已可透過 `web_gate.mandatory: true` 啟用（見上方「Mandatory interception」章節），預設仍為 `false`（opt-in）。Systemd-managed gateway 已建立並由 user service 管理。
+

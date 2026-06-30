@@ -68,7 +68,11 @@ _CODING_TOOLS = _core_without("image_generate", "text_to_speech", "cronjob_manag
 # Core toolset definitions: individual tools or references to other toolsets.
 TOOLSETS = {
     # Basic toolsets - individual tool categories
-    "web": _ts("Web research and content extraction tools", ["web_search", "web_extract"]),
+    "web": _ts(
+        "Web research and content extraction tools",
+        # web_gate: fail-closed skeleton, not connected to production gate
+        ["web_search", "web_extract", "web_gate"],
+    ),
     "search": _ts("Web search only (no content extraction/scraping)", ["web_search"]),
     "x_search": _ts(
         "Search X (Twitter) posts and threads via xAI's built-in x_search Responses "

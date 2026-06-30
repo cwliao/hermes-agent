@@ -1,5 +1,8 @@
 """Tests for the versioned, fail-closed web gate adapter contract."""
 
+import subprocess
+import sys
+
 import pytest
 from pydantic import ValidationError
 
@@ -38,7 +41,10 @@ def adapter_response(decision="deny", reason="policy_denied", **overrides):
     return response
 
 
-def test_default_adapter_selection_uses_local_fake_and_denies():
+def test_default_adapter_selection_uses_local_fake_and_denies(monkeypatch):
+    monkeypatch.setattr(
+        web_gate, "_load_web_gate_wiring", lambda: web_gate.WEB_GATE_WIRING_CONFIG
+    )
     adapter, reason = web_gate.resolve_web_gate_adapter()
 
     assert isinstance(adapter, web_gate.LocalFakeWebGateAdapter)
@@ -101,33 +107,81 @@ def test_missing_required_field_raises_validation_error():
         ("not-a-mapping", "gate_invalid_config"),
     ],
 )
-def test_invalid_or_unknown_wiring_fails_closed(monkeypatch, wiring, reason):
-    monkeypatch.setattr(web_gate, "WEB_GATE_WIRING_CONFIG", wiring)
-
-    assert web_gate.web_gate_tool(VALID_PAYLOAD) == {
+def test_invalid_or_unknown_wiring_fails_closed(wiring, reason):
+    assert web_gate.web_gate_tool(VALID_PAYLOAD, wiring=wiring) == {
         "allowed": False,
         "reason": reason,
     }
 
 
 def test_wiring_factory_exception_fails_closed(monkeypatch):
-    def exploding_factory():
+    def exploding_factory(_config):
         raise RuntimeError("adapter wiring failed")
 
     monkeypatch.setitem(web_gate.WEB_GATE_ADAPTER_FACTORIES, "boom", exploding_factory)
-    monkeypatch.setattr(
-        web_gate,
-        "WEB_GATE_WIRING_CONFIG",
-        {
-            "wiring_version": "web_gate.wiring.v1",
-            "adapter_mode": "boom",
-        },
-    )
-
-    assert web_gate.web_gate_tool(VALID_PAYLOAD) == {
+    wiring = {
+        "wiring_version": "web_gate.wiring.v1",
+        "adapter_mode": "boom",
+    }
+    assert web_gate.web_gate_tool(VALID_PAYLOAD, wiring=wiring) == {
         "allowed": False,
         "reason": "gate_wiring_error",
     }
+
+
+def subprocess_wiring(script, timeout_seconds=1):
+    return {
+        "wiring_version": web_gate.WEB_GATE_WIRING_VERSION,
+        "adapter_mode": "subprocess_json",
+        "command": [sys.executable, "-c", script],
+        "timeout_seconds": timeout_seconds,
+    }
+
+
+def test_subprocess_json_allows_and_preserves_target_tool():
+    script = (
+        "import json,sys; request=json.load(sys.stdin); "
+        "print(json.dumps({'allowed': request['contract_version'] == 'web_gate.v1'}))"
+    )
+    assert web_gate.web_gate_tool(VALID_PAYLOAD, wiring=subprocess_wiring(script)) == {
+        "allowed": True,
+        "next_tool": "web_extract",
+    }
+
+
+def test_subprocess_json_denies_with_reason():
+    script = "print('{\"allowed\": false, \"reason\": \"policy_denied\"}')"
+    assert web_gate.web_gate_tool(VALID_PAYLOAD, wiring=subprocess_wiring(script)) == {
+        "allowed": False,
+        "reason": "policy_denied",
+    }
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "raise SystemExit(2)",
+        "print('not-json')",
+        "print('{\"allowed\": false}')",
+        "print('{\"allowed\": true, \"unexpected\": 1}')",
+        "print('{\"allowed\": true, \"contract_version\": \"web_gate.v2\"}')",
+    ],
+)
+def test_subprocess_json_errors_fail_closed(script):
+    assert web_gate.web_gate_tool(VALID_PAYLOAD, wiring=subprocess_wiring(script)) == {
+        "allowed": False,
+        "reason": "gate_adapter_error",
+    }
+
+
+def test_subprocess_json_timeout_fails_closed(monkeypatch):
+    def time_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(web_gate.subprocess, "run", time_out)
+    assert web_gate.web_gate_tool(
+        VALID_PAYLOAD, wiring=subprocess_wiring("print('{}')")
+    ) == {"allowed": False, "reason": "gate_adapter_error"}
 
 
 @pytest.mark.parametrize(

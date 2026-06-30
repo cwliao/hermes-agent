@@ -5,17 +5,21 @@ requests and always denies until a production adapter is configured by a
 separate integration.
 """
 
+import json
+import subprocess
 from collections.abc import Mapping
 from typing import Any, Callable, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from tools.registry import registry
 
 
 WEB_GATE_CONTRACT_VERSION = "web_gate.v1"
 WEB_GATE_WIRING_VERSION = "web_gate.wiring.v1"
-WEB_GATE_ADAPTER_FACTORIES: dict[str, Callable[[], "WebGateAdapter"]] = {}
+WEB_GATE_ADAPTER_FACTORIES: dict[
+    str, Callable[["WebGateWiringConfig"], "WebGateAdapter"]
+] = {}
 WEB_GATE_WIRING_CONFIG: dict[str, Any] = {
     "wiring_version": WEB_GATE_WIRING_VERSION,
     "adapter_mode": "local_fake",
@@ -110,7 +114,50 @@ class LocalFakeWebGateAdapter:
         }
 
 
-WEB_GATE_ADAPTER_FACTORIES["local_fake"] = LocalFakeWebGateAdapter
+class SubprocessJsonResponse(BaseModel):
+    """Minimal response emitted by a local subprocess adapter command."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    allowed: bool
+    reason: str | None = None
+    contract_version: str | None = None
+
+
+class SubprocessJsonWebGateAdapter:
+    """Run a local argv command using JSON on stdin and stdout."""
+
+    def __init__(self, command: tuple[str, ...], timeout_seconds: float):
+        self.command = command
+        self.timeout_seconds = timeout_seconds
+
+    def evaluate(self, request: dict[str, Any]) -> Mapping[str, Any]:
+        WebGateAdapterRequest.model_validate(request)
+        result = subprocess.run(
+            self.command,
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            timeout=self.timeout_seconds,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("web gate subprocess failed")
+
+        response = SubprocessJsonResponse.model_validate_json(result.stdout)
+        if (
+            response.contract_version is not None
+            and response.contract_version != WEB_GATE_CONTRACT_VERSION
+        ):
+            raise ValueError("web gate subprocess returned an unsupported version")
+        if not response.allowed and not response.reason:
+            raise ValueError("web gate subprocess deny response requires a reason")
+
+        return {
+            "contract_version": WEB_GATE_CONTRACT_VERSION,
+            "decision": "allow" if response.allowed else "deny",
+            "reason": response.reason or "subprocess_allowed",
+        }
 
 
 class WebGateWiringConfig(BaseModel):
@@ -120,13 +167,47 @@ class WebGateWiringConfig(BaseModel):
 
     wiring_version: str
     adapter_mode: str
+    command: tuple[str, ...] | None = None
+    timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+
+
+def _load_web_gate_wiring() -> Mapping[str, Any]:
+    """Load non-secret web gate settings from config.yaml, defaulting closed."""
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config() or {}
+        wiring = config.get("web_gate")
+    except Exception:
+        wiring = None
+    return wiring if wiring is not None else WEB_GATE_WIRING_CONFIG
+
+
+def _local_fake_factory(config: WebGateWiringConfig) -> WebGateAdapter:
+    if config.command is not None:
+        raise ValueError("local_fake does not accept a command")
+    return LocalFakeWebGateAdapter()
+
+
+def _subprocess_json_factory(config: WebGateWiringConfig) -> WebGateAdapter:
+    if not config.command or any(not part for part in config.command):
+        raise ValueError("subprocess_json requires a non-empty command")
+    return SubprocessJsonWebGateAdapter(config.command, config.timeout_seconds)
+
+
+WEB_GATE_ADAPTER_FACTORIES.update(
+    {
+        "local_fake": _local_fake_factory,
+        "subprocess_json": _subprocess_json_factory,
+    }
+)
 
 
 def resolve_web_gate_adapter(
     wiring: Mapping[str, Any] | None = None,
 ) -> tuple[WebGateAdapter | None, str | None]:
     """Resolve the repo-local adapter selection, failing closed on bad wiring."""
-    candidate = wiring if wiring is not None else WEB_GATE_WIRING_CONFIG
+    candidate = wiring if wiring is not None else _load_web_gate_wiring()
     if not isinstance(candidate, Mapping):
         return None, "gate_invalid_config"
 
@@ -143,7 +224,7 @@ def resolve_web_gate_adapter(
         return None, "gate_unknown_adapter_mode"
 
     try:
-        adapter = factory()
+        adapter = factory(wiring_config)
     except Exception:
         return None, "gate_wiring_error"
 

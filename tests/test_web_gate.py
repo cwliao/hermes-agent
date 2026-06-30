@@ -38,7 +38,11 @@ def adapter_response(decision="deny", reason="policy_denied", **overrides):
     return response
 
 
-def test_default_local_fake_denies_without_external_configuration():
+def test_default_adapter_selection_uses_local_fake_and_denies():
+    adapter, reason = web_gate.resolve_web_gate_adapter()
+
+    assert isinstance(adapter, web_gate.LocalFakeWebGateAdapter)
+    assert reason is None
     assert web_gate.web_gate_tool(VALID_PAYLOAD) == {
         "allowed": False,
         "reason": "gate_not_configured",
@@ -74,6 +78,56 @@ def test_missing_required_field_raises_validation_error():
 
     with pytest.raises(ValidationError):
         web_gate.web_gate_tool(payload)
+
+
+@pytest.mark.parametrize(
+    ("wiring", "reason"),
+    [
+        ({"wiring_version": "web_gate.wiring.v1"}, "gate_invalid_config"),
+        (
+            {
+                "wiring_version": "web_gate.wiring.v1",
+                "adapter_mode": "unknown-mode",
+            },
+            "gate_unknown_adapter_mode",
+        ),
+        (
+            {
+                "wiring_version": "web_gate.wiring.v2",
+                "adapter_mode": "local_fake",
+            },
+            "gate_version_mismatch",
+        ),
+        ("not-a-mapping", "gate_invalid_config"),
+    ],
+)
+def test_invalid_or_unknown_wiring_fails_closed(monkeypatch, wiring, reason):
+    monkeypatch.setattr(web_gate, "WEB_GATE_WIRING_CONFIG", wiring)
+
+    assert web_gate.web_gate_tool(VALID_PAYLOAD) == {
+        "allowed": False,
+        "reason": reason,
+    }
+
+
+def test_wiring_factory_exception_fails_closed(monkeypatch):
+    def exploding_factory():
+        raise RuntimeError("adapter wiring failed")
+
+    monkeypatch.setitem(web_gate.WEB_GATE_ADAPTER_FACTORIES, "boom", exploding_factory)
+    monkeypatch.setattr(
+        web_gate,
+        "WEB_GATE_WIRING_CONFIG",
+        {
+            "wiring_version": "web_gate.wiring.v1",
+            "adapter_mode": "boom",
+        },
+    )
+
+    assert web_gate.web_gate_tool(VALID_PAYLOAD) == {
+        "allowed": False,
+        "reason": "gate_wiring_error",
+    }
 
 
 @pytest.mark.parametrize(

@@ -96,7 +96,8 @@ TOOLSETS = {
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",
-        "tools": ["web_search", "web_extract"],
+        # web_gate: fail-closed skeleton, not connected to production gate
+        "tools": ["web_search", "web_extract", "web_gate"],
         "includes": []  # No other toolsets included
     },
     

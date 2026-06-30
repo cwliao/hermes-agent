@@ -37,7 +37,7 @@ class TestGetToolset:
 
         ts = get_toolset("web")
         assert ts is not None
-        assert {"web_search", "web_search_plus"} <= set(ts["tools"])
+        assert set(ts["tools"]) == set(TOOLSETS["web"]["tools"]) | {"web_search_plus"}
 
     def test_static_and_mcp_alias_with_same_name_are_merged(self, monkeypatch):
         # An MCP server named like a built-in toolset registers a bare alias to its
@@ -58,6 +58,15 @@ class TestGetToolset:
             del TOOLSETS["_mergetest"]
 
 class TestResolveToolset:
+    def test_leaf_toolset(self):
+        tools = resolve_toolset("web")
+        assert set(tools) == set(TOOLSETS["web"]["tools"])
+
+    def test_composite_toolset(self):
+        tools = resolve_toolset("debugging")
+        assert "terminal" in tools
+        assert "web_search" in tools
+        assert "web_extract" in tools
 
     def test_cycle_detection(self):
         # Create a cycle: A includes B, B includes A
@@ -113,6 +122,11 @@ class TestValidateToolset:
         assert "mcp__dynserver__ping" in resolve_toolset("dynserver")
 
 class TestGetToolsetInfo:
+    def test_leaf(self):
+        info = get_toolset_info("web")
+        assert info["name"] == "web"
+        assert info["is_composite"] is False
+        assert info["tool_count"] == len(TOOLSETS["web"]["tools"])
 
     def test_composite(self):
         info = get_toolset_info("debugging")

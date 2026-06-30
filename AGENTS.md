@@ -1445,4 +1445,12 @@ source ~/.hermes/.venv/bin/activate
 codex --approval-mode auto
 ```
 
-Paste the contents of `docs/handover-webgate-*.md` as the first message to restore context.
+For Codex CLI inside this repo, use:
+
+codex --sandbox workspace-write --ask-for-approval on-request
+
+Codex may autonomously edit code, tests, and docs under this repository.
+It must stop and ask before touching ~/.hermes/config.yaml, ~/.hermes/.env,
+~/.hermes/auth.json, gateway state, Telegram tokens/users, or production
+audit logs. See docs/handover.md for full rules and the web_gate skeleton
+design.

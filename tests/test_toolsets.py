@@ -30,6 +30,7 @@ class TestGetToolset:
         ts = get_toolset("web")
         assert ts is not None
         assert "web_search" in ts["tools"]
+        assert "web_gate" in ts["tools"]
 
     def test_merges_registry_tools_into_builtin_toolset(self, monkeypatch):
         reg = ToolRegistry()
@@ -54,6 +55,7 @@ class TestResolveToolset:
     def test_leaf_toolset(self):
         tools = resolve_toolset("web")
         assert set(tools) == set(TOOLSETS["web"]["tools"])
+        assert "web_gate" in tools
 
     def test_composite_toolset(self):
         tools = resolve_toolset("debugging")

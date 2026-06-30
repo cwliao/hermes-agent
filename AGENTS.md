@@ -218,4 +218,3 @@ codex --approval-mode auto
 ```
 
 Paste the contents of `docs/handover-webgate-*.md` as the first message to restore context.
->>>>>>> 54c2448c7a (docs(agents): add Codex CLI behavioral rules section)

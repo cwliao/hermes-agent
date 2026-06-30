@@ -23,6 +23,20 @@ def _make_schema(name: str, description: str = "test tool"):
     }
 
 class TestGetToolset:
+    def test_known_toolset(self):
+        ts = get_toolset("web")
+        assert ts is not None
+        assert "web_search" in ts["tools"]
+        assert "web_gate" in ts["tools"]
+
+    def test_x_search_toolset_marks_read_only_and_points_to_xurl(self):
+        ts = get_toolset("x_search")
+        assert ts is not None
+        assert ts["tools"] == ["x_search"]
+        description = ts["description"].lower()
+        assert "read-only" in description
+        assert "xurl" in description
+        assert "authenticated" in description
 
     def test_merges_registry_tools_into_builtin_toolset(self, monkeypatch):
         reg = ToolRegistry()
@@ -61,6 +75,7 @@ class TestResolveToolset:
     def test_leaf_toolset(self):
         tools = resolve_toolset("web")
         assert set(tools) == set(TOOLSETS["web"]["tools"])
+        assert "web_gate" in tools
 
     def test_composite_toolset(self):
         tools = resolve_toolset("debugging")

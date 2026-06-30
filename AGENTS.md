@@ -480,3 +480,72 @@ It must stop and ask before touching ~/.hermes/config.yaml, ~/.hermes/.env,
 ~/.hermes/auth.json, gateway state, Telegram tokens/users, or production
 audit logs. See docs/handover.md for full rules and the web_gate skeleton
 design.
+
+# behavior: does migration bump the user's version to current latest?
+assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+
+# invariant: no plan-only model leaks into the legacy list
+assert not (set(moonshot_models) & coding_plan_only_models)
+
+# invariant: every model in the catalog has a context-length entry
+for m in _PROVIDER_MODELS["huggingface"]:
+    assert m.lower() in DEFAULT_CONTEXT_LENGTHS_LOWER
+```
+
+The rule: if the test reads like a snapshot of current data, delete it. If
+it reads like a contract about how two pieces of data must relate, keep it.
+When a PR adds a new provider/model and you want a test, make the test
+assert the relationship (e.g. "catalog entries all have context lengths"),
+not the specific names.
+
+Reviewers should reject new change-detector tests; authors should convert
+them into invariants before re-requesting review.
+
+## Codex CLI Behavioral Rules
+
+These rules apply specifically when Codex CLI operates in this repo.
+They complement the Hermes Agent Development Guide above and take precedence
+over Codex defaults in any conflict.
+
+### Autonomy (Auto-approve without asking)
+
+Codex may read, edit, and run commands for the following without confirmation:
+
+- Files inside `tools/`, `toolsets.py`, `tests/`, `docs/`, `skills/`
+- Lint (`ruff`, `black`, `mypy`) and test (`pytest`) runs
+- Generating or updating skeleton files, stubs, and docstrings
+- Adding entries to the tool registry
+- Creating or updating Markdown documentation inside the repo
+
+### Stop and Ask (require explicit confirmation)
+
+Codex **must pause and prompt the user** before:
+
+- Touching any file outside `~/.hermes/hermes-agent/`
+- Reading or writing `~/.hermes/config.yaml`, `.env`, or `auth.json`
+- Writing to `~/.hermes/audit/` (production audit logs)
+- Starting, stopping, or restarting any Hermes gateway process
+- Modifying Telegram bot tokens, channel IDs, or allowed-user lists
+- Performing destructive git operations (`force-push`, `reset --hard`, branch deletion)
+- Making major architectural changes (new top-level module, changing registry schema)
+- Enabling browser, web, or vision tools in any live profile
+
+### Hard Constraints (never do, even if asked)
+
+- Do **not** hardcode `~/.hermes` paths — always use `gethermeshome` / `displayhermeshome`
+- Do **not** move non-secret behaviour config from `config.yaml` into `.env`
+- Do **not** expand the core tool surface without an explicit Footprint Ladder justification
+- Do **not** modify the system prompt or tool surface mid-session in ways that break prompt-cache prefixes
+- Do **not** connect `web_gate` to a live external endpoint (production or otherwise) until the skeleton is reviewed and merged
+
+### Startup Context
+
+When starting a Codex session for web_gate work:
+
+```bash
+cd ~/.hermes/hermes-agent
+source ~/.hermes/.venv/bin/activate
+codex --approval-mode auto
+```
+
+Paste the contents of `docs/handover-webgate-*.md` as the first message to restore context.

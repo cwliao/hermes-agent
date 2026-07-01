@@ -59,6 +59,33 @@ def test_agent_disabled_toolsets_with_explicit_platform_config():
     assert "terminal" in enabled
 
 
+def test_explicit_web_rollout_does_not_enable_browser_or_vision():
+    config = {
+        "platform_toolsets": {
+            "cli": ["web", "terminal"],
+        },
+    }
+
+    enabled = _get_platform_tools(
+        config,
+        "cli",
+        include_default_mcp_servers=False,
+    )
+
+    assert "web" in enabled
+    assert "terminal" in enabled
+    assert "browser" not in enabled
+    assert "vision" not in enabled
+
+    from toolsets import resolve_multiple_toolsets
+
+    exposed_tools = set(resolve_multiple_toolsets(sorted(enabled)))
+    assert {"web_search", "web_extract", "web_gate"} <= exposed_tools
+    assert {"terminal", "process"} <= exposed_tools
+    assert "browser_navigate" not in exposed_tools
+    assert "vision_analyze" not in exposed_tools
+
+
 def test_all_invalid_platform_toolsets_logs_runtime_warning(caplog):
     """#38798: an explicit platform config whose toolset names are all invalid
     (e.g. 'hermes' instead of 'hermes-cli') must warn at resolve time so an
@@ -1255,7 +1282,14 @@ def test_get_platform_tools_recovers_non_configurable_toolsets_from_composite():
     }
     fake_toolsets["hermes-_test_platform"] = {
         "description": "test composite",
-        "tools": ["web_search", "web_extract", "terminal", "process", "_test_special_tool"],
+        "tools": [
+            "web_search",
+            "web_extract",
+            "web_gate",
+            "terminal",
+            "process",
+            "_test_special_tool",
+        ],
         "includes": [],
     }
 

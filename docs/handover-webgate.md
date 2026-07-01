@@ -1,67 +1,106 @@
 # Hermes web_gate 交接摘要
 
-## 工作範圍與狀態
+## Baseline 狀態
 
-- Repo：`~/.hermes/hermes-agent`；branch：`main`
-- `web_gate.v1` contract、local fake adapter、repo-local wiring 與 deterministic tests 已完成。
-- 真實 external gate adapter、外部 endpoint/transport、production configuration、audit integration，以及 production browser/web/vision enablement 均刻意 deferred。
-- 不得讀取、呼叫、修改或依賴 repo 外的 gate 專案。
+- Hermes repo：`~/.hermes/hermes-agent`，branch `main`
+- External gate：`/home/cwliao/work/hermes-audit/url-wrapper-project`
+- `web_gate.v1`、repo-local wiring、`subprocess_json` 與 active config 已完成
+- Allow、deny、adapter-failure smoke tests 已通過
+- Actual `web` rollout 已開始；mandatory interception 尚未啟用
+- Browser 與 vision 的 rollout 決策仍 deferred
 
-## 已實作行為
+## Hermes contract 與 wiring
 
-`tools/web_gate.py` 是 fail-closed 判定層，不執行網路存取或 target tool。
+`tools/web_gate.py` 是 fail-closed 判定層，不執行 target tool。
 
-- Strict request/response contract：`web_gate.v1`
-- Request：`url`、`tool`、`actor`、`channel`、`request_source`
-- `request_source`：`cli`、`telegram` 或 `webui`
-- Response decision：`allow` 或 `deny`
-- Request/response 禁止額外欄位
-- Allow 只能回傳 request 原本的 `tool`，adapter 不能改寫 target
-- `WebGateAdapter.evaluate()` 保持 transport-independent，測試可直接注入 adapter
+- Request：`web_gate.v1`，含 `url`、`tool`、`actor`、`channel`、`request_source`
+- `request_source` 限 `cli`、`telegram`、`webui`
+- Allow 只回傳原 request 的 `tool`，adapter 不能改寫 target
+- `local_fake` 預設固定 deny：`gate_not_configured`
+- `subprocess_json` 以 argv list 執行 command，JSON 經 stdin/stdout 傳遞，不使用 shell
 
-`LocalFakeWebGateAdapter` 是 deterministic、deny-only 的預設 adapter。它不做 network request、不讀 external/runtime state，固定回傳 `deny / gate_not_configured`。
+Active non-secret config：
 
-Repo-local wiring：
+```yaml
+web_gate:
+  wiring_version: web_gate.wiring.v1
+  adapter_mode: subprocess_json
+  command:
+    - /usr/bin/python3
+    - /home/cwliao/work/hermes-audit/url-wrapper-project/bin/hermes_web_gate_json.py
+  timeout_seconds: 5
+```
 
-- Wiring version：`web_gate.wiring.v1`
-- Default mode：`local_fake`
-- `resolve_web_gate_adapter()` 驗證 wiring，並由 repo-local factory selection 建立 adapter
-- 沒有 external dependency，也沒有 hardcode external project path
-- `web_gate` 已透過 registry 註冊，只掛入既有 `web` toolset
+## Capability rollout
+
+`web` 是現有 configurable toolset，包含 `web_search`、`web_extract` 與
+`web_gate`。這三個工具現在也共同存在於 platform core web surface，讓 default
+platform bundle 的 subset resolution 能正確恢復 `web`。在
+`platform_toolsets.<platform>` 明確列出 `web` 也會只暴露這組 web tools。
+
+Web-only selection 不會隱含啟用 `browser` 或 `vision`；behavior test 已覆蓋
+`web + terminal`，證明 unrelated `terminal` 保留，而
+`browser_navigate`、`vision_analyze` 不會出現。
+
+目前 active `platform_toolsets.cli` 與 `platform_toolsets.telegram` 仍同時列出
+`web`、`browser`、`vision`。因此 repo 已具備 web-only rollout 能力，但 active
+runtime 尚不是 web-only。若要符合本階段政策，仍需使用 `hermes tools` 或另行授權
+修改 `config.yaml`，在目標 platform 保留 `web` 並移除
+`browser`、`vision`。本次未修改 production config。
+
+## External CLI
+
+Entrypoint：
+
+```text
+/home/cwliao/work/hermes-audit/url-wrapper-project/bin/hermes_web_gate_json.py
+```
+
+由 `/usr/bin/python3` 執行。CLI 嚴格驗證 `web_gate.v1` envelope，重用 external project 的 URL policy/DNS evaluator，只在 stdout 輸出 `{"allowed": true}` 或 `{"allowed": false, "reason": "..."}`。
+
+Policy deny 與 malformed request 都輸出有效 deny decision 並 exit 0；Hermes 因此能保留具體 reason。CLI 不呼叫 Hermes target tool，也不啟用 browser/web/vision。
 
 ## Fail-closed taxonomy
 
 | 狀況 | 結果 |
 | --- | --- |
+| Policy deny | `allowed: false`，保留 reason，例如 `https_required` |
+| External malformed JSON input | `invalid_json` |
+| External request 欄位錯誤或多餘 | `invalid_request_fields` |
+| External unsupported contract version | `unsupported_contract_version` |
 | Wiring 缺漏、格式錯誤或額外欄位 | `gate_invalid_config` |
 | Unsupported wiring/response version | `gate_version_mismatch` |
 | Unknown adapter mode | `gate_unknown_adapter_mode` |
-| Factory exception 或 adapter 缺少 callable `evaluate` | `gate_wiring_error` |
-| Adapter exception | `gate_adapter_error` |
-| Response 非 mapping、欄位/decision 無效或額外欄位 | `gate_invalid_response` |
+| Factory error 或 adapter 無 callable `evaluate` | `gate_wiring_error` |
+| Timeout、non-zero exit、啟動失敗、invalid subprocess JSON/schema/version | `gate_adapter_error` |
+| Injected adapter malformed response | `gate_invalid_response` |
 | Default local fake | `gate_not_configured` |
 
-輸入 payload 缺少必要欄位時由 Pydantic 拒絕。任何 wiring、factory、adapter 或 response 錯誤都不會產生 allow。
+任何 policy、wiring、process、schema 或 version failure 都不會產生 allow。
 
-## 測試狀態
+## Smoke validation
 
-- `venv/bin/pytest tests/test_web_gate.py`：15 passed
-- `venv/bin/pytest tests/test_web_gate.py tests/test_toolsets.py`：42 passed
-- `git diff --check`：passed
+以下 one-shot tests 已通過；直接呼叫 `web_gate_tool()`，未啟動 gateway 或 target web tool：
 
-Coverage 包含 default selection、versioned request、allow/deny、原 target preservation、invalid config、unknown mode/version、factory errors、invalid responses 與 adapter exceptions。
+| Case | Input | Output |
+| --- | --- | --- |
+| Allow | `https://docs.nvidia.com/`，`tool=web` | `{'allowed': True, 'next_tool': 'web'}` |
+| Deny | `http://localhost/`，`tool=web` | `{'allowed': False, 'reason': 'https_required'}` |
+| Adapter failure | command override `['/usr/bin/false']` | `{'allowed': False, 'reason': 'gate_adapter_error'}` |
 
-## Production 安全邊界
+Repo tests：
 
-不得：
+- `venv/bin/pytest tests/test_web_gate.py`：23 passed
+- `venv/bin/pytest tests/test_web_gate.py tests/test_toolsets.py`：50 passed
+- `tests/hermes_cli/test_tools_config.py` 覆蓋 explicit web-only platform exposure
+- Combined platform/toolset/web_gate validation：159 passed
 
-- 修改 repo 外檔案
-- 修改 `~/.hermes/config.yaml`、`~/.hermes/.env` 或 `~/.hermes/auth.json`
-- 修改 credentials、Telegram token/channel/users
-- 讀取或修改 production audit logs
-- 啟停、重啟或重設 gateway
-- 在 production 啟用 browser/web/vision
-- 讀取、呼叫、修改或依賴 external gate project
-- hardcode external project path
+## Audit 與安全邊界
 
-後續仍須遵守 `AGENTS.md`：narrow core surface、fail-closed、非 secret 設定不得放入 `.env`，且不得新增 counts/snapshots 類 change-detector tests。
+- Hermes production audit logs：未修改
+- External project-local test audit log：有效 allow/deny evaluation 使用 `/home/cwliao/work/hermes-audit/url-wrapper-project/logs/test-telegram-policy-audit.log`
+- 未修改 credentials、`.env`、`auth.json`、Telegram settings 或 gateway state
+- Web capability rollout 已開始；browser/vision 應在 active platform config 移除後才算 deferred
+- External path 只在 non-secret `config.yaml`，未 hardcode 進 Hermes source
+
+Baseline ready 表示 Hermes 可由 active config 選擇 `subprocess_json`、呼叫 local CLI、保留原 target，並對 allow、policy deny 與 adapter failure 做 fail-closed 判定。Web toolset exposure 已具備並開始 rollout；強制所有 web-capable calls 經 gate、browser/vision rollout 仍刻意 deferred。

@@ -9,7 +9,7 @@ from typing import Dict, List, Any, Set, Optional, Tuple
 # (tui_gateway/server.py::_load_enabled_toolsets). HA, kanban and computer_use
 # entries are further gated by their tools' check_fns.
 _HERMES_CORE_TOOLS = [
-    "web_search", "web_extract",
+    "web_search", "web_extract", "web_gate",
     "terminal", "process_manage",
     "read_file", "write_file", "patch", "search_files",
     "vision_analyze", "image_generate",

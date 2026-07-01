@@ -6,8 +6,8 @@
 - External gate：`/home/cwliao/work/hermes-audit/url-wrapper-project`
 - `web_gate.v1`、repo-local wiring、`subprocess_json` 與 active config 已完成
 - Allow、deny、adapter-failure smoke tests 已通過
-- Actual `web` rollout 已開始；mandatory interception 尚未啟用
-- Browser 與 vision 的 rollout 決策仍 deferred
+- Actual `web`、`browser`、`vision` 已在 CLI 與 Telegram platform config 啟用
+- Mandatory interception 尚未啟用；toolset 變更應以 fresh session 驗證
 
 ## Hermes contract 與 wiring
 
@@ -40,13 +40,9 @@ platform bundle 的 subset resolution 能正確恢復 `web`。在
 
 Web-only selection 不會隱含啟用 `browser` 或 `vision`；behavior test 已覆蓋
 `web + terminal`，證明 unrelated `terminal` 保留，而
-`browser_navigate`、`vision_analyze` 不會出現。
-
-目前 active `platform_toolsets.cli` 與 `platform_toolsets.telegram` 仍同時列出
-`web`、`browser`、`vision`。因此 repo 已具備 web-only rollout 能力，但 active
-runtime 尚不是 web-only。若要符合本階段政策，仍需使用 `hermes tools` 或另行授權
-修改 `config.yaml`，在目標 platform 保留 `web` 並移除
-`browser`、`vision`。本次未修改 production config。
+`browser_navigate`、`vision_analyze` 不會出現。Current active
+`platform_toolsets.cli` 與 `platform_toolsets.telegram` 則依使用者決策明確列出
+`web`、`browser`、`vision`，三項 capability 均進入 runtime rollout。
 
 ## External CLI
 
@@ -95,12 +91,40 @@ Repo tests：
 - `tests/hermes_cli/test_tools_config.py` 覆蓋 explicit web-only platform exposure
 - Combined platform/toolset/web_gate validation：159 passed
 
+## Runtime 與 service 部署狀態
+
+- Rollout commit：`3240cdf33 Enable web_gate in the core web platform surface`
+- Commit 已 push 至 `origin/main`；working tree clean
+- Active profile：`/home/cwliao/.hermes/config.yaml`
+- Hermes secret file：`/home/cwliao/.hermes/.env`（mode 600）；`.hermes.env` 不存在
+- Telegram token 位於 `.env`，channel/routing config 保持不變
+- Local Ollama endpoint：`http://127.0.0.1:11434/v1`；API 可達且模型已偵測
+- User systemd unit `~/.config/systemd/user/hermes-gateway.service` 尚未建立、載入或啟動
+
+Canonical 下一步：
+
+```bash
+hermes gateway install --no-start-now --start-on-login
+systemctl --user cat hermes-gateway.service
+systemctl --user start hermes-gateway.service
+systemctl --user status hermes-gateway.service
+```
+
+Hermes canonical unit 會設 `HERMES_HOME=/home/cwliao/.hermes`、使用 repo venv，
+並由 Hermes loader 自行載入 `.env`；不需要在 unit hardcode secret 或
+`EnvironmentFile`。啟動 service 前須確認沒有 manual gateway process。
+
+Config health audit：YAML 可解析，`terminal.cwd` 已在 `config.yaml`；local Ollama
+使用 `model.provider=custom` 與 localhost base URL。`.env` 仍混有 behavior/debug
+設定，例如 web-disable、browser/terminal timeout 與 tool debug flags；這些應逐項移至
+既有 `config.yaml` keys。Provider keys 與 `TELEGRAM_BOT_TOKEN` 留在 `.env` 是正確的。
+
 ## Audit 與安全邊界
 
 - Hermes production audit logs：未修改
 - External project-local test audit log：有效 allow/deny evaluation 使用 `/home/cwliao/work/hermes-audit/url-wrapper-project/logs/test-telegram-policy-audit.log`
 - 未修改 credentials、`.env`、`auth.json`、Telegram settings 或 gateway state
-- Web capability rollout 已開始；browser/vision 應在 active platform config 移除後才算 deferred
+- Web、browser、vision rollout 已依 active platform config 開始
 - External path 只在 non-secret `config.yaml`，未 hardcode 進 Hermes source
 
-Baseline ready 表示 Hermes 可由 active config 選擇 `subprocess_json`、呼叫 local CLI、保留原 target，並對 allow、policy deny 與 adapter failure 做 fail-closed 判定。Web toolset exposure 已具備並開始 rollout；強制所有 web-capable calls 經 gate、browser/vision rollout 仍刻意 deferred。
+Baseline ready 表示 Hermes 可由 active config 選擇 `subprocess_json`、呼叫 local CLI、保留原 target，並對 allow、policy deny 與 adapter failure 做 fail-closed 判定。Web、browser、vision 已在 CLI/Telegram rollout；強制所有 web-capable calls 經 gate 仍刻意 deferred。Systemd-managed gateway 是下一個尚未完成的 deployment step。

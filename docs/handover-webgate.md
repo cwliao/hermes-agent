@@ -3,11 +3,14 @@
 ## Baseline 狀態
 
 - Hermes repo：`~/.hermes/hermes-agent`，branch `main`
+- Current main includes latest fetched upstream merge `9c69b43a6b`
 - External gate：`/home/cwliao/work/hermes-audit/url-wrapper-project`
 - `web_gate.v1`、repo-local wiring、`subprocess_json` 與 active config 已完成
 - Allow、deny、adapter-failure smoke tests 已通過
 - Actual `web`、`browser`、`vision` 已在 CLI 與 Telegram platform config 啟用
 - Mandatory interception 尚未啟用；toolset 變更應以 fresh session 驗證
+- User-level `hermes-gateway.service` 已建立並啟用；gateway 目前由 systemd user
+  service 管理
 
 ## Hermes contract 與 wiring
 
@@ -90,34 +93,65 @@ Repo tests：
 - `venv/bin/pytest tests/test_web_gate.py tests/test_toolsets.py`：50 passed
 - `tests/hermes_cli/test_tools_config.py` 覆蓋 explicit web-only platform exposure
 - Combined platform/toolset/web_gate validation：159 passed
+- Upstream integration focused set after merge：159 passed
+- Full `scripts/run_tests.sh` after upstream merge：36,852 passed，10 unrelated
+  host/config-dependent failures（vision/provider/model-switch surfaces；非 web_gate）
 
 ## Runtime 與 service 部署狀態
 
-- Rollout commit：`3240cdf33 Enable web_gate in the core web platform surface`
-- Commit 已 push 至 `origin/main`；working tree clean
+- Current main：`9c69b43a6b`，已 push 至 `origin/main`；working tree clean
 - Active profile：`/home/cwliao/.hermes/config.yaml`
 - Hermes secret file：`/home/cwliao/.hermes/.env`（mode 600）；`.hermes.env` 不存在
-- Telegram token 位於 `.env`，channel/routing config 保持不變
-- Local Ollama endpoint：`http://127.0.0.1:11434/v1`；API 可達且模型已偵測
-- User systemd unit `~/.config/systemd/user/hermes-gateway.service` 尚未建立、載入或啟動
-
-Canonical 下一步：
+- Config file：`/home/cwliao/.hermes/config.yaml`（mode 600），已 migrate 至
+  `_config_version: 32`
+- Local Ollama endpoint：`http://127.0.0.1:11434/v1`；API 可達，最近驗證 9 models
+- User systemd unit：`~/.config/systemd/user/hermes-gateway.service`
+  - `ExecStart=/home/cwliao/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run`
+  - `WorkingDirectory=/home/cwliao/.hermes`
+  - `HERMES_HOME=/home/cwliao/.hermes`
+  - service 已 enable 且 restart 後 active
+- 管理 gateway 時優先使用：
 
 ```bash
-hermes gateway install --no-start-now --start-on-login
-systemctl --user cat hermes-gateway.service
-systemctl --user start hermes-gateway.service
+systemctl --user restart hermes-gateway.service
 systemctl --user status hermes-gateway.service
+journalctl --user-unit hermes-gateway.service -f
 ```
 
-Hermes canonical unit 會設 `HERMES_HOME=/home/cwliao/.hermes`、使用 repo venv，
-並由 Hermes loader 自行載入 `.env`；不需要在 unit hardcode secret 或
-`EnvironmentFile`。啟動 service 前須確認沒有 manual gateway process。
+Prompt/toolset changes still require fresh CLI/Telegram sessions because
+conversation prompt/tool schema prefixes may be cached.
 
-Config health audit：YAML 可解析，`terminal.cwd` 已在 `config.yaml`；local Ollama
-使用 `model.provider=custom` 與 localhost base URL。`.env` 仍混有 behavior/debug
-設定，例如 web-disable、browser/terminal timeout 與 tool debug flags；這些應逐項移至
-既有 `config.yaml` keys。Provider keys 與 `TELEGRAM_BOT_TOKEN` 留在 `.env` 是正確的。
+Config/security health baseline：
+
+- `approvals.destructive_slash_confirm: true` 是 intended hardened setting；
+  使用者在 Telegram 按「Always Approve」會再次把它改回 `false`。
+- `skills.guard_agent_created: true`
+- Tirith installed at `/home/cwliao/.hermes/bin/tirith`，version `0.3.1`
+- `security.tirith_fail_open: false`（Tirith unavailable 時 fail closed）
+- `.env` cleanup 已移除 stale/non-secret overrides：
+  `TERMINAL_ENV`、`TERMINAL_TIMEOUT`、`TERMINAL_LIFETIME_SECONDS`、
+  `TERMINAL_MODAL_IMAGE`、tool debug flags、`BROWSER_SESSION_TIMEOUT`、
+  `HERMES_DISABLE_WEB_TOOLS`
+- `terminal.timeout: 60` 與 `terminal.lifetime_seconds: 300` 已保留在
+  `config.yaml`
+- `.env` typo corrected：`TAVILI_API_KEY` → `TAVILY_API_KEY`
+- Browserbase compatibility envs (`BROWSERBASE_PROXIES`,
+  `BROWSERBASE_ADVANCED_STEALTH`) remain in `.env` because current provider code
+  still reads them directly and no YAML bridge exists yet.
+- Provider keys and `TELEGRAM_BOT_TOKEN` remain in `.env` as secrets.
+
+Telegram channel note：
+
+- Hermes has successfully used Telegram chat id `-1003954447810`.
+- Previous startup notification failed because `TELEGRAM_HOME_CHANNEL` was
+  `-3954447810`, missing the `-100` supergroup/channel prefix.
+- Intended home-channel value should be:
+
+```env
+TELEGRAM_HOME_CHANNEL=-1003954447810
+```
+
+Do not change Telegram token/user allowlist values unless explicitly requested.
 
 ## Audit 與安全邊界
 
@@ -127,4 +161,4 @@ Config health audit：YAML 可解析，`terminal.cwd` 已在 `config.yaml`；loc
 - Web、browser、vision rollout 已依 active platform config 開始
 - External path 只在 non-secret `config.yaml`，未 hardcode 進 Hermes source
 
-Baseline ready 表示 Hermes 可由 active config 選擇 `subprocess_json`、呼叫 local CLI、保留原 target，並對 allow、policy deny 與 adapter failure 做 fail-closed 判定。Web、browser、vision 已在 CLI/Telegram rollout；強制所有 web-capable calls 經 gate 仍刻意 deferred。Systemd-managed gateway 是下一個尚未完成的 deployment step。
+Baseline ready 表示 Hermes 可由 active config 選擇 `subprocess_json`、呼叫 local CLI、保留原 target，並對 allow、policy deny 與 adapter failure 做 fail-closed 判定。Web、browser、vision 已在 CLI/Telegram rollout；強制所有 web-capable calls 經 gate 仍刻意 deferred。Systemd-managed gateway 已建立並由 user service 管理。

@@ -48,13 +48,15 @@ _ensure_telegram_mock()
 from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
 
 
-def _make_adapter(dm_topics_config=None, group_topics_config=None):
+def _make_adapter(dm_topics_config=None, group_topics_config=None, channel_skill_bindings=None):
     """Create a TelegramAdapter with optional DM/group topics config."""
     extra = {}
     if dm_topics_config is not None:
         extra["dm_topics"] = dm_topics_config
     if group_topics_config is not None:
         extra["group_topics"] = group_topics_config
+    if channel_skill_bindings is not None:
+        extra["channel_skill_bindings"] = channel_skill_bindings
     config = PlatformConfig(enabled=True, token="***", extra=extra)
     adapter = TelegramAdapter(config)
     return adapter
@@ -672,6 +674,28 @@ def test_build_message_event_preserves_true_dm_topic_thread_id():
 # telegram_mod.ChatType — not telegram_mod.constants.ChatType.  We must use
 # the same ChatType object the production code sees so equality checks work.
 from telegram.constants import ChatType as _ChatType  # noqa: E402
+
+
+def test_group_channel_skill_binding_without_topic():
+    """Regular supergroup messages can auto-load skills by chat id."""
+    from gateway.platforms.base import MessageType
+
+    adapter = _make_adapter(channel_skill_bindings=[
+        {"id": "-1004391006048", "skills": ["google-workspace"]},
+    ])
+
+    msg = _make_mock_message(
+        chat_id=-1004391006048,
+        chat_type=_ChatType.SUPERGROUP,
+        thread_id=None,
+        text="tell me tomorrow's schedule",
+        is_topic_message=False,
+        is_forum=False,
+    )
+    event = adapter._build_message_event(msg, MessageType.TEXT)
+
+    assert event.auto_skill == ["google-workspace"]
+    assert event.source.thread_id is None
 
 
 def test_group_topic_skill_binding():

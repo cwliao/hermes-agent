@@ -7929,6 +7929,15 @@ class TelegramAdapter(BasePlatformAdapter):
                             break
                     break
 
+        if topic_skill is None:
+            from gateway.platforms.base import resolve_channel_skills
+
+            topic_skill = resolve_channel_skills(
+                self.config.extra,
+                thread_id_str or str(chat.id),
+                str(chat.id) if thread_id_str else None,
+            )
+
         # Build source
         source = self.build_source(
             chat_id=str(chat.id),

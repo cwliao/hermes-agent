@@ -63,6 +63,11 @@ message; `hermes send` returned `sent`.
 The SPARK market report is implemented as no-agent Hermes cron jobs so the
 script stdout is delivered directly to Telegram without an LLM call.
 
+This Hermes install uses the native scheduler store at
+`~/.hermes/cron/jobs.json`. It does not use a traditional
+`~/.hermes/cron/crontab` file, and older one-shot setup snippets that write a
+`crontab` file should not be used on this host.
+
 Scripts live under `~/.hermes/scripts/`:
 
 ```text
@@ -72,8 +77,8 @@ taiex_0050_report_open.sh    # wrapper: open
 taiex_0050_report_close.sh   # wrapper: close
 ```
 
-Hermes cron only accepts script filenames from `~/.hermes/scripts/`; do not
-schedule absolute script paths. It also does not pass arbitrary trailing
+Hermes cron resolves relative script names under `~/.hermes/scripts/` and
+rejects scripts outside that directory. It also does not pass arbitrary trailing
 arguments to `--script`, so wrapper scripts are used for the three report modes.
 
 Active jobs:
@@ -84,12 +89,19 @@ Active jobs:
 40 13 * * 1-5   TAIEX 0050 close report to SPARK   -> telegram:-1004391006048
 ```
 
+There are three jobs, not four: the hourly job covers each whole hour from
+09:00 through 13:00 with one cron expression.
+
 Check status:
 
 ```bash
 hermes cron list
 hermes cron status
 ```
+
+There is no `hermes cron reload` command in this runtime. The built-in ticker
+re-reads `jobs.json` on each tick; after editing jobs through `hermes cron`, use
+`hermes cron status` to verify the gateway ticker is alive.
 
 Manual non-delivery test:
 

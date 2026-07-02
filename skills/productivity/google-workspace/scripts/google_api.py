@@ -41,6 +41,7 @@ from _hermes_home import get_hermes_home
 HERMES_HOME = get_hermes_home()
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
+DEFAULT_CALENDAR_ID = "primary"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -77,6 +78,25 @@ def _stored_token_scopes() -> list[str]:
     if isinstance(scopes, list) and scopes:
         return scopes
     return list(SCOPES)
+
+
+def _google_workspace_config() -> dict:
+    config_path = HERMES_HOME / "config.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text()) or {}
+    except Exception:
+        return {}
+    cfg = data.get("google_workspace")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _default_calendar_id() -> str:
+    value = str(_google_workspace_config().get("default_calendar", "")).strip()
+    return value or DEFAULT_CALENDAR_ID
 
 
 def _gws_binary() -> str | None:
@@ -1101,7 +1121,7 @@ def main():
     p.add_argument("--start", default="", help="Start time (ISO 8601)")
     p.add_argument("--end", default="", help="End time (ISO 8601)")
     p.add_argument("--max", type=int, default=25)
-    p.add_argument("--calendar", default="primary")
+    p.add_argument("--calendar", default=_default_calendar_id())
     p.set_defaults(func=calendar_list)
 
     p = cal_sub.add_parser("create")
@@ -1111,12 +1131,12 @@ def main():
     p.add_argument("--location", default="")
     p.add_argument("--description", default="")
     p.add_argument("--attendees", default="", help="Comma-separated email addresses")
-    p.add_argument("--calendar", default="primary")
+    p.add_argument("--calendar", default=_default_calendar_id())
     p.set_defaults(func=calendar_create)
 
     p = cal_sub.add_parser("delete")
     p.add_argument("event_id")
-    p.add_argument("--calendar", default="primary")
+    p.add_argument("--calendar", default=_default_calendar_id())
     p.set_defaults(func=calendar_delete)
 
     # --- Drive ---

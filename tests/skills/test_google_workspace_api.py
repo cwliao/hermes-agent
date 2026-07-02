@@ -175,6 +175,18 @@ def test_bridge_main_injects_token_env(bridge_module, tmp_path):
     assert captured["cmd"] == ["gws", "gmail", "+triage"]
 
 
+
+def test_api_default_calendar_reads_config(api_module):
+    config_path = api_module.HERMES_HOME / "config.yaml"
+    config_path.write_text("google_workspace:\n  default_calendar: cwliao.itri@gmail.com\n")
+
+    assert api_module._default_calendar_id() == "cwliao.itri@gmail.com"
+
+
+def test_api_default_calendar_falls_back_to_primary(api_module):
+    assert api_module._default_calendar_id() == "primary"
+
+
 def test_api_calendar_list_uses_events_list(api_module):
     """calendar_list calls _run_gws with events list + params."""
     captured = {}

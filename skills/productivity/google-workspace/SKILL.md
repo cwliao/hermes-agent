@@ -28,7 +28,7 @@ Gmail, Calendar, Drive, Contacts, Sheets, and Docs — through Hermes-managed OA
 ## Scripts
 
 - `scripts/setup.py` — OAuth2 setup (run once to authorize)
-- `scripts/google_api.py` — compatibility wrapper CLI. It prefers `gws` for operations when available, while preserving Hermes' existing JSON output contract.
+- `scripts/google_api.py` — required compatibility wrapper CLI. Always invoke this script for Google Workspace operations. It may use `gws` internally when available, but `gws` is optional and its absence is not an error.
 
 ## First-Time Setup
 
@@ -166,7 +166,7 @@ Should print `AUTHENTICATED`. Setup is complete — token refreshes automaticall
 
 ## Usage
 
-All commands go through the API script. Set `GAPI` as a shorthand:
+All commands must go through the API script. Do not call `gws` directly and do not tell the user to install `gws` just because it is missing; `google_api.py` includes the Python fallback used by this Hermes install. Set `GAPI` as a shorthand:
 
 ```bash
 GAPI="python ${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
@@ -310,12 +310,13 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 ## Rules
 
-1. **Default Calendar posture: read-first, create-with-confirmation, avoid delete.** Calendar use should primarily be lookup/listing. Creating calendar events is allowed only after confirming the exact title, date, time, timezone, calendar, attendees, location, and description. Do not delete calendar events as a normal workflow. If the user asks to cancel/remove/delete an event, prefer explaining the matched event(s) and asking them to delete manually. Only run `calendar delete` when the user gives an explicit, unambiguous delete instruction for a specific event ID after seeing the event details.
-2. **Never send email, create calendar events, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
-3. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
-4. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
-5. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
-6. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
+1. **Use the bundled wrapper, not raw `gws`.** Always run Google Workspace actions through `${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py`. A missing `gws` binary is not a blocker because the wrapper falls back to Google Python client libraries.
+2. **Default Calendar posture: read-first, create-with-confirmation, avoid delete.** Calendar use should primarily be lookup/listing. Creating calendar events is allowed only after confirming the exact title, date, time, timezone, calendar, attendees, location, and description. Do not delete calendar events as a normal workflow. If the user asks to cancel/remove/delete an event, prefer explaining the matched event(s) and asking them to delete manually. Only run `calendar delete` when the user gives an explicit, unambiguous delete instruction for a specific event ID after seeing the event details.
+3. **Never send email, create calendar events, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
+4. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
+5. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
+6. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
+7. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
 
 ## Troubleshooting
 

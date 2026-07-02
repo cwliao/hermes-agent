@@ -8,6 +8,18 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 
 所有变量均写入 `~/.hermes/.env`。也可以使用 `hermes config set VAR value` 进行设置。
 
+## TLS / CA 证书包
+
+| 变量 | 说明 |
+|----------|-------------|
+| `HERMES_CA_BUNDLE` | Hermes 专用的自定义 CA bundle 路径。仅 Hermes 需要使用托管、企业或主机提供的 PEM 信任存储时优先使用。 |
+| `SSL_CERT_FILE` | 标准 OpenSSL/Python CA bundle 覆盖项。在 Linux 上可指向 `/etc/ssl/certs/ca-certificates.crt`，用于 bundled Python `certifi` 无法验证当前网络路径的场景。 |
+| `REQUESTS_CA_BUNDLE` | `requests` 使用的 CA bundle 覆盖项，包括 web tool provider 和模型 metadata 查询。通常与 `SSL_CERT_FILE` 使用同一路径。 |
+| `CURL_CA_BUNDLE` | curl 兼容工具和部分 Python HTTP stack 使用的 CA bundle 覆盖项。通常与 `SSL_CERT_FILE` 使用同一路径。 |
+| `HERMES_SKIP_SSL_GUARD` | 仅在托管信任环境中确认 SSL guard 过于严格时设为 `1`，用于绕过 Hermes CA bundle 预检诊断。 |
+
+Linux user-level gateway service 建议使用 systemd drop-in，例如 `~/.config/systemd/user/hermes-gateway.service.d/ssl-ca.conf`，不要直接编辑生成出来的 `hermes-gateway.service`；gateway install/status 流程可能刷新主 unit。Docker container 则应把主机 CA bundle 以 read-only mount 方式挂入 container，并在 container 内设置相同 CA 变量。
+
 ## LLM 提供商
 
 | 变量 | 描述 |

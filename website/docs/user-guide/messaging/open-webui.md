@@ -83,6 +83,19 @@ docker run -d -p 3000:8080 \
 
 `ENABLE_OLLAMA_API=false` suppresses the default Ollama backend, which would otherwise show up empty and clutter the model picker. Omit it if you actually have Ollama running alongside.
 
+:::tip Managed host CA bundles
+If Open WebUI runs on a managed Linux host whose outbound HTTPS path requires the host trust store, mount the host CA bundle and set the common CA variables:
+
+```bash
+  -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+  -e REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+  -e CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+  -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro \
+```
+
+This is useful after OS or DGX Spark updates when the host CA store is correct but the container image still uses a stale bundled CA store.
+:::
+
 First launch takes 15–30 seconds: Open WebUI downloads sentence-transformer embedding models (~150MB) the first time it starts. Wait for `docker logs open-webui` to settle before opening the UI.
 
 ### 5. Open the UI
@@ -101,10 +114,16 @@ services:
       - "3000:8080"
     volumes:
       - open-webui:/app/backend/data
+      # Optional on managed hosts: use the host trust store for outbound HTTPS.
+      # - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
     environment:
       - OPENAI_API_BASE_URL=http://host.docker.internal:8642/v1
       - OPENAI_API_KEY=your-secret-key
       - ENABLE_OLLAMA_API=false
+      # Optional on managed hosts with custom/intercepting CA chains:
+      # - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+      # - REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      # - CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always

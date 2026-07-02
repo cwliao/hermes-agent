@@ -6274,6 +6274,16 @@ class TelegramAdapter(BasePlatformAdapter):
             user_name = chat.full_name
         else:
             user_name = chat.title if chat_type == "channel" else None
+
+        if topic_skill is None:
+            from gateway.platforms.base import resolve_channel_skills
+
+            topic_skill = resolve_channel_skills(
+                self.config.extra,
+                thread_id_str or str(chat.id),
+                str(chat.id) if thread_id_str else None,
+            )
+
         source = self.build_source(
             chat_id=str(chat.id), chat_name=chat.title or (chat.full_name if has_full_name else None), chat_type=chat_type,
             user_id=(str(user.id) if user else (str(chat.id) if chat_type in {"dm", "channel"} else None)),

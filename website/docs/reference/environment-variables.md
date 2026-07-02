@@ -8,6 +8,18 @@ description: "Complete reference of all environment variables used by Hermes Age
 
 Hermes reads environment variables from the process environment and, for user-managed secrets, from `~/.hermes/.env`. Keep API keys, bot tokens, OAuth secrets, and other credentials in `.env`; prefer `config.yaml` for non-secret behaviour settings when a config key exists. Some variables below are process-only overrides or internal bridge variables and should not be committed to `.env` just because they are documented here.
 
+## TLS / CA Bundles
+
+| Variable | Description |
+|----------|-------------|
+| `HERMES_CA_BUNDLE` | Hermes-specific custom CA bundle path. Preferred when only Hermes should use a managed, corporate, or host-provided PEM trust store. |
+| `SSL_CERT_FILE` | Standard OpenSSL/Python CA bundle override. Use a real PEM bundle such as `/etc/ssl/certs/ca-certificates.crt` on Linux when the bundled Python `certifi` store cannot validate your network path. |
+| `REQUESTS_CA_BUNDLE` | CA bundle override honored by `requests`, including web-tool providers and model metadata lookups. Often set to the same path as `SSL_CERT_FILE`. |
+| `CURL_CA_BUNDLE` | CA bundle override honored by curl-compatible tooling and some Python HTTP stacks. Often set to the same path as `SSL_CERT_FILE`. |
+| `HERMES_SKIP_SSL_GUARD` | Set to `1` only to bypass Hermes' CA-bundle preflight diagnostics in managed-trust environments where the guard is known to be too strict. |
+
+For user-level Linux gateway services, prefer a systemd drop-in such as `~/.config/systemd/user/hermes-gateway.service.d/ssl-ca.conf` over editing the generated `hermes-gateway.service` directly; gateway install/status flows may refresh the main unit. For Docker containers, mount the host CA bundle into the container read-only and set the same CA variables inside the container.
+
 ## LLM Providers
 
 | Variable | Description |

@@ -83,6 +83,19 @@ docker run -d -p 3000:8080 \
 
 `ENABLE_OLLAMA_API=false` 会禁用默认的 Ollama 后端，否则它会显示为空并干扰模型选择器。如果你确实在同时运行 Ollama，可以省略此参数。
 
+:::tip 托管主机 CA bundle
+如果 Open WebUI 运行在托管 Linux 主机上，且出站 HTTPS 路径需要使用主机信任存储，请挂载主机 CA bundle 并设置常见 CA 变量：
+
+```bash
+  -e SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+  -e REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+  -e CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+  -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro \
+```
+
+这适用于 OS 或 DGX Spark 更新后，主机 CA store 已正确，但 container image 仍使用旧 bundled CA store 的情况。
+:::
+
 首次启动需要 15–30 秒：Open WebUI 在第一次启动时会下载 sentence-transformer embedding（嵌入）模型（约 150MB）。请等待 `docker logs open-webui` 输出稳定后再打开 UI。
 
 ### 5. 打开 UI
@@ -101,10 +114,16 @@ services:
       - "3000:8080"
     volumes:
       - open-webui:/app/backend/data
+      # 托管主机可选：使用主机信任存储处理出站 HTTPS。
+      # - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
     environment:
       - OPENAI_API_BASE_URL=http://host.docker.internal:8642/v1
       - OPENAI_API_KEY=your-secret-key
       - ENABLE_OLLAMA_API=false
+      # 使用自定义或拦截式 CA chain 的托管主机可选：
+      # - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+      # - REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      # - CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always

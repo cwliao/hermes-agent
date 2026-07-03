@@ -84,13 +84,31 @@ arguments to `--script`, so wrapper scripts are used for the three report modes.
 Active jobs:
 
 ```text
-0 9-13 * * 1-5  TAIEX 0050 hourly report to SPARK  -> telegram:-1004391006048
-5 9 * * 1-5     TAIEX 0050 open report to SPARK    -> telegram:-1004391006048
-40 13 * * 1-5   TAIEX 0050 close report to SPARK   -> telegram:-1004391006048
+0,30 9-13 * * 1-5  TAIEX 0050 market snapshot to SPARK -> telegram:-1004391006048
+5 9 * * 1-5        TAIEX 0050 open report to SPARK      -> telegram:-1004391006048
+40 13 * * 1-5      TAIEX 0050 close report to SPARK     -> telegram:-1004391006048
 ```
 
-There are three jobs, not four: the hourly job covers each whole hour from
-09:00 through 13:00 with one cron expression.
+There are three jobs, not four: the market snapshot job covers both whole-hour
+and half-hour reports from 09:00 through 13:30 with one cron expression.
+
+The market snapshot is intentionally a `--no-agent` script job. It does not use
+skills, so Telegram readability must be improved in
+`taiex_0050_report.sh` itself. The current output is a compact
+Telegram-friendly block:
+
+```text
+📊 台股盤中快照
+2026-07-03 11:17 Asia/Taipei
+
+🔴 台灣加權指數 TAIEX
+   現價 46410.09｜漲跌 -334.07 (-0.71%)
+   前收 46744.16｜資料 11:17:15｜量 N/A
+
+⚪ 元大台灣50 ETF 0050
+   現價 108.8000｜漲跌 +0.00 (+0.00%)
+   前收 108.8000｜資料 11:17:19｜量 48136
+```
 
 Check status:
 
@@ -114,6 +132,35 @@ Manual delivery test to SPARK:
 ```bash
 hermes send --to telegram:-1004391006048 "$("$HOME/.hermes/scripts/taiex_0050_report.sh" normal)"
 ```
+
+## Ollama / GPU health guard
+
+Ollama and GPU health are watched by a no-agent Hermes cron job:
+
+```text
+0 * * * *  Ollama GPU health guard  -> telegram:-1004391006048
+```
+
+Runtime script:
+
+```bash
+~/.hermes/scripts/hermes_ollama_gpu_guard.sh
+```
+
+The guard checks:
+
+- Ollama API at `http://127.0.0.1:11434/api/version`
+- an `ollama serve` process
+- `nvidia-smi`
+- GPU temperature, with the default alert threshold at 90 C
+
+Healthy runs are silent. On failure, the script sends a SPARK alert and tries to
+restart Ollama. Current operational caveat: Ollama was observed running as a
+root-owned manual process (`/bin/ollama serve`) rather than a systemd service,
+and non-interactive `sudo` is not available for the Hermes cron user. Until
+Ollama is moved to a managed service or granted a narrow NOPASSWD restart rule,
+the guard can reliably detect and alert, but may not be able to restart a
+root-owned Ollama process.
 
 ## docagent
 

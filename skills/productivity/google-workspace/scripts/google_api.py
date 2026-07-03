@@ -99,6 +99,36 @@ def _default_calendar_id() -> str:
     return value or DEFAULT_CALENDAR_ID
 
 
+def _allowed_calendar_ids() -> set[str]:
+    cfg = _google_workspace_config()
+    raw = cfg.get("allowed_calendars")
+    if isinstance(raw, str):
+        allowed = {raw.strip()} if raw.strip() else set()
+    elif isinstance(raw, list):
+        allowed = {str(item).strip() for item in raw if str(item).strip()}
+    else:
+        allowed = set()
+
+    default = _default_calendar_id()
+    if allowed:
+        return allowed
+    return {default} if default else {DEFAULT_CALENDAR_ID}
+
+
+def _validate_calendar_id(calendar_id: str) -> str:
+    calendar_id = str(calendar_id or "").strip() or _default_calendar_id()
+    allowed = _allowed_calendar_ids()
+    if calendar_id not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        print(
+            f"CALENDAR_NOT_ALLOWED: {calendar_id!r} is not allowed. "
+            f"Configured google_workspace.allowed_calendars: {allowed_text}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return calendar_id
+
+
 def _gws_binary() -> str | None:
     override = os.getenv("HERMES_GWS_BIN")
     if override:
@@ -482,6 +512,7 @@ def gmail_modify(args):
 
 
 def calendar_list(args):
+    args.calendar = _validate_calendar_id(args.calendar)
     now = datetime.now(timezone.utc)
     time_min = _datetime_with_timezone(args.start or now.isoformat())
     time_max = _datetime_with_timezone(args.end or (now + timedelta(days=7)).isoformat())
@@ -536,6 +567,7 @@ def calendar_list(args):
 
 
 def calendar_create(args):
+    args.calendar = _validate_calendar_id(args.calendar)
     event = {
         "summary": args.summary,
         "start": {"dateTime": args.start},
@@ -574,6 +606,7 @@ def calendar_create(args):
 
 
 def calendar_delete(args):
+    args.calendar = _validate_calendar_id(args.calendar)
     if _gws_binary():
         _run_gws(["calendar", "events", "delete"], params={"calendarId": args.calendar, "eventId": args.event_id})
         print(json.dumps({"status": "deleted", "eventId": args.event_id}))

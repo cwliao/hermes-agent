@@ -187,6 +187,38 @@ def test_api_default_calendar_falls_back_to_primary(api_module):
     assert api_module._default_calendar_id() == "primary"
 
 
+def test_api_allowed_calendars_reads_config(api_module):
+    config_path = api_module.HERMES_HOME / "config.yaml"
+    config_path.write_text(
+        "google_workspace:\n"
+        "  default_calendar: cwliao.itri@gmail.com\n"
+        "  allowed_calendars:\n"
+        "    - cwliao.itri@gmail.com\n"
+    )
+
+    assert api_module._allowed_calendar_ids() == {"cwliao.itri@gmail.com"}
+
+
+def test_api_calendar_list_rejects_disallowed_calendar(api_module):
+    config_path = api_module.HERMES_HOME / "config.yaml"
+    config_path.write_text(
+        "google_workspace:\n"
+        "  default_calendar: cwliao.itri@gmail.com\n"
+        "  allowed_calendars:\n"
+        "    - cwliao.itri@gmail.com\n"
+    )
+    args = api_module.argparse.Namespace(
+        start="", end="", max=25, calendar="primary", func=api_module.calendar_list,
+    )
+
+    with patch.object(api_module, "_run_gws") as mocked_run:
+        with pytest.raises(SystemExit) as exc_info:
+            api_module.calendar_list(args)
+
+    assert exc_info.value.code == 2
+    mocked_run.assert_not_called()
+
+
 def test_api_calendar_list_uses_events_list(api_module):
     """calendar_list calls _run_gws with events list + params."""
     captured = {}

@@ -316,9 +316,10 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 3. **Never send email, create calendar events, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
 4. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
 5. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
-6. **Calendar default** — when `--calendar` is omitted, `google_api.py` uses `google_workspace.default_calendar` from `~/.hermes/config.yaml` and falls back to `primary` only if unset. On Keven's DGX Spark profile, the default is `cwliao.itri@gmail.com` (`ITRI Keven`).
-7. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
-8. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
+6. **Calendar default and allowlist** — when `--calendar` is omitted, `google_api.py` uses `google_workspace.default_calendar` from `~/.hermes/config.yaml` and falls back to `primary` only if unset. On Keven's DGX Spark profile, the default and only allowed calendar is `cwliao.itri@gmail.com` (`ITRI Keven`). Do not enumerate, inspect, or switch to other calendars unless the user explicitly asks and the calendar is already present in `google_workspace.allowed_calendars`; otherwise the wrapper rejects it.
+7. **Calendar data source** — never use web search, browser inspection, Gmail, memory, or guessed context to answer schedule/calendar questions. Use only `$GAPI calendar list` for reads and report inability if that tool cannot answer. Do not invent calendar names, accounts, event titles, dates, or times.
+8. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`). Resolve relative dates in Asia/Taipei and state the concrete date used.
+9. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
 
 ## Troubleshooting
 

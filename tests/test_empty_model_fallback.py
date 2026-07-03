@@ -157,3 +157,12 @@ class TestResolveGatewayModel:
     def test_string_model_config(self):
         from gateway.run import _resolve_gateway_model
         assert _resolve_gateway_model({"model": "my-model"}) == "my-model"
+
+    def test_forbidden_default_model_falls_back(self):
+        from gateway.run import _resolve_gateway_model
+        assert _resolve_gateway_model({
+            "model": {
+                "default": "llama3.3:70b",
+                "forbidden": ["llama3.3:70b"],
+            }
+        }) == "ornith:9b"

@@ -2290,6 +2290,18 @@ def _load_gateway_runtime_config() -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
+def _gateway_forbidden_models(cfg: dict) -> set[str]:
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    raw = model_cfg.get("forbidden") if isinstance(model_cfg, dict) else None
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        values = []
+    return {str(value).strip().lower() for value in values if str(value).strip()}
+
+
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from config.yaml — single source of truth.
 
@@ -2300,10 +2312,20 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     cfg = config if config is not None else _load_gateway_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, str):
-        return model_cfg
+        model = model_cfg
     elif isinstance(model_cfg, dict):
-        return model_cfg.get("default") or model_cfg.get("model") or ""
-    return ""
+        model = model_cfg.get("default") or model_cfg.get("model") or ""
+    else:
+        model = ""
+    if model and str(model).strip().lower() in _gateway_forbidden_models(cfg):
+        fallback = "ornith:9b"
+        logger.warning(
+            "Configured gateway model %r is forbidden by model.forbidden; using %r",
+            model,
+            fallback,
+        )
+        return fallback
+    return model
 
 
 def _channel_override_lookup_keys(

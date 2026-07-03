@@ -52,6 +52,30 @@ _UNCAPPED_PICKER_PROVIDERS: frozenset[str] = frozenset({"opencode-zen", "opencod
 logger = logging.getLogger(__name__)
 
 
+def _forbidden_models_from_config() -> set[str]:
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config() or {}
+    except Exception:
+        cfg = {}
+    model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
+    raw = model_cfg.get("forbidden") if isinstance(model_cfg, dict) else None
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        values = []
+    return {str(value).strip().lower() for value in values if str(value).strip()}
+
+
+def _forbidden_model_message(model: str) -> str | None:
+    if str(model or "").strip().lower() in _forbidden_models_from_config():
+        return f"Model `{model}` is forbidden by config.yaml model.forbidden."
+    return None
+
+
 def _bare_custom_provider_def(current_base_url: str) -> Optional[ProviderDef]:
     """ProviderDef for a direct ``model.provider: custom`` endpoint."""
     base_url = str(current_base_url or "").strip()
@@ -814,6 +838,17 @@ def switch_model(
     target_provider = current_provider
     resolved_moa_preset = False
 
+    if new_model:
+        forbidden_error = _forbidden_model_message(new_model)
+        if forbidden_error:
+            return ModelSwitchResult(
+                success=False,
+                new_model=new_model,
+                target_provider=target_provider,
+                is_global=is_global,
+                error_message=forbidden_error,
+            )
+
     # =================================================================
     # PATH A: Explicit --provider given
     # =================================================================
@@ -1217,6 +1252,16 @@ def switch_model(
 
     # --- Normalize model name for target provider ---
     new_model = normalize_model_for_provider(new_model, target_provider)
+    forbidden_error = _forbidden_model_message(new_model)
+    if forbidden_error:
+        return ModelSwitchResult(
+            success=False,
+            new_model=new_model,
+            target_provider=target_provider,
+            provider_label=provider_label,
+            is_global=is_global,
+            error_message=forbidden_error,
+        )
 
     # --- Validate ---
     try:

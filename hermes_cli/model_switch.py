@@ -84,6 +84,25 @@ def _models_config_is_allowlist(value: Any, discovered: bool = False) -> bool:
     return False  # None, dict (per-model metadata), or anything else
 
 
+def _forbidden_models_from_config() -> set[str]:
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config() or {}
+    except Exception:
+        cfg = {}
+    model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
+    raw = model_cfg.get("forbidden") if isinstance(model_cfg, dict) else None
+    values = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    return {str(value).strip().lower() for value in values if str(value).strip()}
+
+
+def _forbidden_model_message(model: str) -> str | None:
+    if str(model or "").strip().lower() in _forbidden_models_from_config():
+        return f"Model `{model}` is forbidden by config.yaml model.forbidden."
+    return None
+
+
 def _bare_custom_provider_def(current_base_url: str) -> Optional[ProviderDef]:
     """ProviderDef for a direct ``model.provider: custom`` endpoint."""
     base_url = _clean(current_base_url)
@@ -1348,6 +1367,15 @@ def _validate_switch(st: _Switch) -> Optional[ModelSwitchResult]:
     st.new_model = _resolve_named_custom_model_id(st.new_model, st.target_provider, st.custom_providers)
     st.new_model = normalize_model_for_provider(st.new_model, st.target_provider)
 
+    forbidden_error = _forbidden_model_message(st.new_model)
+    if forbidden_error:
+        return st.fail(
+            forbidden_error,
+            new_model=st.new_model,
+            target_provider=st.target_provider,
+            provider_label=st.provider_label,
+        )
+
     if st.target_provider.strip().lower() == "ollama":
         headers = {} if st.suppress_ollama_headers else (st.validation_headers or _get_ollama_request_headers())
     else:
@@ -1466,6 +1494,9 @@ def switch_model(
         current_base_url=current_base_url, current_api_key=current_api_key, is_global=is_global,
         explicit_provider=explicit_provider, user_providers=user_providers, custom_providers=custom_providers,
         new_model=raw_input.strip(), target_provider=current_provider)
+    forbidden_error = _forbidden_model_message(st.new_model)
+    if forbidden_error:
+        return st.fail(forbidden_error, new_model=st.new_model, target_provider=st.target_provider)
     route = _route_explicit_provider if explicit_provider else _route_from_model_input
     for step in (route, _resolve_switch_credentials, _validate_switch):
         fail = step(st)

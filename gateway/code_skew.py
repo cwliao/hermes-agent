@@ -38,11 +38,24 @@ def _fingerprint() -> str | None:
         return None
 
 
+def _write_boot_fingerprint_file(fingerprint: str | None) -> None:
+    if not fingerprint:
+        return
+    try:
+        from hermes_constants import get_hermes_home
+
+        path = Path(get_hermes_home()) / "gateway_boot_fingerprint"
+        path.write_text(fingerprint + "\n")
+    except Exception:
+        pass
+
+
 def record_boot_fingerprint() -> None:
     """Snapshot the checkout revision at gateway startup (idempotent)."""
     global _boot_fingerprint
     if _boot_fingerprint is None:
         _boot_fingerprint = _fingerprint()
+    _write_boot_fingerprint_file(_boot_fingerprint)
 
 
 def _short(fingerprint: str) -> str:

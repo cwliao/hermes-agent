@@ -76,6 +76,7 @@ class TestDetectCodeSkew:
         assert not (tmp_path / "gateway_boot_fingerprint").exists()
 
 
+
 class TestShort:
     def test_shortens_long_sha(self):
         assert code_skew._short("git:refs/heads/main:abcdef0123456789") == "abcdef0123"

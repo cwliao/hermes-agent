@@ -39,6 +39,25 @@ pid="$(systemctl --user show hermes-gateway.service -p MainPID --value)"
 tr '\0' '\n' < "/proc/$pid/environ" | grep -E 'SSL_CERT_FILE|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE'
 ```
 
+### Post-change restart rule
+
+When committing or merging changes in this checkout while the gateway is running
+from the same tree, restart the gateway before handing the system back to the
+user. The calendar safety guard intentionally reports stale code when the boot
+fingerprint differs from the disk checkout.
+
+Required close-out after any Hermes repo commit/push or local upstream merge:
+
+```bash
+hermes gateway restart
+~/.hermes/scripts/hermes_calendar_guard.sh
+hermes gateway status
+```
+
+The guard should be silent. If it prints `Gateway is running stale code`, the
+restart did not load the current checkout and must be investigated before
+closing the task.
+
 ## Telegram delivery targets
 
 Known Telegram delivery targets for this host:

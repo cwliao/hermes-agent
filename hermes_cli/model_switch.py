@@ -3174,3 +3174,25 @@ def list_picker_providers(
         filtered.append(p)
 
     return filtered
+def _forbidden_models_from_config() -> set[str]:
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config() or {}
+    except Exception:
+        cfg = {}
+    model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
+    raw = model_cfg.get("forbidden") if isinstance(model_cfg, dict) else None
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        values = []
+    return {str(value).strip().lower() for value in values if str(value).strip()}
+
+
+def _forbidden_model_message(model: str) -> str | None:
+    if str(model or "").strip().lower() in _forbidden_models_from_config():
+        return f"Model `{model}` is forbidden by config.yaml model.forbidden."
+    return None

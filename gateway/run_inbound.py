@@ -81,6 +81,7 @@ _PADDLEOCR_LOCK = threading.Lock()
 # fails loudly instead of silently regressing the same way.
 _TURN_ABORTED = object()
 
+
 try:
     from telegram import InlineKeyboardMarkup
     if not isinstance(InlineKeyboardMarkup, type):
@@ -2583,6 +2584,7 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
             normalized=normalized, image_paths=image_paths, source=source, key=key
         )
 
+
     def _image_analysis_prompt(self, *, ocr_translate: bool = False) -> str:
         if not ocr_translate:
             return (
@@ -2713,6 +2715,7 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
             if low_confidence_fields:
                 note = f"⚠️ 低信心度欄位（請人工確認）：{'、'.join(low_confidence_fields)}"
                 fields["備註"] = f"{fields['備註']}\n{note}" if fields["備註"] else note
+
 
         local_backup = {}
         local_backup_failure_reason = ""

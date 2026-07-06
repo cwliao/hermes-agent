@@ -58,6 +58,29 @@ The guard should be silent. If it prints `Gateway is running stale code`, the
 restart did not load the current checkout and must be investigated before
 closing the task.
 
+### Upstream update record
+
+2026-07-06 upstream update:
+
+- Fetched `upstream/main` from NousResearch.
+- Merged into local `main` as `16e11db432`.
+- Conflict resolved in `hermes_cli/model_switch.py` by keeping the local
+  `model.forbidden` guard and adding upstream's `_declared_model_ids()` custom
+  provider helper.
+- Updated custom provider grouping tests so config-only grouping cases pass
+  `probe_custom_providers=False`; this avoids the unit tests depending on the
+  live local Ollama catalog now that upstream probes custom endpoints by
+  default.
+- Verification run:
+  `venv/bin/pytest tests/hermes_cli/test_model_forbidden.py tests/hermes_cli/test_custom_provider_model_switch.py tests/hermes_cli/test_model_switch_custom_providers.py -q`
+  -> `53 passed`.
+- Close-out completed with `hermes gateway restart`, silent
+  `~/.hermes/scripts/hermes_calendar_guard.sh`, and `hermes gateway status`
+  showing the gateway active under the new checkout.
+
+Reminder: upstream pulls/merges are local-only. Do not push to `upstream`; the
+configured upstream push URL is intentionally `DISABLE`.
+
 ## Telegram delivery targets
 
 Known Telegram delivery targets for this host:

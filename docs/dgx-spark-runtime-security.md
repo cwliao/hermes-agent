@@ -133,6 +133,9 @@ Operational notes:
 - Enabling `gateway.image_ocr_translate` intentionally forces Telegram image
   turns through text enrichment even when the active chat model supports native
   image input; OCR and translation need text injected into the turn.
+- If the Telegram image has no more specific caption/request, the gateway
+  instructs the agent to reply with the OCR text and Traditional Chinese
+  translation directly, without exposing internal cache paths.
 - If OCR quality is poor, first check `ollama list` and the health of
   `granite3.2-vision:latest`, then test `vision_analyze` against the saved image
   path from the gateway log.

@@ -2132,7 +2132,10 @@ class GatewayTurnMixin:
             ]
             if image_paths:
                 try:
-                    enriched_prompt = await self._enrich_message_with_vision(prompt, image_paths)
+                    enriched_prompt = await self._enrich_message_with_vision(
+                        prompt, image_paths,
+                        ocr_translate=self._should_ocr_translate_images_for_source(source),
+                    )
                 except Exception as e:
                     logger.warning("Background task vision enrichment failed: %s", e)
 

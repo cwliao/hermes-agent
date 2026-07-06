@@ -22,6 +22,8 @@ def gateway_runner():
     from gateway.run import GatewayRunner
 
     class _Stub:
+        _image_ocr_translate_config = GatewayRunner._image_ocr_translate_config
+        _image_analysis_prompt = GatewayRunner._image_analysis_prompt
         _enrich_message_with_vision = GatewayRunner._enrich_message_with_vision
 
     return _Stub()
@@ -78,3 +80,28 @@ class TestEnrichMessageWithVision:
         assert "photograph of a dog" in out
         assert "fenced leak" not in out
         assert "<memory-context>" not in out
+
+    def test_ocr_translation_prompt_used_when_enabled(self, gateway_runner):
+        fake_result = json.dumps({
+            "success": True,
+            "analysis": "OCR text: HELLO\nTranslation: 你好",
+        })
+
+        with patch("gateway.run._load_gateway_config", return_value={
+            "gateway": {
+                "image_ocr_translate": {
+                    "enabled": True,
+                    "target_language": "Traditional Chinese",
+                }
+            }
+        }), patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=fake_result)) as mock_vision:
+            out = _run(gateway_runner._enrich_message_with_vision(
+                "請 OCR", ["/tmp/img.jpg"], ocr_translate=True
+            ))
+
+        prompt = mock_vision.call_args.kwargs["user_prompt"]
+        assert "OCR text" in prompt
+        assert "Translation (Traditional Chinese)" in prompt
+        assert "Do not invent" in prompt
+        assert "OCR and translation result" in out
+        assert "HELLO" in out

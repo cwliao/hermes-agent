@@ -15851,17 +15851,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     video_paths.append(path)
 
             if image_paths:
+                _ocr_translate_images = self._should_ocr_translate_images_for_source(source)
                 # Decide routing: native (attach pixels) vs text (vision_analyze
-                # pre-run + prepend description).  See agent/image_routing.py.
-                # Offload to a worker thread: the decision does blocking network
-                # I/O — a models.dev fetch on cache miss, and the Ollama
-                # ``/api/show`` capability probe for local servers — whose
-                # request timeout would otherwise stall the whole gateway event
-                # loop (every session) while a single image is routed.
-                _img_mode = await asyncio.to_thread(
-                    self._decide_image_input_mode,
-                    source=source,
-                    session_key=session_key,
+                # pre-run + prepend description). OCR/translation is a text
+                # enrichment feature, so it intentionally preempts native image
+                # routing for configured messaging platforms.
+                _img_mode = (
+                    "text"
+                    if _ocr_translate_images
+                    else await asyncio.to_thread(
+                        self._decide_image_input_mode,
+                        source=source,
+                        session_key=session_key,
+                    )
                 )
                 if _img_mode == "native":
                     # Defer attachment to the run_conversation call site.
@@ -15874,8 +15876,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 else:
                     logger.info(
-                        "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
-                        _img_mode, len(image_paths),
+                        "Image routing: text (mode=%s, ocr_translate=%s). Pre-analyzing %d image(s) via vision_analyze.",
+                        _img_mode, _ocr_translate_images, len(image_paths),
                     )
                     # Vision enrichment runs before AIAgent.run_conversation(),
                     # so bind this session's resolved runtime explicitly rather
@@ -15900,6 +15902,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         message_text = await self._enrich_message_with_vision(
                             message_text,
                             image_paths,
+                            ocr_translate=_ocr_translate_images,
                         )
 
             if audio_paths:

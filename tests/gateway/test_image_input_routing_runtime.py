@@ -167,3 +167,52 @@ async def test_prepare_route_identity_check_keeps_event_loop_responsive(monkeypa
     assert result == "inspect @AGENTS.md"
     assert seen["event_loop_progressed"] is True
     assert seen["thread"] is not main_thread
+
+
+@pytest.mark.asyncio
+async def test_telegram_image_ocr_translate_preempts_native_routing(monkeypatch):
+    """Configured Telegram OCR should produce text even for vision-capable models."""
+    runner = _make_runner()
+    source = _source()
+    event = _image_event("翻譯這張圖")
+    cfg = _auto_config()
+    cfg["gateway"] = {
+        "image_ocr_translate": {
+            "enabled": True,
+            "platforms": ["telegram"],
+            "target_language": "Traditional Chinese",
+        }
+    }
+
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
+    monkeypatch.setattr("agent.auxiliary_client._read_main_provider", lambda: "openai-codex")
+    monkeypatch.setattr("agent.auxiliary_client._read_main_model", lambda: "gpt-5.5")
+    monkeypatch.setattr(
+        runner,
+        "_resolve_session_agent_runtime",
+        lambda **_: ("gpt-5.5", {"provider": "openai-codex"}),
+    )
+    monkeypatch.setattr("agent.image_routing._lookup_supports_vision", lambda *_: True)
+
+    async def fake_enrich(user_text, image_paths, *, ocr_translate=False):
+        assert user_text == "翻譯這張圖"
+        assert image_paths == ["/tmp/cashback.png"]
+        assert ocr_translate is True
+        return "[ocr translated]
+
+翻譯這張圖"
+
+    monkeypatch.setattr(runner, "_enrich_message_with_vision", fake_enrich)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    session_key = runner._session_key_for_source(source)
+    assert result == "[ocr translated]
+
+翻譯這張圖"
+    assert runner._pending_native_image_paths_by_session.get(session_key) is None

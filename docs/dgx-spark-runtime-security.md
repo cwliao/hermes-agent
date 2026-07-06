@@ -100,6 +100,43 @@ hermes send --to telegram:-1004391006048 "test message"
 The SPARK group was manually verified on 2026-07-02 with a TAIEX/0050 test
 message; `hermes send` returned `sent`.
 
+### Telegram image OCR and translation
+
+Telegram image OCR/translation is enabled for this host through the gateway
+image enrichment path. Incoming Telegram images are pre-analyzed with the
+configured local vision model before the main agent turn, so the conversation
+receives text containing both OCR and Traditional Chinese translation.
+
+Runtime config in `~/.hermes/config.yaml`:
+
+```yaml
+gateway:
+  image_ocr_translate:
+    enabled: true
+    platforms:
+    - telegram
+    target_language: Traditional Chinese
+    include_visual_summary: true
+
+auxiliary:
+  vision:
+    provider: custom
+    model: granite3.2-vision:latest
+    base_url: http://127.0.0.1:11434/v1
+    api_key: ollama
+```
+
+Operational notes:
+
+- This feature is local-first on DGX Spark because `auxiliary.vision` points at
+  local Ollama.
+- Enabling `gateway.image_ocr_translate` intentionally forces Telegram image
+  turns through text enrichment even when the active chat model supports native
+  image input; OCR and translation need text injected into the turn.
+- If OCR quality is poor, first check `ollama list` and the health of
+  `granite3.2-vision:latest`, then test `vision_analyze` against the saved image
+  path from the gateway log.
+
 ## TAIEX / 0050 SPARK cron
 
 The SPARK market report is implemented as no-agent Hermes cron jobs so the
@@ -177,32 +214,36 @@ hermes send --to telegram:-1004391006048 "$("$HOME/.hermes/scripts/taiex_0050_re
 
 ## Ollama / GPU health guard
 
-Ollama and GPU health are watched by a no-agent Hermes cron job:
+Ollama is currently served by the Docker container named `ollama`, bound to
+`127.0.0.1:11434`. It is not managed by `ollama.service`; both
+`systemctl status ollama` and `systemctl --user status ollama` may report that
+the unit does not exist.
+
+Health is watched by a user systemd timer:
 
 ```text
-0 * * * *  Ollama GPU health guard  -> telegram:-1004391006048
+ollama-gpu-healthcheck.timer -> ollama-gpu-healthcheck.service
+OnBootSec=2min, OnUnitActiveSec=10min
 ```
 
-Runtime script:
+The service runs:
 
 ```bash
-~/.hermes/scripts/hermes_ollama_gpu_guard.sh
+/home/cwliao/bin/ollama-gpu-healthcheck
 ```
 
-The guard checks:
+The healthcheck script verifies the Docker container, NVML inside the container,
+the Ollama API at `http://127.0.0.1:11434/api/tags`, and detects loaded models
+running on `100% CPU`. On failure it restarts Ollama through:
 
-- Ollama API at `http://127.0.0.1:11434/api/version`
-- an `ollama serve` process
-- `nvidia-smi`
-- GPU temperature, with the default alert threshold at 90 C
+```bash
+docker compose -f /home/cwliao/open-webui-stack/compose.yaml restart ollama
+```
 
-Healthy runs are silent. On failure, the script sends a SPARK alert and tries to
-restart Ollama. Current operational caveat: Ollama was observed running as a
-root-owned manual process (`/bin/ollama serve`) rather than a systemd service,
-and non-interactive `sudo` is not available for the Hermes cron user. Until
-Ollama is moved to a managed service or granted a narrow NOPASSWD restart rule,
-the guard can reliably detect and alert, but may not be able to restart a
-root-owned Ollama process.
+Recent journal output on 2026-07-06 showed the timer running every 10 minutes
+and reporting `healthy`. A separate no-agent Hermes cron guard may still be
+used for SPARK-visible alerts, but the active auto-restart path is the user
+systemd timer above.
 
 ## docagent
 

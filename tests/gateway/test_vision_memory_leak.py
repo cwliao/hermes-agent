@@ -105,3 +105,18 @@ class TestEnrichMessageWithVision:
         assert "Do not invent" in prompt
         assert "OCR and translation result" in out
         assert "HELLO" in out
+        assert "reply with the OCR text" in out
+        assert "Traditional Chinese translation" in out
+
+    def test_default_vision_mode_does_not_add_ocr_reply_instruction(self, gateway_runner):
+        fake_result = json.dumps({
+            "success": True,
+            "analysis": "A photograph of a receipt.",
+        })
+        with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=fake_result)):
+            out = _run(gateway_runner._enrich_message_with_vision(
+                "這是什麼", ["/tmp/img.jpg"]
+            ))
+
+        assert "A photograph of a receipt" in out
+        assert "reply with the OCR text" not in out

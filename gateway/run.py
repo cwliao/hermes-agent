@@ -14789,11 +14789,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if ocr_translate
                         else "The user sent an image~ Here's what I can see"
                     )
-                    enriched_parts.append(
+                    part = (
                         f"[{heading}:\n{description}]\n"
                         f"[If you need a closer look, use vision_analyze with "
                         f"image_url: {path} ~]"
                     )
+                    if ocr_translate:
+                        part += (
+                            "\n[Gateway instruction: If the user's message has no "
+                            "more specific request, reply with the OCR text and "
+                            "Traditional Chinese translation in a concise, readable "
+                            "format. Do not mention internal file paths unless the "
+                            "user asks for debugging details.]"
+                        )
+                    enriched_parts.append(part)
                 else:
                     enriched_parts.append(
                         "[The user sent an image but I couldn't quite see it "

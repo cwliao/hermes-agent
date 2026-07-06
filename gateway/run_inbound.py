@@ -1951,6 +1951,14 @@ class GatewayInboundMixin:
                         f"[If you need a closer look, use vision_analyze with "
                         f"image_url: {path} ~]"
                     )
+                    if ocr_translate:
+                        note += (
+                            "\n[Gateway instruction: If the user's message has no "
+                            "more specific request, reply with the OCR text and "
+                            "Traditional Chinese translation in a concise, readable "
+                            "format. Do not mention internal file paths unless the "
+                            "user asks for debugging details.]"
+                        )
                 else:
                     note = (
                         "[The user sent an image but I couldn't quite see it "

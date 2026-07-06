@@ -18201,6 +18201,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     video_paths.append(path)
 
             if image_paths:
+                _ocr_translate_images = self._should_ocr_translate_images_for_source(source)
                 # Decide routing: native (attach pixels) vs text (vision_analyze
                 # pre-run + prepend description).  See agent/image_routing.py.
                 # Offload to a worker thread: the decision does blocking network
@@ -18208,7 +18209,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # ``/api/show`` capability probe for local servers — whose
                 # request timeout would otherwise stall the whole gateway event
                 # loop (every session) while a single image is routed.
-                _img_mode = await asyncio.to_thread(
+                # OCR/translation is a text enrichment feature, so it
+                # intentionally preempts native image routing for configured
+                # messaging platforms.
+                _img_mode = "text" if _ocr_translate_images else await asyncio.to_thread(
                     self._decide_image_input_mode,
                     source=source,
                     session_key=session_key,
@@ -18224,8 +18228,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 else:
                     logger.info(
-                        "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
-                        _img_mode, len(image_paths),
+                        "Image routing: text (mode=%s, ocr_translate=%s). Pre-analyzing %d image(s) via vision_analyze.",
+                        _img_mode, _ocr_translate_images, len(image_paths),
                     )
                     # Vision enrichment runs before AIAgent.run_conversation(),
                     # so bind this session's resolved runtime explicitly rather
@@ -18250,6 +18254,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         message_text = await self._enrich_message_with_vision(
                             message_text,
                             image_paths,
+                            ocr_translate=_ocr_translate_images,
                         )
 
             if audio_paths:
@@ -24600,10 +24605,92 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.debug("image_routing: decision failed, falling back to text — %s", exc)
             return "text"
 
+    def _image_ocr_translate_config(self) -> dict:
+        """Return normalized gateway image OCR/translation settings."""
+        try:
+            cfg = _load_gateway_config()
+        except Exception:
+            cfg = {}
+        gateway_cfg = cfg.get("gateway", {}) if isinstance(cfg, dict) else {}
+        raw = gateway_cfg.get("image_ocr_translate", {}) if isinstance(gateway_cfg, dict) else {}
+        if raw is True:
+            raw = {"enabled": True}
+        if not isinstance(raw, dict):
+            raw = {}
+
+        def _bool(value, default=False):
+            if value is None:
+                return default
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"1", "true", "yes", "on"}:
+                    return True
+                if lowered in {"0", "false", "no", "off"}:
+                    return False
+                return default
+            return bool(value)
+
+        platforms = raw.get("platforms", ["telegram"])
+        if isinstance(platforms, str):
+            platforms = [p.strip() for p in platforms.split(",")]
+        if not isinstance(platforms, list):
+            platforms = ["telegram"]
+        normalized_platforms = {
+            str(p).strip().lower() for p in platforms if str(p).strip()
+        }
+
+        target_language = str(raw.get("target_language") or "Traditional Chinese").strip()
+        if not target_language:
+            target_language = "Traditional Chinese"
+
+        return {
+            "enabled": _bool(raw.get("enabled"), False),
+            "platforms": normalized_platforms,
+            "target_language": target_language,
+            "include_visual_summary": _bool(raw.get("include_visual_summary"), True),
+        }
+
+    def _should_ocr_translate_images_for_source(self, source: Optional[SessionSource]) -> bool:
+        settings = self._image_ocr_translate_config()
+        if not settings.get("enabled"):
+            return False
+        platform = getattr(source, "platform", None)
+        platform_name = getattr(platform, "value", platform)
+        return str(platform_name or "").lower() in settings.get("platforms", set())
+
+    def _image_analysis_prompt(self, *, ocr_translate: bool = False) -> str:
+        if not ocr_translate:
+            return (
+                "Describe everything visible in this image in thorough detail. "
+                "Include any text, code, data, objects, people, layout, colors, "
+                "and any other notable visual information."
+            )
+
+        settings = self._image_ocr_translate_config()
+        target_language = settings.get("target_language") or "Traditional Chinese"
+        visual_summary = (
+            "\n4. Brief visual context: describe only details needed to interpret the text."
+            if settings.get("include_visual_summary", True)
+            else ""
+        )
+        return (
+            "You are processing a user-sent messaging image for OCR and translation. "
+            "Use only what is visible in the image. Do not invent missing words.\n\n"
+            "Return a concise structured result with these sections:\n"
+            "1. OCR text: transcribe all visible text verbatim, preserving line breaks "
+            "and original language as much as possible. If no readable text exists, say so.\n"
+            f"2. Translation ({target_language}): translate the OCR text into {target_language}. "
+            "Keep names, numbers, dates, units, URLs, and technical terms accurate.\n"
+            "3. Uncertain text: list any characters or lines that are unclear."
+            f"{visual_summary}"
+        )
+
     async def _enrich_message_with_vision(
         self,
         user_text: str,
         image_paths: List[str],
+        *,
+        ocr_translate: bool = False,
     ) -> str:
         """
         Auto-analyze user-attached images with the vision tool and prepend
@@ -24624,13 +24711,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from tools.vision_tools import vision_analyze_tool
         from agent.memory_manager import sanitize_context
 
-        analysis_prompt = (
-            "Concisely describe this image in 2-4 sentences "
-            "(~200 Chinese characters or ~150 English words). "
-            "Cover the main subject, key visible text/data/code, and overall context. "
-            "If it is a chart, diagram, or scientific figure, include the important "
-            "labels, legend, and key values. Skip decorative details."
-        )
+        analysis_prompt = self._image_analysis_prompt(ocr_translate=ocr_translate)
 
         enriched_parts = []
         for path in image_paths:
@@ -24644,8 +24725,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if result.get("success"):
                     description = result.get("analysis", "")
                     description = sanitize_context(description)
+                    heading = (
+                        "The user sent an image. OCR and translation result"
+                        if ocr_translate
+                        else "The user sent an image~ Here's what I can see"
+                    )
                     enriched_parts.append(
-                        f"[The user sent an image~ Here's what I can see:\n{description}]\n"
+                        f"[{heading}:\n{description}]\n"
                         f"[If you need a closer look, use vision_analyze with "
                         f"image_url: {path} ~]"
                     )

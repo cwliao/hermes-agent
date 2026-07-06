@@ -626,25 +626,6 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Modal sandbox mode",
         "options": ["sandbox", "function"],
     },
-    "proxy.enabled": {
-        "type": "boolean",
-        "description": (
-            "Docker-only egress credential firewall. Requires `hermes egress setup` "
-            "and `hermes egress start`; Modal/SSH/Daytona are not wired yet."
-        ),
-        "category": "security",
-    },
-    "proxy.credential_source": {
-        "type": "select",
-        "description": "Where iron-proxy loads real upstream secrets at start time",
-        "options": ["env", "bitwarden"],
-        "category": "security",
-    },
-    "proxy.enforce_on_docker": {
-        "type": "boolean",
-        "description": "Refuse Docker sandboxes when egress is enabled but not configured/running",
-        "category": "security",
-    },
     "tts.provider": {
         "type": "select",
         "description": "Text-to-speech provider",
@@ -726,6 +707,14 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
             "Terminal updates always ask, regardless of this setting."
         ),
         "options": ["stash", "discard"],
+    },
+    "updates.refresh_cua_driver": {
+        "type": "bool",
+        "description": (
+            "Refresh an already-installed cua-driver during hermes update. "
+            "Disable this on non-admin macOS accounts where /Applications is "
+            "not writable."
+        ),
     },
 }
 
@@ -4161,14 +4150,6 @@ async def get_defaults():
 @app.get("/api/config/schema")
 async def get_schema():
     return {"fields": CONFIG_SCHEMA, "category_order": _CATEGORY_ORDER}
-
-
-@app.get("/api/egress/status")
-async def get_egress_status():
-    """Dashboard/Desktop-readable egress proxy status and remediation text."""
-    from hermes_cli.proxy_cli import format_status_text
-
-    return {"text": format_status_text()}
 
 
 _EMPTY_MODEL_INFO: dict = {
@@ -9171,8 +9152,15 @@ async def auth_mcp_server(name: str, profile: Optional[str] = None):
                 # The default 30s connect timeout would kill the flow while the
                 # user is still on the consent screen — give the browser
                 # round-trip the full callback window (300s in mcp_oauth) plus
-                # headroom so the connect wrapper can't pre-empt it.
-                tools = _probe_single_server(name, cfg, connect_timeout=315)
+                # headroom so the connect wrapper can't pre-empt it. Honor a
+                # larger configured connect_timeout when the user set one.
+                try:
+                    _cfg_timeout = float(cfg.get("connect_timeout", 0))
+                except (TypeError, ValueError):
+                    _cfg_timeout = 0.0
+                tools = _probe_single_server(
+                    name, cfg, connect_timeout=max(_cfg_timeout, 315)
+                )
             except Exception:
                 storage.restore(backup)
                 raise

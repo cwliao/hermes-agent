@@ -2963,18 +2963,6 @@ class TestBuildSchemaFromConfig:
             assert "options" in entry
             assert "local" in entry["options"]
 
-    def test_proxy_schema_warns_dashboard_users_about_lifecycle(self):
-        from hermes_cli.web_server import CONFIG_SCHEMA
-
-        entry = CONFIG_SCHEMA["proxy.enabled"]
-        assert entry["category"] == "security"
-        assert "Docker-only" in entry["description"]
-        assert "hermes egress setup" in entry["description"]
-
-        source_entry = CONFIG_SCHEMA["proxy.credential_source"]
-        assert source_entry["type"] == "select"
-        assert source_entry["options"] == ["env", "bitwarden"]
-
     def test_empty_prefix_produces_correct_keys(self):
         from hermes_cli.web_server import _build_schema_from_config
         test_config = {"model": "test", "nested": {"key": "val"}}
@@ -3208,7 +3196,7 @@ class TestConfigRoundTrip:
                 mismatches.append(f"{key}: expected bool, got {type(val).__name__}")
             elif expected == "list" and not isinstance(val, list):
                 mismatches.append(f"{key}: expected list, got {type(val).__name__}")
-        assert not mismatches, f"Type mismatches:\n" + "\n".join(mismatches)
+        assert not mismatches, "Type mismatches:\n" + "\n".join(mismatches)
 
 
 # ---------------------------------------------------------------------------

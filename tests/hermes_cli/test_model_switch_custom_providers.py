@@ -385,6 +385,7 @@ def test_list_authenticated_providers_groups_same_endpoint(monkeypatch):
              "api_key": "ollama", "model": "qwen3-coder"},
         ],
         max_models=50,
+        probe_custom_providers=False,
     )
 
     custom_groups = [p for p in providers if p.get("is_user_defined")]
@@ -469,6 +470,7 @@ def test_list_authenticated_providers_distinct_endpoints_stay_separate(monkeypat
              "api_key": "ollama", "model": "qwen3-coder"},
         ],
         max_models=50,
+        probe_custom_providers=False,
     )
 
     custom_groups = [p for p in providers if p.get("is_user_defined")]
@@ -562,6 +564,7 @@ def test_list_authenticated_providers_total_models_reflects_grouped_count(monkey
         user_providers={},
         custom_providers=entries,
         max_models=4,
+        probe_custom_providers=False,
     )
 
     groups = [p for p in providers if p.get("is_user_defined")]
@@ -925,6 +928,79 @@ def test_custom_providers_discover_models_false_string_is_normalised(monkeypatch
     assert gateway_prov is not None
     assert calls == [], "string 'false' must disable live discovery"
     assert gateway_prov["models"] == ["only-model"]
+
+
+def test_custom_providers_discover_models_false_list_of_dict_ids(monkeypatch):
+    """List-of-dicts ``models: [{id: ...}]`` must be preserved as configured
+    model IDs when discovery is disabled."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def fake_fetch_api_models(api_key, base_url, **kwargs):
+        calls.append((api_key, base_url, kwargs))
+        return ["live-a", "live-b"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
+
+    custom_providers = [
+        {
+            "name": "static-gateway",
+            "api_key": "***",
+            "base_url": "https://router.example.com/v1",
+            "discover_models": False,
+            "model": "claude-3-7-sonnet",
+            "models": [
+                {"id": "claude-3-7-sonnet"},
+                {"id": "claude-sonnet-4"},
+            ],
+        }
+    ]
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        current_base_url="https://openrouter.ai/api/v1",
+        custom_providers=custom_providers,
+        max_models=50,
+    )
+
+    gateway_prov = next(
+        (p for p in providers if p.get("api_url") == "https://router.example.com/v1"),
+        None,
+    )
+
+    assert gateway_prov is not None
+    assert calls == [], "discover_models: false must skip live discovery"
+    assert gateway_prov["models"] == ["claude-3-7-sonnet", "claude-sonnet-4"]
+    assert gateway_prov["total_models"] == 2
+
+
+def test_list_of_dict_models_prefers_id_over_label(monkeypatch):
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        current_base_url="https://openrouter.ai/api/v1",
+        custom_providers=[
+            {
+                "name": "static-gateway",
+                "base_url": "https://router.example.com/v1",
+                "discover_models": False,
+                "models": [{"id": "real-model-id", "name": "Friendly Label"}],
+            }
+        ],
+        max_models=50,
+    )
+
+    gateway_prov = next(
+        (p for p in providers if p.get("api_url") == "https://router.example.com/v1"),
+        None,
+    )
+
+    assert gateway_prov is not None
+    assert gateway_prov["models"] == ["real-model-id"]
 
 
 def test_resolve_custom_provider_passes_key_env():

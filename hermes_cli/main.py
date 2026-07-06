@@ -4443,14 +4443,17 @@ def _clear_bytecode_cache(root: Path) -> int:
     return removed
 
 
-# Critical files that every ``hermes`` invocation imports at startup. If any
-# of these fail to parse after a pull, the CLI is bricked — the user can't
-# even run ``hermes update`` again to roll forward. The post-pull syntax
-# guard validates these and auto-rolls-back on failure.
+# Critical files that Hermes must be able to import immediately after an
+# update/install. Most are imported on every CLI startup; ``web_server.py``
+# is the desktop/dashboard backend path that a fresh Windows install launches
+# right away. If any of these fail to parse after a pull, the user can be
+# left with a bricked CLI or desktop backend. The post-pull syntax guard
+# validates these and auto-rolls-back on failure.
 _UPDATE_CRITICAL_FILES = (
     "hermes_cli/main.py",
     "hermes_cli/config.py",
     "hermes_cli/__init__.py",
+    "hermes_cli/web_server.py",
     "cli.py",
     "run_agent.py",
     "model_tools.py",
@@ -8716,8 +8719,8 @@ def _run_pre_update_backup(args) -> None:
 
     print(f"  Saved:    {display_path} ({size_str}, {elapsed:.1f}s)")
     print(f"  Restore:  hermes import {out_path}")
-    print(f"  Disable:  omit --backup (backups are off by default)")
-    print(f"            set updates.pre_update_backup: false in config.yaml")
+    print("  Disable:  omit --backup (backups are off by default)")
+    print("            set updates.pre_update_backup: false in config.yaml")
     print()
 
 
@@ -9537,7 +9540,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     "✗ Authentication failed — check your git credentials or SSH key."
                 )
             else:
-                print(f"✗ Failed to fetch updates from origin.")
+                print("✗ Failed to fetch updates from origin.")
                 if stderr:
                     print(f"  {stderr.splitlines()[0]}")
             sys.exit(1)
@@ -9801,7 +9804,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print(
                         f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
                     )
-                    print(f"  Restore manually with: git stash apply")
+                    print("  Restore manually with: git stash apply")
                 elif discard_local_changes:
                     # Non-interactive update + user opted into discarding local
                     # source edits (updates.non_interactive_local_changes:
@@ -10243,7 +10246,23 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # predictable cadence (matches when they pull new agent code) without
         # adding startup latency or a per-launch GitHub API call.
         try:
-            if sys.platform in ("darwin", "win32", "linux") and shutil.which("cua-driver"):
+            refresh_cua_driver = True
+            try:
+                from hermes_cli.config import load_config
+
+                _update_cfg = (load_config() or {}).get("updates", {})
+                if isinstance(_update_cfg, dict):
+                    refresh_cua_driver = bool(
+                        _update_cfg.get("refresh_cua_driver", True)
+                    )
+            except Exception as cfg_exc:
+                logger.debug("Could not read updates.refresh_cua_driver: %s", cfg_exc)
+
+            if (
+                refresh_cua_driver
+                and sys.platform in ("darwin", "win32", "linux")
+                and shutil.which("cua-driver")
+            ):
                 from hermes_cli.tools_config import install_cua_driver
 
                 print()
@@ -11134,7 +11153,7 @@ def cmd_profile(args):
         try:
             set_active_profile(name)
             if name == "default":
-                print(f"Switched to: default (~/.hermes)")
+                print("Switched to: default (~/.hermes)")
             else:
                 print(f"Switched to: {name}")
         except (ValueError, FileNotFoundError) as e:
@@ -11223,9 +11242,9 @@ def cmd_profile(args):
                         if not _is_wrapper_dir_in_path():
                             print(f"\n⚠ {_get_wrapper_dir()} is not in your PATH.")
                             print(
-                                f"  Add to your shell config (~/.bashrc or ~/.zshrc):"
+                                "  Add to your shell config (~/.bashrc or ~/.zshrc):"
                             )
-                            print(f'    export PATH="$HOME/.local/bin:$PATH"')
+                            print('    export PATH="$HOME/.local/bin:$PATH"')
 
             # Profile dir for display
             try:
@@ -11234,7 +11253,7 @@ def cmd_profile(args):
                 profile_dir_display = str(profile_dir)
 
             # Next steps
-            print(f"\nNext steps:")
+            print("\nNext steps:")
             print(f"  {name} setup              Configure API keys and model")
             print(f"  {name} chat               Start chatting")
             print(f"  {name} gateway start      Start the messaging gateway")
@@ -11245,7 +11264,7 @@ def cmd_profile(args):
                 print(
                     f"\n  ⚠ This profile has no API keys yet. Run '{name} setup' first,"
                 )
-                print(f"    or it will inherit keys from your shell environment.")
+                print("    or it will inherit keys from your shell environment.")
                 print(f"  Edit {profile_dir_display}/SOUL.md to customize personality")
             print()
 
@@ -12188,7 +12207,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
         "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
-        "dump", "egress", "fallback", "gateway", "hooks", "import", "insights",
+        "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
@@ -12543,7 +12562,7 @@ def cmd_memory(args):
             )
             return
 
-        print(f"\n  This will permanently erase the following memory files:")
+        print("\n  This will permanently erase the following memory files:")
         for f, desc in existing:
             path = mem_dir / f
             size = path.stat().st_size
@@ -12564,7 +12583,7 @@ def cmd_memory(args):
             print(f"  ✓ Deleted {f} ({desc})")
 
         print(
-            f"\n  Memory reset complete. New sessions will start with a blank slate."
+            "\n  Memory reset complete. New sessions will start with a blank slate."
         )
         print(f"  Files were in: {display_hermes_home()}/memories/\n")
     else:
@@ -12802,37 +12821,6 @@ def main():
         return 0
 
     secrets_parser.set_defaults(func=_dispatch_secrets)
-
-    # =========================================================================
-    # egress command — iron-proxy outbound credential-injection firewall
-    # =========================================================================
-    # NOTE: this is the OUTBOUND egress firewall (ironsh/iron-proxy).
-    # `hermes proxy` (defined elsewhere in this file) is a separate INBOUND
-    # OAuth-aggregator reverse proxy.  Different direction, different purpose.
-    egress_parser = subparsers.add_parser(
-        "egress",
-        help="Manage the iron-proxy egress credential-injection firewall",
-        description=(
-            "Manage iron-proxy, the optional TLS-intercepting egress firewall "
-            "that swaps proxy tokens for real API credentials before outbound "
-            "requests leave a sandbox.  Disabled by default.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/egress/iron-proxy"
-        ),
-    )
-
-    from hermes_cli import proxy_cli as _proxy_cli
-    _proxy_cli.register_cli(egress_parser)
-
-    def _dispatch_egress(args):  # noqa: ANN001
-        # The egress subparser uses dest='egress_command' to stay disjoint
-        # from the inbound OAuth ``hermes proxy`` subparser (dest='proxy_command').
-        sub = getattr(args, "egress_command", None)
-        if sub is not None and hasattr(args, "func") and args.func is not _dispatch_egress:
-            return args.func(args)
-        egress_parser.print_help()
-        return 0
-
-    egress_parser.set_defaults(func=_dispatch_egress)
 
     # =========================================================================
     # migrate command
@@ -13944,15 +13932,9 @@ def main():
         cmd_chat(args)
         return
 
-    # Execute the command.  Propagate the handler's return code as the
-    # process exit code so subcommands that signal failure (e.g.
-    # ``hermes egress start`` refusing when credential_source=bitwarden
-    # is misconfigured) actually exit non-zero.  Handlers that return
-    # None are treated as success (exit 0).
+    # Execute the command
     if hasattr(args, "func"):
-        rc = args.func(args)
-        if isinstance(rc, int) and rc != 0:
-            sys.exit(rc)
+        args.func(args)
     else:
         parser.print_help()
 

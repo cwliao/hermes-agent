@@ -15,6 +15,7 @@ import dataclasses
 import json
 import os
 import re
+import subprocess
 import time
 from contextlib import suppress
 from gateway.config import Platform
@@ -1614,8 +1615,18 @@ class GatewayInboundMixin:
         message_text = self._prefix_inbound_sender_context(event, source, message_text)
         image_paths, audio_paths, audio_file_paths, video_paths = self._classify_inbound_media(event, _pending_stt_prepared)
         if image_paths:
+            image_only_ocr = self._should_ocr_translate_images_for_source(source) and not (event.text or "").strip()
+            if image_only_ocr:
+                direct_ocr_text = await asyncio.to_thread(self._extract_images_text_with_tesseract, image_paths)
+                if direct_ocr_text:
+                    await self._deliver_direct_image_ocr_reply(
+                        source,
+                        self._format_tesseract_image_ocr_reply(direct_ocr_text),
+                        already_formatted=True,
+                    )
+                    return None
             message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
-            if self._should_ocr_translate_images_for_source(source) and not (event.text or "").strip():
+            if image_only_ocr:
                 await self._deliver_direct_image_ocr_reply(source, message_text)
                 return None
         if audio_paths:
@@ -1941,8 +1952,53 @@ class GatewayInboundMixin:
             text = "OCR did not return readable text from this image."
         return f"📌 圖片 OCR / 翻譯\n\n{text}"
 
-    async def _deliver_direct_image_ocr_reply(self, source: SessionSource, enriched_text: str) -> None:
-        await self._deliver_platform_notice(source, self._format_direct_image_ocr_reply(enriched_text))
+    def _extract_images_text_with_tesseract(self, image_paths: List[str]) -> str:
+        texts: list[str] = []
+        for index, image_path in enumerate(image_paths, start=1):
+            try:
+                proc = subprocess.run(
+                    ["tesseract", image_path, "stdout", "-l", "chi_tra+chi_sim+eng", "--psm", "6"],
+                    check=False, capture_output=True, text=True, timeout=45,
+                )
+            except Exception as exc:
+                logger.warning("Tesseract OCR failed for %s: %s", image_path, exc)
+                continue
+            if proc.returncode != 0:
+                logger.warning(
+                    "Tesseract OCR returned %s for %s: %s",
+                    proc.returncode, image_path, (proc.stderr or "").strip()[:500],
+                )
+                continue
+            text = self._normalize_ocr_text(proc.stdout)
+            if text:
+                texts.append(f"[Image {index}]\n{text}" if len(image_paths) > 1 else text)
+        return "\n\n".join(texts).strip()
+
+    @staticmethod
+    def _normalize_ocr_text(text: str) -> str:
+        lines = []
+        for raw_line in (text or "").splitlines():
+            line = re.sub(r"[ \t]+", " ", raw_line).strip()
+            if line:
+                lines.append(line)
+        return "\n".join(lines).strip()
+
+    def _format_tesseract_image_ocr_reply(self, ocr_text: str) -> str:
+        text = (ocr_text or "").strip() or "未辨識到可讀文字。"
+        return (
+            "📌 圖片 OCR\n\n"
+            f"{text}\n\n"
+            "📌 翻譯/整理\n"
+            "目前使用本機 Tesseract 做逐字 OCR；未呼叫 LLM 進行自由翻譯，"
+            "以避免產生未出現在圖片中的內容。"
+        )
+
+    async def _deliver_direct_image_ocr_reply(
+        self, source: SessionSource, enriched_text: str, *, already_formatted: bool = False
+    ) -> None:
+        await self._deliver_platform_notice(
+            source, enriched_text if already_formatted else self._format_direct_image_ocr_reply(enriched_text)
+        )
 
     async def _enrich_message_with_vision(
         self, user_text: str, image_paths: List[str], *, ocr_translate: bool = False

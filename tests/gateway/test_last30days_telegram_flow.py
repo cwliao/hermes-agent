@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
@@ -169,3 +172,51 @@ def test_last30days_engine_output_cleanup_removes_bonus_and_ansi():
     assert "TikTok" not in cleaned
     assert "Instagram" not in cleaned
     assert "Production Brief" in cleaned
+
+
+def test_last30days_default_sources_include_youtube():
+    runner = _make_runner()
+
+    sources = runner._last30days_engine_sources()
+
+    assert sources == [
+        "reddit",
+        "x",
+        "youtube",
+        "hackernews",
+        "polymarket",
+        "github",
+        "grounding",
+    ]
+
+
+def test_last30days_cjk_topic_plan_preserves_original_query():
+    assert GatewayRunner._last30days_topic_has_cjk("漁電共生") is True
+
+    plan_path = GatewayRunner._write_last30days_plan_file(
+        "漁電共生",
+        ["reddit", "youtube", "grounding"],
+    )
+    try:
+        plan_text = Path(plan_path).read_text()
+    finally:
+        os.unlink(plan_path)
+
+    assert '"search_query": "漁電共生"' in plan_text
+    assert "最近30天" in plan_text
+    assert "aquaculture" not in plan_text.lower()
+
+
+def test_last30days_cleanup_replaces_empty_sources_report():
+    raw = (
+        "# Production Brief: 漁電共生\n\n"
+        "- Sources: none\n\n"
+        "## Ranked Storylines\n\n"
+        "## Source Clusters\n"
+    )
+
+    cleaned = GatewayRunner._clean_last30days_engine_output(raw)
+
+    assert "沒有找到有效來源" in cleaned
+    assert "低相關 Reddit" in cleaned
+    assert "## Ranked Storylines" not in cleaned

@@ -62,7 +62,8 @@ async def test_last30days_prompt_stores_topic_and_shows_three_options(monkeypatc
     assert "2. 深入整理" in sent["content"]
     assert "3. 指定來源" in sent["content"]
     assert "Instagram" in sent["content"]
-    assert "X/Twitter" in sent["content"]
+    assert "Threads" in sent["content"]
+    assert "X/Twitter" not in sent["content"]
     assert (
         runner._pending_last30days_by_session[session_key]["topic"]
         == "Hermes Telegram applications"
@@ -129,7 +130,8 @@ async def test_last30days_source_choice_asks_then_rewrites_with_search_sources(
     assert runner._pending_last30days_by_session[session_key]["step"] == "choose_sources"
     assert "w = Web" in notices[-1][1]
     assert "i = Instagram" in notices[-1][1]
-    assert "x = X/Twitter" in notices[-1][1]
+    assert "th = Threads" in notices[-1][1]
+    assert "x = X/Twitter" not in notices[-1][1]
     assert "g = GitHub" in notices[-1][1]
 
     calls = []
@@ -156,7 +158,7 @@ async def test_last30days_source_choice_asks_then_rewrites_with_search_sources(
 
 def test_last30days_source_code_parser_dedupes_and_maps_web_to_grounding():
     sources = GatewayRunner._parse_last30days_source_codes(
-        "r, reddit, x, w, web, p, i, instagram, y"
+        "r, reddit, x, w, web, p, i, instagram, y, th, threads"
     )
 
     assert sources == [
@@ -166,6 +168,7 @@ def test_last30days_source_code_parser_dedupes_and_maps_web_to_grounding():
         "polymarket",
         "instagram",
         "youtube",
+        "threads",
     ]
 
 
@@ -250,16 +253,16 @@ async def test_last30days_telegram_summary_falls_back_but_preserves_links(monkey
     assert "原始來源：" in result
 
 
-def test_last30days_default_sources_include_youtube_and_instagram():
+def test_last30days_default_sources_include_youtube_instagram_and_threads():
     runner = _make_runner()
 
     sources = runner._last30days_engine_sources()
 
     assert sources == [
         "reddit",
-        "x",
         "youtube",
         "instagram",
+        "threads",
         "hackernews",
         "polymarket",
         "github",
@@ -272,9 +275,10 @@ def test_last30days_cjk_default_sources_prefer_social_and_web_over_github():
 
     sources = runner._last30days_engine_sources(topic="漁電共生")
 
-    assert sources == ["grounding", "youtube", "x", "instagram"]
+    assert sources == ["grounding", "youtube", "instagram", "threads"]
     assert "github" not in sources
     assert "hackernews" not in sources
+    assert "x" not in sources
     assert "tiktok" not in sources
 
 

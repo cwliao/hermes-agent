@@ -1910,7 +1910,7 @@ class GatewayInboundMixin:
             "2. 深入整理\n"
             "   較慢，會做較完整的來源交叉比對與重點整理。\n\n"
             "3. 指定來源\n"
-            "   你可以指定 Reddit、X/Twitter、GitHub、Hacker News、Polymarket、Web。\n\n"
+            "   你可以指定 Web、YouTube、X/Twitter、Instagram、Reddit、GitHub 等來源。\n\n"
             "請直接回覆 1、2 或 3。"
         )
 
@@ -1918,13 +1918,16 @@ class GatewayInboundMixin:
     def _format_last30days_source_prompt(topic: str) -> str:
         return (
             f"要查「{topic}」的哪些來源？可回覆多個代號：\n\n"
-            "r = Reddit\n"
+            "w = Web\n"
+            "y = YouTube\n"
             "x = X/Twitter\n"
+            "i = Instagram\n"
+            "t = TikTok\n"
+            "r = Reddit\n"
             "g = GitHub\n"
             "h = Hacker News\n"
-            "p = Polymarket\n"
-            "w = Web\n\n"
-            "例：r,g,h"
+            "p = Polymarket\n\n"
+            "例：w,y,x,i"
         )
 
     @staticmethod
@@ -1941,6 +1944,9 @@ class GatewayInboundMixin:
         mapping = {
             "r": "reddit", "reddit": "reddit", "g": "github", "github": "github", "git": "github",
             "x": "x", "twitter": "x", "x/twitter": "x",
+            "y": "youtube", "yt": "youtube", "youtube": "youtube",
+            "i": "instagram", "ig": "instagram", "instagram": "instagram",
+            "t": "tiktok", "tt": "tiktok", "tiktok": "tiktok",
             "h": "hackernews", "hn": "hackernews", "hackernews": "hackernews", "hacker-news": "hackernews",
             "p": "polymarket", "poly": "polymarket", "polymarket": "polymarket",
             "w": "grounding", "web": "grounding", "網路": "grounding",
@@ -1953,8 +1959,14 @@ class GatewayInboundMixin:
                 sources.append(source)
         return sources
 
-    def _last30days_engine_sources(self, sources: Optional[list[str]] = None) -> list[str]:
-        return sources or ["reddit", "x", "youtube", "hackernews", "polymarket", "github", "grounding"]
+    def _last30days_engine_sources(
+        self, sources: Optional[list[str]] = None, *, topic: str = ""
+    ) -> list[str]:
+        if sources:
+            return sources
+        if self._last30days_topic_has_cjk(topic):
+            return ["grounding", "youtube", "x", "instagram", "tiktok"]
+        return ["reddit", "x", "youtube", "instagram", "tiktok", "hackernews", "polymarket", "github", "grounding"]
 
     @staticmethod
     def _last30days_topic_has_cjk(topic: str) -> bool:
@@ -1962,7 +1974,7 @@ class GatewayInboundMixin:
 
     @staticmethod
     def _write_last30days_plan_file(topic: str, sources: list[str]) -> str:
-        allowed_sources = {"grounding", "youtube", "reddit", "hackernews", "github", "polymarket", "x"}
+        allowed_sources = {"grounding", "youtube", "reddit", "hackernews", "github", "polymarket", "x", "instagram", "tiktok"}
         plan_sources = [source for source in sources if source in allowed_sources]
         if not plan_sources:
             plan_sources = ["grounding", "youtube", "reddit", "hackernews"]
@@ -2062,6 +2074,10 @@ class GatewayInboundMixin:
             lines.append(f"{idx}. {url}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _last30days_summary_rejects_sources(summary: str) -> bool:
+        return bool(re.search(r"(完全無關|均與[^\n]{0,40}無關|無任何[^\n]{0,40}關聯|沒有找到有效來源)", summary or ""))
+
     def _last30days_local_summary_model(self) -> str:
         try:
             from gateway.run import _load_gateway_config
@@ -2125,6 +2141,8 @@ class GatewayInboundMixin:
         summary = await self._call_local_last30days_summary_llm(prompt)
         if not summary:
             summary = fallback
+        if self._last30days_summary_rejects_sources(summary):
+            links = []
         return summary.rstrip() + self._format_last30days_source_links(links)
 
     async def _run_last30days_telegram_report(
@@ -2137,15 +2155,16 @@ class GatewayInboundMixin:
         if not python:
             return "last30days 需要 Python 3.12+，但目前 gateway 找不到可用的 Python 3.12。"
 
+        engine_sources = self._last30days_engine_sources(sources, topic=topic)
         args = [
             python, str(script), (topic or "").strip(),
             "--deep" if mode == "deep" else "--quick",
-            "--auto-resolve", f"--search={','.join(self._last30days_engine_sources(sources))}",
+            "--auto-resolve", f"--search={','.join(engine_sources)}",
             "--emit=compact",
         ]
         plan_path: Optional[str] = None
         if self._last30days_topic_has_cjk(topic):
-            plan_path = self._write_last30days_plan_file(topic, self._last30days_engine_sources(sources))
+            plan_path = self._write_last30days_plan_file(topic, engine_sources)
             args.extend(["--plan", plan_path])
         timeout_s = 480 if mode == "deep" else 180
         env = os.environ.copy()

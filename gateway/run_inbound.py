@@ -14,6 +14,7 @@ import concurrent.futures
 import dataclasses
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import time
@@ -1216,9 +1217,7 @@ class GatewayInboundMixin:
 
         pending_last30days_result = await self._handle_pending_last30days_choice(event)
         if pending_last30days_result is not None:
-            if pending_last30days_result == "":
-                return ""
-            event.text = pending_last30days_result
+            return pending_last30days_result
 
         # Evict a leaked/reaped ``_running_agents`` slot before the busy-session fast-path.
         self._hm_evict_idle_stale_agent(_quick_key)
@@ -1910,7 +1909,7 @@ class GatewayInboundMixin:
             "2. 深入整理\n"
             "   較慢，會做較完整的來源交叉比對與重點整理。\n\n"
             "3. 指定來源\n"
-            "   你可以指定 Reddit、GitHub、Hacker News、Polymarket、Web。\n\n"
+            "   你可以指定 Reddit、X/Twitter、GitHub、Hacker News、Polymarket、Web。\n\n"
             "請直接回覆 1、2 或 3。"
         )
 
@@ -1919,6 +1918,7 @@ class GatewayInboundMixin:
         return (
             f"要查「{topic}」的哪些來源？可回覆多個代號：\n\n"
             "r = Reddit\n"
+            "x = X/Twitter\n"
             "g = GitHub\n"
             "h = Hacker News\n"
             "p = Polymarket\n"
@@ -1939,6 +1939,7 @@ class GatewayInboundMixin:
     def _parse_last30days_source_codes(text: str) -> list[str]:
         mapping = {
             "r": "reddit", "reddit": "reddit", "g": "github", "github": "github", "git": "github",
+            "x": "x", "twitter": "x", "x/twitter": "x",
             "h": "hackernews", "hn": "hackernews", "hackernews": "hackernews", "hacker-news": "hackernews",
             "p": "polymarket", "poly": "polymarket", "polymarket": "polymarket",
             "w": "grounding", "web": "grounding", "網路": "grounding",
@@ -1951,16 +1952,93 @@ class GatewayInboundMixin:
                 sources.append(source)
         return sources
 
+    def _last30days_engine_sources(self, sources: Optional[list[str]] = None) -> list[str]:
+        return sources or ["reddit", "x", "hackernews", "polymarket", "github", "grounding"]
+
+    def _last30days_script_path(self) -> Optional[Path]:
+        home = Path.home()
+        candidates = [
+            home / ".hermes/skills/research/last30days/scripts/last30days.py",
+            home / ".codex/skills/last30days/scripts/last30days.py",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return None
+
     @staticmethod
-    def _last30days_command_for_selection(
-        topic: str, mode: str, sources: Optional[list[str]] = None
+    def _last30days_python_path() -> str:
+        candidates = ["/usr/bin/python3.12", "python3.12", "python3"]
+        for candidate in candidates:
+            try:
+                proc = subprocess.run(
+                    [candidate, "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)"],
+                    check=False, capture_output=True, text=True, timeout=3,
+                )
+            except Exception:
+                continue
+            if proc.returncode == 0:
+                return candidate
+        return ""
+
+    @staticmethod
+    def _clean_last30days_engine_output(text: str, *, max_chars: int = 3600) -> str:
+        cleaned = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text or "")
+        kept: list[str] = []
+        for raw_line in cleaned.splitlines():
+            line = raw_line.rstrip()
+            lowered = line.lower()
+            if "tiktok and instagram" in lowered or lowered.startswith("bonus:"):
+                continue
+            kept.append(line)
+        cleaned = "\n".join(kept).strip()
+        if not cleaned:
+            return "last30days 沒有回傳可顯示內容。"
+        if len(cleaned) > max_chars:
+            cleaned = cleaned[: max_chars - 80].rstrip() + "\n\n[輸出過長，已截斷；可改用更精準的來源或主題再查。]"
+        return cleaned
+
+    async def _run_last30days_telegram_report(
+        self, *, topic: str, mode: str, sources: Optional[list[str]] = None
     ) -> str:
-        topic = (topic or "").strip()
-        if sources:
-            return f"/last30days {topic} --quick --auto-resolve --search={','.join(sources)}"
-        if mode == "deep":
-            return f"/last30days {topic} --deep --auto-resolve"
-        return f"/last30days {topic} --quick --auto-resolve"
+        script = self._last30days_script_path()
+        python = self._last30days_python_path()
+        if script is None:
+            return "找不到 last30days skill script。請先安裝 last30days skill。"
+        if not python:
+            return "last30days 需要 Python 3.12+，但目前 gateway 找不到可用的 Python 3.12。"
+
+        args = [
+            python, str(script), (topic or "").strip(),
+            "--deep" if mode == "deep" else "--quick",
+            "--auto-resolve", f"--search={','.join(self._last30days_engine_sources(sources))}",
+            "--emit=brief",
+        ]
+        timeout_s = 480 if mode == "deep" else 180
+        env = os.environ.copy()
+        env.setdefault("NO_COLOR", "1")
+        env.setdefault("TERM", "dumb")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+            )
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()  # type: ignore[name-defined]
+            except Exception:
+                pass
+            return "last30days 查詢逾時；請改用指定來源或更窄的主題再試一次。"
+        except Exception as exc:
+            logger.warning("last30days direct engine run failed: %s", exc)
+            return f"last30days 執行失敗：{exc}"
+
+        stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
+        stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
+        combined = stdout if proc.returncode == 0 else f"{stdout}\n{stderr}".strip()
+        if proc.returncode != 0:
+            logger.warning("last30days exited with %s: %s", proc.returncode, stderr.strip()[:1000])
+        return self._clean_last30days_engine_output(combined)
 
     async def _prompt_for_last30days_mode(
         self, *, source: SessionSource, session_key: str, topic: str
@@ -2000,8 +2078,10 @@ class GatewayInboundMixin:
                 await self._deliver_platform_notice(source, self._format_last30days_source_prompt(topic))
                 return ""
             self._pending_last30days_choices().pop(key, None)
-            setattr(event, "_last30days_choice_resolved", True)
-            return self._last30days_command_for_selection(topic, "sources", sources=sources)
+            await self._deliver_platform_notice(source, f"好，開始直接查詢「{topic}」。")
+            report = await self._run_last30days_telegram_report(topic=topic, mode="quick", sources=sources)
+            await self._deliver_platform_notice(source, report)
+            return ""
 
         mode = self._last30days_mode_from_choice(choice)
         if mode is None:
@@ -2013,8 +2093,11 @@ class GatewayInboundMixin:
             return ""
 
         self._pending_last30days_choices().pop(key, None)
-        setattr(event, "_last30days_choice_resolved", True)
-        return self._last30days_command_for_selection(topic, mode)
+        label = "深入整理" if mode == "deep" else "快速摘要"
+        await self._deliver_platform_notice(source, f"好，開始直接查詢「{topic}」({label})。")
+        report = await self._run_last30days_telegram_report(topic=topic, mode=mode)
+        await self._deliver_platform_notice(source, report)
+        return ""
 
     def _image_ocr_translate_config(self) -> dict:
         """Return normalized gateway image OCR/translation settings."""

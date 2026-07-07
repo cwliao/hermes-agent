@@ -14881,7 +14881,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return ""
 
     @staticmethod
-    def _clean_last30days_engine_output(text: str, *, max_chars: int = 3600) -> str:
+    def _normalize_last30days_engine_output(text: str) -> str:
         cleaned = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text or "")
         kept: list[str] = []
         for raw_line in cleaned.splitlines():
@@ -14892,7 +14892,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if lowered.startswith("bonus:"):
                 continue
             kept.append(line)
-        cleaned = "\n".join(kept).strip()
+        return "\n".join(kept).strip()
+
+    @staticmethod
+    def _clean_last30days_engine_output(text: str, *, max_chars: int = 3600) -> str:
+        cleaned = GatewayRunner._normalize_last30days_engine_output(text)
         if not cleaned:
             return "last30days 沒有回傳可顯示內容。"
         if re.search(r"^- Sources: none$", cleaned, re.MULTILINE):
@@ -14909,6 +14913,103 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if len(cleaned) > max_chars:
             cleaned = cleaned[: max_chars - 80].rstrip() + "\n\n[輸出過長，已截斷；可改用更精準的來源或主題再查。]"
         return cleaned
+
+    @staticmethod
+    def _extract_last30days_source_links(text: str, *, limit: int = 12) -> list[str]:
+        cleaned = GatewayRunner._normalize_last30days_engine_output(text)
+        links: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"https?://[^\s<>\]\)\"']+", cleaned):
+            url = match.group(0).rstrip(".,;:!?。！？、，)")
+            if url and url not in seen:
+                seen.add(url)
+                links.append(url)
+            if len(links) >= limit:
+                break
+        return links
+
+    @staticmethod
+    def _format_last30days_source_links(links: list[str]) -> str:
+        if not links:
+            return ""
+        lines = ["\n\n原始來源："]
+        for idx, url in enumerate(links, start=1):
+            lines.append(f"{idx}. {url}")
+        return "\n".join(lines)
+
+    def _last30days_local_summary_model(self) -> str:
+        try:
+            cfg = _load_gateway_config()
+            model = cfg_get(cfg, "model", "default", default="")
+        except Exception:
+            model = ""
+        return str(
+            os.environ.get("LAST30DAYS_SUMMARY_MODEL")
+            or model
+            or "ornith:9b"
+        )
+
+    async def _call_local_last30days_summary_llm(self, prompt: str) -> str:
+        try:
+            import httpx
+        except Exception:
+            return ""
+
+        base_url = os.environ.get("LAST30DAYS_SUMMARY_BASE_URL", "http://127.0.0.1:11434/v1")
+        payload = {
+            "model": self._last30days_local_summary_model(),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是嚴格的研究摘要器。只能根據使用者提供的資料摘要，"
+                        "不得加入未出現在資料中的內容。請使用繁體中文。"
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+            "max_tokens": 900,
+            "stream": False,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=75) as client:
+                response = await client.post(
+                    f"{base_url.rstrip('/')}/chat/completions",
+                    headers={"Authorization": "Bearer ollama"},
+                    json=payload,
+                )
+            response.raise_for_status()
+            data = response.json()
+            return str(data["choices"][0]["message"].get("content") or "").strip()
+        except Exception as exc:
+            logger.warning("last30days local summary failed: %s", exc)
+            return ""
+
+    async def _summarize_last30days_for_telegram(self, *, topic: str, engine_output: str) -> str:
+        links = self._extract_last30days_source_links(engine_output)
+        fallback = self._clean_last30days_engine_output(engine_output)
+        prompt_context = self._clean_last30days_engine_output(engine_output, max_chars=9000)
+        prompt = (
+            f"主題：{topic}\n\n"
+            "以下是 last30days engine 的原始結果。請快速整理成 Telegram 可讀的繁體中文摘要。\n\n"
+            "輸出格式：\n"
+            "📌 快速摘要\n"
+            "- 3 到 5 點重點，若資料不足請明確說資料不足\n\n"
+            "📌 摘要\n"
+            "用 2 到 4 句說明目前看起來的趨勢或重點。\n\n"
+            "📌 限制\n"
+            "- 說明來源數量、相關性或可信度限制\n\n"
+            "規則：\n"
+            "- 只能使用下方資料，不得補充舊記憶、Instagram、旅遊、美食或其他無關內容。\n"
+            "- 不要自行創造來源連結；原始來源連結會由系統附在文末。\n"
+            "- 不要輸出簡體中文。\n\n"
+            f"{prompt_context}"
+        )
+        summary = await self._call_local_last30days_summary_llm(prompt)
+        if not summary:
+            summary = fallback
+        return summary.rstrip() + self._format_last30days_source_links(links)
 
     async def _run_last30days_telegram_report(
         self,
@@ -14933,7 +15034,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             depth_arg,
             "--auto-resolve",
             f"--search={','.join(engine_sources)}",
-            "--emit=brief",
+            "--emit=compact",
         ]
         plan_path: Optional[str] = None
         if self._last30days_topic_has_cjk(topic):
@@ -14987,7 +15088,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 os.unlink(plan_path)
             except OSError:
                 pass
-        return self._clean_last30days_engine_output(combined)
+        return await self._summarize_last30days_for_telegram(
+            topic=topic,
+            engine_output=combined,
+        )
 
     async def _prompt_for_last30days_mode(
         self,

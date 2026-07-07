@@ -8712,6 +8712,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if pending_ocr_result is not None:
             return pending_ocr_result
 
+        pending_last30days_result = await self._handle_pending_last30days_choice(event)
+        if pending_last30days_result is not None:
+            if pending_last30days_result == "":
+                return ""
+            event.text = pending_last30days_result
+
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.
         is_internal = bool(getattr(event, "internal", False))
@@ -9876,6 +9882,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return str(result) if result else None
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
+
+        if (
+            source.platform == Platform.TELEGRAM
+            and self._is_last30days_command(command)
+            and not getattr(event, "_last30days_choice_resolved", False)
+        ):
+            topic = event.get_command_args().strip()
+            if not topic:
+                return (
+                    "請輸入要查的主題，例如：\n"
+                    "/last30days AI Agent 應用"
+                )
+            await self._prompt_for_last30days_mode(
+                source=source,
+                session_key=_quick_key,
+                topic=topic,
+            )
+            return ""
 
         # Skill slash commands: /skill-name loads the skill and sends to agent.
         # resolve_skill_command_key() handles the Telegram underscore/hyphen
@@ -14679,6 +14703,191 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as exc:
             logger.debug("image_routing: decision failed, falling back to text — %s", exc)
             return "text"
+
+    def _pending_last30days_choices(self) -> dict:
+        pending = getattr(self, "_pending_last30days_by_session", None)
+        if pending is None:
+            pending = {}
+            self._pending_last30days_by_session = pending
+        return pending
+
+    def _last30days_choice_key(self, source: SessionSource) -> str:
+        return self._session_key_for_source(source)
+
+    @staticmethod
+    def _is_last30days_command(command: Optional[str]) -> bool:
+        return bool(command) and str(command).replace("_", "-").lower() == "last30days"
+
+    @staticmethod
+    def _format_last30days_mode_prompt(topic: str) -> str:
+        return (
+            f"要怎麼查「{topic}」？\n\n"
+            "1. 快速摘要\n"
+            "   約 1 到 3 分鐘，適合先看趨勢與主要討論。\n\n"
+            "2. 深入整理\n"
+            "   較慢，會做較完整的來源交叉比對與重點整理。\n\n"
+            "3. 指定來源\n"
+            "   你可以指定 Reddit、GitHub、Hacker News、Polymarket、Web。\n\n"
+            "請直接回覆 1、2 或 3。"
+        )
+
+    @staticmethod
+    def _format_last30days_source_prompt(topic: str) -> str:
+        return (
+            f"要查「{topic}」的哪些來源？可回覆多個代號：\n\n"
+            "r = Reddit\n"
+            "g = GitHub\n"
+            "h = Hacker News\n"
+            "p = Polymarket\n"
+            "w = Web\n\n"
+            "例：r,g,h"
+        )
+
+    @staticmethod
+    def _last30days_mode_from_choice(choice: str) -> Optional[str]:
+        return {
+            "1": "quick",
+            "１": "quick",
+            "quick": "quick",
+            "快速": "quick",
+            "快速摘要": "quick",
+            "2": "deep",
+            "２": "deep",
+            "deep": "deep",
+            "深入": "deep",
+            "深入整理": "deep",
+            "3": "sources",
+            "３": "sources",
+            "source": "sources",
+            "sources": "sources",
+            "指定": "sources",
+            "指定來源": "sources",
+        }.get((choice or "").strip().lower())
+
+    @staticmethod
+    def _parse_last30days_source_codes(text: str) -> list[str]:
+        mapping = {
+            "r": "reddit",
+            "reddit": "reddit",
+            "g": "github",
+            "github": "github",
+            "git": "github",
+            "h": "hackernews",
+            "hn": "hackernews",
+            "hackernews": "hackernews",
+            "hacker-news": "hackernews",
+            "p": "polymarket",
+            "poly": "polymarket",
+            "polymarket": "polymarket",
+            "w": "grounding",
+            "web": "grounding",
+            "網路": "grounding",
+        }
+        tokens = [
+            tok
+            for tok in re.split(r"[\s,，、/]+", (text or "").strip().lower())
+            if tok
+        ]
+        sources: list[str] = []
+        for token in tokens:
+            source = mapping.get(token)
+            if source and source not in sources:
+                sources.append(source)
+        return sources
+
+    @staticmethod
+    def _last30days_command_for_selection(
+        topic: str,
+        mode: str,
+        sources: Optional[list[str]] = None,
+    ) -> str:
+        topic = (topic or "").strip()
+        if sources:
+            return f"/last30days {topic} --quick --auto-resolve --search={','.join(sources)}"
+        if mode == "deep":
+            return f"/last30days {topic} --deep --auto-resolve"
+        return f"/last30days {topic} --quick --auto-resolve"
+
+    async def _prompt_for_last30days_mode(
+        self,
+        *,
+        source: SessionSource,
+        session_key: str,
+        topic: str,
+    ) -> None:
+        self._pending_last30days_choices()[session_key] = {
+            "source": dataclasses.replace(source),
+            "topic": topic,
+            "step": "choose_mode",
+            "created_at": time.time(),
+        }
+        await self._deliver_platform_notice(
+            source,
+            self._format_last30days_mode_prompt(topic),
+        )
+
+    async def _handle_pending_last30days_choice(
+        self,
+        event: MessageEvent,
+    ) -> Optional[str]:
+        source = getattr(event, "source", None)
+        if source is None or getattr(event, "media_urls", None):
+            return None
+        key = self._last30days_choice_key(source)
+        pending = self._pending_last30days_choices().get(key)
+        if not pending:
+            return None
+
+        choice = (getattr(event, "text", "") or "").strip()
+        if not choice:
+            return None
+        if choice.startswith("/"):
+            return None
+        if choice.lower() in {"cancel", "取消", "算了"}:
+            self._pending_last30days_choices().pop(key, None)
+            await self._deliver_platform_notice(source, "已取消 last30days 查詢。")
+            return ""
+
+        topic = str(pending.get("topic") or "").strip()
+        if not topic:
+            self._pending_last30days_choices().pop(key, None)
+            return None
+
+        step = pending.get("step") or "choose_mode"
+        if step == "choose_sources":
+            sources = self._parse_last30days_source_codes(choice)
+            if not sources:
+                await self._deliver_platform_notice(
+                    source,
+                    self._format_last30days_source_prompt(topic),
+                )
+                return ""
+            self._pending_last30days_choices().pop(key, None)
+            setattr(event, "_last30days_choice_resolved", True)
+            return self._last30days_command_for_selection(
+                topic,
+                "sources",
+                sources=sources,
+            )
+
+        mode = self._last30days_mode_from_choice(choice)
+        if mode is None:
+            await self._deliver_platform_notice(
+                source,
+                self._format_last30days_mode_prompt(topic),
+            )
+            return ""
+        if mode == "sources":
+            pending["step"] = "choose_sources"
+            await self._deliver_platform_notice(
+                source,
+                self._format_last30days_source_prompt(topic),
+            )
+            return ""
+
+        self._pending_last30days_choices().pop(key, None)
+        setattr(event, "_last30days_choice_resolved", True)
+        return self._last30days_command_for_selection(topic, mode)
 
     def _image_ocr_translate_config(self) -> dict:
         """Return normalized gateway image OCR/translation settings."""

@@ -14798,7 +14798,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return sources
 
     def _last30days_engine_sources(self, sources: Optional[list[str]] = None) -> list[str]:
-        return sources or ["reddit", "x", "hackernews", "polymarket", "github", "grounding"]
+        return sources or [
+            "reddit",
+            "x",
+            "youtube",
+            "hackernews",
+            "polymarket",
+            "github",
+            "grounding",
+        ]
+
+    @staticmethod
+    def _last30days_topic_has_cjk(topic: str) -> bool:
+        return bool(re.search(r"[\u3400-\u9fff]", topic or ""))
+
+    @staticmethod
+    def _write_last30days_plan_file(topic: str, sources: list[str]) -> str:
+        allowed_sources = {
+            "grounding",
+            "youtube",
+            "reddit",
+            "hackernews",
+            "github",
+            "polymarket",
+            "x",
+        }
+        plan_sources = [source for source in sources if source in allowed_sources]
+        if not plan_sources:
+            plan_sources = ["grounding", "youtube", "reddit", "hackernews"]
+        plan = {
+            "intent": "news",
+            "freshness_mode": "balanced_recent",
+            "cluster_mode": "story",
+            "subqueries": [
+                {
+                    "label": "primary",
+                    "search_query": topic,
+                    "ranking_query": (
+                        f"最近30天與「{topic}」相關的政策、爭議、產業或社群討論有哪些？"
+                    ),
+                    "sources": plan_sources,
+                    "weight": 1.0,
+                }
+            ],
+        }
+        fd, plan_path = tempfile.mkstemp(prefix="last30days-plan-", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(plan, handle, ensure_ascii=False)
+        return plan_path
 
     def _last30days_script_path(self) -> Optional[Path]:
         home = Path.home()
@@ -14848,6 +14895,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         cleaned = "\n".join(kept).strip()
         if not cleaned:
             return "last30days 沒有回傳可顯示內容。"
+        if re.search(r"^- Sources: none$", cleaned, re.MULTILINE):
+            cleaned = re.sub(
+                r"\n## Ranked Storylines.*",
+                (
+                    "\n\n沒有找到有效來源；已避免用低相關 Reddit/英文 aquaculture 結果補空白。"
+                    "中文/台灣主題要提高覆蓋率，建議啟用 X/Twitter backend "
+                    "或 Brave/Serper/Exa/Parallel 任一 web backend。"
+                ),
+                cleaned,
+                flags=re.DOTALL,
+            )
         if len(cleaned) > max_chars:
             cleaned = cleaned[: max_chars - 80].rstrip() + "\n\n[輸出過長，已截斷；可改用更精準的來源或主題再查。]"
         return cleaned
@@ -14877,8 +14935,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             f"--search={','.join(engine_sources)}",
             "--emit=brief",
         ]
+        plan_path: Optional[str] = None
+        if self._last30days_topic_has_cjk(topic):
+            plan_path = self._write_last30days_plan_file(topic, engine_sources)
+            args.extend(["--plan", plan_path])
         timeout_s = 480 if mode == "deep" else 180
         env = os.environ.copy()
+        venv_bin = "/home/cwliao/.hermes/hermes-agent/venv/bin"
+        env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
         env.setdefault("NO_COLOR", "1")
         env.setdefault("TERM", "dumb")
         try:
@@ -14894,9 +14958,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 proc.kill()  # type: ignore[name-defined]
             except Exception:
                 pass
+            if plan_path:
+                try:
+                    os.unlink(plan_path)
+                except OSError:
+                    pass
             return "last30days 查詢逾時；請改用指定來源或更窄的主題再試一次。"
         except Exception as exc:
             logger.warning("last30days direct engine run failed: %s", exc)
+            if plan_path:
+                try:
+                    os.unlink(plan_path)
+                except OSError:
+                    pass
             return f"last30days 執行失敗：{exc}"
 
         stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
@@ -14908,6 +14982,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 proc.returncode,
                 stderr.strip()[:1000],
             )
+        if plan_path:
+            try:
+                os.unlink(plan_path)
+            except OSError:
+                pass
         return self._clean_last30days_engine_output(combined)
 
     async def _prompt_for_last30days_mode(

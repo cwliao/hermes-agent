@@ -95,6 +95,16 @@ def _platform_names(mapping: Any) -> set[str]:
     return {getattr(platform, "value", str(platform)).lower() for platform in mapping}
 
 
+def _resolve_notifier_gateway_identity() -> Optional[str]:
+    """Resolve the gateway identity used for per-board dispatcher ownership."""
+    try:
+        from gateway.relay import relay_connection_auth
+        gateway_id, _ = relay_connection_auth()
+    except Exception:
+        return None
+    return str(gateway_id).strip() if gateway_id else None
+
+
 # --- Collection (runs in a worker thread) ---
 
 
@@ -111,6 +121,7 @@ class _Collector:
         self.profile_adapters = getattr(runner, "_profile_adapters", {})
         self.notifier_profiles = {notifier_profile}
         self.notifier_profiles.update(str(p).strip() for p in self.profile_adapters if str(p).strip())
+        self.gateway_identity = _resolve_notifier_gateway_identity()
         # Include every platform any secondary profile has live. This is only a
         # coarse pre-filter; the precise per-profile check (_authorization_adapter,
         # no default fallback) runs at delivery and rewinds the claim if it
@@ -129,6 +140,16 @@ class _Collector:
         seen_db_paths: set[str] = set()
         for board_meta in _list_boards(kb):
             slug = board_meta.get("slug") or kb.DEFAULT_BOARD
+            board_owner = str(board_meta.get("dispatcher_owner") or "").strip()
+            if board_owner and self.gateway_identity and board_owner != self.gateway_identity:
+                logger.debug(
+                    "kanban notifier: skipping board %s due to dispatcher_owner mismatch "
+                    "(board=%s, current=%s)",
+                    slug,
+                    board_owner,
+                    self.gateway_identity,
+                )
+                continue
             db_path = board_meta.get("db_path")
             try:
                 resolved_db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(kb.kanban_db_path(slug).resolve())

@@ -14725,7 +14725,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "2. 深入整理\n"
             "   較慢，會做較完整的來源交叉比對與重點整理。\n\n"
             "3. 指定來源\n"
-            "   你可以指定 Web、YouTube、X/Twitter、Instagram、Reddit、GitHub 等來源。\n\n"
+            "   你可以指定 Web、YouTube、Instagram、Threads、Reddit、GitHub 等來源。\n\n"
             "請直接回覆 1、2 或 3。"
         )
 
@@ -14735,14 +14735,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             f"要查「{topic}」的哪些來源？可回覆多個代號：\n\n"
             "w = Web\n"
             "y = YouTube\n"
-            "x = X/Twitter\n"
             "i = Instagram\n"
-            "t = TikTok\n"
+            "th = Threads\n"
             "r = Reddit\n"
             "g = GitHub\n"
             "h = Hacker News\n"
             "p = Polymarket\n\n"
-            "例：w,y,x,i"
+            "例：w,y,i,th"
         )
 
     @staticmethod
@@ -14780,6 +14779,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "i": "instagram",
             "ig": "instagram",
             "instagram": "instagram",
+            "th": "threads",
+            "thread": "threads",
+            "threads": "threads",
             "g": "github",
             "github": "github",
             "git": "github",
@@ -14815,12 +14817,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if sources:
             return sources
         if self._last30days_topic_has_cjk(topic):
-            return ["grounding", "youtube", "x", "instagram"]
+            return ["grounding", "youtube", "instagram", "threads"]
         return [
             "reddit",
-            "x",
             "youtube",
             "instagram",
+            "threads",
             "hackernews",
             "polymarket",
             "github",
@@ -14842,6 +14844,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "polymarket",
             "x",
             "instagram",
+            "threads",
         }
         plan_sources = [source for source in sources if source in allowed_sources]
         if not plan_sources:

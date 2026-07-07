@@ -39,6 +39,26 @@ pid="$(systemctl --user show hermes-gateway.service -p MainPID --value)"
 tr '\0' '\n' < "/proc/$pid/environ" | grep -E 'SSL_CERT_FILE|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE'
 ```
 
+### OpenAI-compatible local Ollama env
+
+This host uses the OpenAI-compatible environment variables to point Hermes at
+local Ollama for the main text model (`openai-api` provider, `ornith:9b`). The
+expected `~/.hermes/.env` entries are:
+
+```text
+OPENAI_API_KEY=ollama
+OPENAI_BASE_URL=http://localhost:11434/v1
+```
+
+`OPENAI_API_KEY` is intentionally a dummy value for local Ollama. Do not keep a
+real OpenAI API key in the Hermes gateway runtime environment while
+`OPENAI_BASE_URL` points at localhost; it is unnecessary for Ollama and creates
+an avoidable secret-exposure risk in logs, diagnostics, or child processes.
+
+On 2026-07-07 the duplicate real `OPENAI_API_KEY` entries in `~/.hermes/.env`
+were removed and replaced with the dummy `ollama` value. The gateway was
+restarted afterward so the live process inherited the cleaned environment.
+
 ### Post-change restart rule
 
 When committing or merging changes in this checkout while the gateway is running

@@ -184,3 +184,53 @@ async def test_telegram_image_ocr_translate_preempts_native_routing(monkeypatch)
     session_key = runner._session_key_for_source(source)
     assert result == "[ocr translated]\n\n翻譯這張圖"
     assert runner._pending_native_image_paths_by_session.get(session_key) is None
+
+@pytest.mark.asyncio
+async def test_telegram_image_only_ocr_sends_direct_reply_and_skips_agent(monkeypatch):
+    runner = _make_runner()
+    source = _source()
+    event = _image_event("")
+    cfg = _auto_config()
+    cfg["gateway"] = {
+        "image_ocr_translate": {
+            "enabled": True,
+            "platforms": ["telegram"],
+            "target_language": "Traditional Chinese",
+        }
+    }
+
+    sent = {}
+
+    async def fake_enrich(user_text, image_paths, *, ocr_translate=False):
+        assert user_text == ""
+        assert image_paths == ["/tmp/cashback.png"]
+        assert ocr_translate is True
+        return (
+            "[The user sent an image. OCR and translation result:\n"
+            "1. OCR text: Breaking news\n"
+            "2. Translation: 突發新聞]\n"
+            "[If you need a closer look, use vision_analyze with image_url: /tmp/cashback.png ~]"
+            "\n[Gateway instruction: internal]"
+        )
+
+    async def fake_direct_reply(src, enriched_text):
+        sent["source"] = src
+        sent["reply"] = runner._format_direct_image_ocr_reply(enriched_text)
+
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
+    monkeypatch.setattr(runner, "_enrich_message_with_vision", fake_enrich)
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result is None
+    assert sent["source"] == source
+    assert "圖片 OCR / 翻譯" in sent["reply"]
+    assert "Breaking news" in sent["reply"]
+    assert "突發新聞" in sent["reply"]
+    assert "Gateway instruction" not in sent["reply"]
+    assert "vision_analyze" not in sent["reply"]

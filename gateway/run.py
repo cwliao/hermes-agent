@@ -10255,6 +10255,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         image_paths,
                         ocr_translate=_ocr_translate_images,
                     )
+                    if _ocr_translate_images and not (event.text or "").strip():
+                        await self._deliver_direct_image_ocr_reply(source, message_text)
+                        return None
 
             if audio_paths:
                 message_text, _successful_transcripts = await self._enrich_message_with_transcription(
@@ -14716,6 +14719,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         platform = getattr(source, "platform", None)
         platform_name = getattr(platform, "value", platform)
         return str(platform_name or "").lower() in settings.get("platforms", set())
+
+    def _format_direct_image_ocr_reply(self, enriched_text: str) -> str:
+        """Extract a user-facing OCR reply from the internal enrichment block."""
+        text = enriched_text or ""
+        marker = "OCR and translation result:\n"
+        if marker in text:
+            text = text.split(marker, 1)[1]
+        text = text.split("\n[If you need a closer look", 1)[0]
+        text = text.split("\n[Gateway instruction:", 1)[0]
+        text = text.strip().strip("]").strip()
+        if not text:
+            text = "OCR did not return readable text from this image."
+        return f"📌 圖片 OCR / 翻譯\n\n{text}"
+
+    async def _deliver_direct_image_ocr_reply(self, source: SessionSource, enriched_text: str) -> None:
+        await self._deliver_platform_notice(
+            source,
+            self._format_direct_image_ocr_reply(enriched_text),
+        )
 
     def _image_analysis_prompt(self, *, ocr_translate: bool = False) -> str:
         if not ocr_translate:

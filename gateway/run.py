@@ -24722,9 +24722,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "i": "instagram",
             "ig": "instagram",
             "instagram": "instagram",
-            "t": "tiktok",
-            "tt": "tiktok",
-            "tiktok": "tiktok",
             "g": "github",
             "github": "github",
             "git": "github",
@@ -24760,13 +24757,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if sources:
             return sources
         if self._last30days_topic_has_cjk(topic):
-            return ["grounding", "youtube", "x", "instagram", "tiktok"]
+            return ["grounding", "youtube", "x", "instagram"]
         return [
             "reddit",
             "x",
             "youtube",
             "instagram",
-            "tiktok",
             "hackernews",
             "polymarket",
             "github",
@@ -24788,7 +24784,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "polymarket",
             "x",
             "instagram",
-            "tiktok",
         }
         plan_sources = [source for source in sources if source in allowed_sources]
         if not plan_sources:

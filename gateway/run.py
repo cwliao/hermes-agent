@@ -14725,7 +14725,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "2. 深入整理\n"
             "   較慢，會做較完整的來源交叉比對與重點整理。\n\n"
             "3. 指定來源\n"
-            "   你可以指定 Reddit、X/Twitter、GitHub、Hacker News、Polymarket、Web。\n\n"
+            "   你可以指定 Web、YouTube、X/Twitter、Instagram、Reddit、GitHub 等來源。\n\n"
             "請直接回覆 1、2 或 3。"
         )
 
@@ -14733,13 +14733,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _format_last30days_source_prompt(topic: str) -> str:
         return (
             f"要查「{topic}」的哪些來源？可回覆多個代號：\n\n"
-            "r = Reddit\n"
+            "w = Web\n"
+            "y = YouTube\n"
             "x = X/Twitter\n"
+            "i = Instagram\n"
+            "t = TikTok\n"
+            "r = Reddit\n"
             "g = GitHub\n"
             "h = Hacker News\n"
-            "p = Polymarket\n"
-            "w = Web\n\n"
-            "例：r,g,h"
+            "p = Polymarket\n\n"
+            "例：w,y,x,i"
         )
 
     @staticmethod
@@ -14771,6 +14774,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "x": "x",
             "twitter": "x",
             "x/twitter": "x",
+            "y": "youtube",
+            "yt": "youtube",
+            "youtube": "youtube",
+            "i": "instagram",
+            "ig": "instagram",
+            "instagram": "instagram",
+            "t": "tiktok",
+            "tt": "tiktok",
+            "tiktok": "tiktok",
             "g": "github",
             "github": "github",
             "git": "github",
@@ -14797,11 +14809,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 sources.append(source)
         return sources
 
-    def _last30days_engine_sources(self, sources: Optional[list[str]] = None) -> list[str]:
-        return sources or [
+    def _last30days_engine_sources(
+        self,
+        sources: Optional[list[str]] = None,
+        *,
+        topic: str = "",
+    ) -> list[str]:
+        if sources:
+            return sources
+        if self._last30days_topic_has_cjk(topic):
+            return ["grounding", "youtube", "x", "instagram", "tiktok"]
+        return [
             "reddit",
             "x",
             "youtube",
+            "instagram",
+            "tiktok",
             "hackernews",
             "polymarket",
             "github",
@@ -14822,6 +14845,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "github",
             "polymarket",
             "x",
+            "instagram",
+            "tiktok",
         }
         plan_sources = [source for source in sources if source in allowed_sources]
         if not plan_sources:
@@ -14937,6 +14962,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             lines.append(f"{idx}. {url}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _last30days_summary_rejects_sources(summary: str) -> bool:
+        return bool(
+            re.search(
+                r"(完全無關|均與[^\n]{0,40}無關|無任何[^\n]{0,40}關聯|沒有找到有效來源)",
+                summary or "",
+            )
+        )
+
     def _last30days_local_summary_model(self) -> str:
         try:
             cfg = _load_gateway_config()
@@ -15009,6 +15043,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         summary = await self._call_local_last30days_summary_llm(prompt)
         if not summary:
             summary = fallback
+        if self._last30days_summary_rejects_sources(summary):
+            links = []
         return summary.rstrip() + self._format_last30days_source_links(links)
 
     async def _run_last30days_telegram_report(
@@ -15025,7 +15061,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not python:
             return "last30days 需要 Python 3.12+，但目前 gateway 找不到可用的 Python 3.12。"
 
-        engine_sources = self._last30days_engine_sources(sources)
+        engine_sources = self._last30days_engine_sources(sources, topic=topic)
         depth_arg = "--deep" if mode == "deep" else "--quick"
         args = [
             python,

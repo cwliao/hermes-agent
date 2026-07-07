@@ -137,11 +137,15 @@ Operational notes:
   first stores the image temporarily and asks the user to choose a purpose:
   `1. OCR + 整理文字`, `2. 整理名片`, or `3. 整理新聞`. The selected path then
   replies before the main agent runs. The primary engine is local Tesseract
-  (`chi_tra+chi_sim+eng`); if Tesseract extracts text, the response is
-  deterministic OCR output and does not call an LLM for free-form translation.
-  If Tesseract returns no text, the gateway falls back to the local vision
-  model. This bypasses prior group-session context, browser/web/social-media
-  tools, and internal cache paths.
+  (`chi_tra+chi_sim+eng`). Modes 1 and 2 return deterministic OCR-centered
+  output when Tesseract extracts text. Mode 3 uses a stateless local-first LLM
+  post-process on the Tesseract text only, asking it to reflow news paragraphs,
+  summarize key points, preserve uncertainty, avoid adding facts that are not
+  present in OCR, and output Traditional Chinese only. The displayed OCR text is
+  also normalized to Traditional Chinese to avoid Simplified Chinese leakage. If
+  Tesseract returns no text, the gateway falls back to the local vision model.
+  This bypasses prior group-session context, browser/web/social-media tools, and
+  internal cache paths.
 - If OCR quality is poor, first check `ollama list` and the health of
   `granite3.2-vision:latest`, then test `vision_analyze` against the saved image
   path from the gateway log.

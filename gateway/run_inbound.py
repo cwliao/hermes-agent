@@ -1615,6 +1615,9 @@ class GatewayInboundMixin:
         image_paths, audio_paths, audio_file_paths, video_paths = self._classify_inbound_media(event, _pending_stt_prepared)
         if image_paths:
             message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
+            if self._should_ocr_translate_images_for_source(source) and not (event.text or "").strip():
+                await self._deliver_direct_image_ocr_reply(source, message_text)
+                return None
         if audio_paths:
             message_text = await self._enrich_inbound_voice(event, source, message_text, audio_paths)
         message_text = self._prepend_inbound_media_file_notes(message_text, audio_file_paths, video_paths)
@@ -1924,6 +1927,22 @@ class GatewayInboundMixin:
             "3. Uncertain text: list any characters or lines that are unclear."
             f"{visual_summary}"
         )
+
+    def _format_direct_image_ocr_reply(self, enriched_text: str) -> str:
+        """Extract a user-facing OCR reply from the internal enrichment block."""
+        text = enriched_text or ""
+        marker = "OCR and translation result:\n"
+        if marker in text:
+            text = text.split(marker, 1)[1]
+        text = text.split("\n[If you need a closer look", 1)[0]
+        text = text.split("\n[Gateway instruction:", 1)[0]
+        text = text.strip().strip("]").strip()
+        if not text:
+            text = "OCR did not return readable text from this image."
+        return f"📌 圖片 OCR / 翻譯\n\n{text}"
+
+    async def _deliver_direct_image_ocr_reply(self, source: SessionSource, enriched_text: str) -> None:
+        await self._deliver_platform_notice(source, self._format_direct_image_ocr_reply(enriched_text))
 
     async def _enrich_message_with_vision(
         self, user_text: str, image_paths: List[str], *, ocr_translate: bool = False

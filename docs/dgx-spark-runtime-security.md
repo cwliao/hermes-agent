@@ -134,9 +134,10 @@ Operational notes:
   turns through text enrichment even when the active chat model supports native
   image input; OCR and translation need text injected into the turn.
 - If the Telegram image has no more specific caption/request, the gateway
-  treats it as an image-only OCR turn: reply with OCR text and Traditional
-  Chinese translation directly, ignore prior group-session context, avoid
-  browser/web/social-media searches, and do not expose internal cache paths.
+  treats it as an image-only OCR turn and directly replies with the OCR text and
+  Traditional Chinese translation before the main agent runs. This bypasses
+  prior group-session context, browser/web/social-media tools, and internal
+  cache paths.
 - If OCR quality is poor, first check `ollama list` and the health of
   `granite3.2-vision:latest`, then test `vision_analyze` against the saved image
   path from the gateway log.

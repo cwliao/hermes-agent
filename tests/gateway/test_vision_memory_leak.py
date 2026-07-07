@@ -105,8 +105,8 @@ class TestEnrichMessageWithVision:
         assert "Do not invent" in prompt
         assert "OCR and translation result" in out
         assert "HELLO" in out
-        assert "reply with the OCR text" in out
-        assert "Traditional Chinese translation" in out
+        assert "primary evidence" in out
+        assert "internal file paths" in out
 
     def test_default_vision_mode_does_not_add_ocr_reply_instruction(self, gateway_runner):
         fake_result = json.dumps({
@@ -120,3 +120,20 @@ class TestEnrichMessageWithVision:
 
         assert "A photograph of a receipt" in out
         assert "reply with the OCR text" not in out
+
+    def test_image_only_ocr_turn_ignores_prior_context_and_tools(self, gateway_runner):
+        fake_result = json.dumps({
+            "success": True,
+            "analysis": "OCR text: Breaking news headline\nTranslation: 新聞標題",
+        })
+
+        with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=fake_result)):
+            out = _run(gateway_runner._enrich_message_with_vision(
+                "", ["/tmp/news.jpg"], ocr_translate=True
+            ))
+
+        assert "image-only OCR turn" in out
+        assert "independent from prior conversation history" in out
+        assert "Do not browse" in out
+        assert "do not search social media" in out
+        assert "Breaking news headline" in out

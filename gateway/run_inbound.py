@@ -1985,7 +1985,7 @@ class GatewayInboundMixin:
         if not ocr_text:
             enriched = await self._enrich_message_with_vision("", image_paths, ocr_translate=True)
             await self._deliver_direct_image_ocr_reply(source, enriched)
-            return None
+            return ""
         if normalized == "news":
             reply_text = await self._format_news_ocr_reply(ocr_text)
         else:
@@ -1995,7 +1995,7 @@ class GatewayInboundMixin:
             reply_text,
             already_formatted=True,
         )
-        return None
+        return ""
 
     def _image_analysis_prompt(self, *, ocr_translate: bool = False) -> str:
         if not ocr_translate:

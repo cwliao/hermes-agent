@@ -15,6 +15,7 @@ def _make_runner() -> GatewayRunner:
     runner._pending_native_image_paths_by_session = {}
     runner._session_model_overrides = {}
     runner._session_reasoning_overrides = {}
+    runner._pending_image_ocr_by_session = {}
     return runner
 
 
@@ -186,7 +187,7 @@ async def test_telegram_image_ocr_translate_preempts_native_routing(monkeypatch)
     assert runner._pending_native_image_paths_by_session.get(session_key) is None
 
 @pytest.mark.asyncio
-async def test_telegram_image_only_ocr_sends_direct_reply_and_skips_agent(monkeypatch):
+async def test_telegram_image_only_ocr_prompts_for_purpose(monkeypatch):
     runner = _make_runner()
     source = _source()
     event = _image_event("")
@@ -201,27 +202,16 @@ async def test_telegram_image_only_ocr_sends_direct_reply_and_skips_agent(monkey
 
     sent = {}
 
-    async def fake_enrich(user_text, image_paths, *, ocr_translate=False):
-        assert user_text == ""
-        assert image_paths == ["/tmp/cashback.png"]
-        assert ocr_translate is True
-        return (
-            "[The user sent an image. OCR and translation result:\n"
-            "1. OCR text: Breaking news\n"
-            "2. Translation: 突發新聞]\n"
-            "[If you need a closer look, use vision_analyze with image_url: /tmp/cashback.png ~]"
-            "\n[Gateway instruction: internal]"
-        )
-
-    async def fake_direct_reply(src, enriched_text, *, already_formatted=False):
+    async def fake_notice(src, content):
         sent["source"] = src
-        sent["reply"] = enriched_text if already_formatted else runner._format_direct_image_ocr_reply(enriched_text)
-        sent["already_formatted"] = already_formatted
+        sent["content"] = content
+
+    async def fail_enrich(*_args, **_kwargs):
+        pytest.fail("upload should only ask for purpose, not OCR immediately")
 
     monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
-    monkeypatch.setattr(runner, "_extract_images_text_with_tesseract", lambda _paths: "")
-    monkeypatch.setattr(runner, "_enrich_message_with_vision", fake_enrich)
-    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+    monkeypatch.setattr(runner, "_deliver_platform_notice", fake_notice)
+    monkeypatch.setattr(runner, "_enrich_message_with_vision", fail_enrich)
 
     result = await runner._prepare_inbound_message_text(
         event=event,
@@ -229,27 +219,30 @@ async def test_telegram_image_only_ocr_sends_direct_reply_and_skips_agent(monkey
         history=[],
     )
 
+    session_key = runner._session_key_for_source(source)
     assert result is None
     assert sent["source"] == source
-    assert sent["already_formatted"] is False
-    assert "圖片 OCR / 翻譯" in sent["reply"]
-    assert "Breaking news" in sent["reply"]
-    assert "突發新聞" in sent["reply"]
-    assert "Gateway instruction" not in sent["reply"]
-    assert "vision_analyze" not in sent["reply"]
+    assert "1. OCR + 整理文字" in sent["content"]
+    assert "2. 整理名片" in sent["content"]
+    assert "3. 整理新聞" in sent["content"]
+    assert runner._pending_image_ocr_by_session[session_key]["image_paths"] == ["/tmp/cashback.png"]
+
 
 @pytest.mark.asyncio
-async def test_telegram_image_only_ocr_uses_tesseract_before_vision(monkeypatch):
+async def test_telegram_image_choice_news_uses_tesseract_and_skips_vision(monkeypatch):
     runner = _make_runner()
     source = _source()
-    event = _image_event("")
-    cfg = _auto_config()
-    cfg["gateway"] = {
-        "image_ocr_translate": {
-            "enabled": True,
-            "platforms": ["telegram"],
-        }
+    session_key = runner._session_key_for_source(source)
+    runner._pending_image_ocr_by_session[session_key] = {
+        "source": source,
+        "image_paths": ["/tmp/news.png"],
+        "created_at": 1.0,
     }
+    event = MessageEvent(
+        text="3",
+        message_type=MessageType.TEXT,
+        source=source,
+    )
     sent = {}
 
     async def fail_enrich(*_args, **_kwargs):
@@ -260,19 +253,16 @@ async def test_telegram_image_only_ocr_uses_tesseract_before_vision(monkeypatch)
         sent["reply"] = enriched_text
         sent["already_formatted"] = already_formatted
 
-    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
     monkeypatch.setattr(runner, "_extract_images_text_with_tesseract", lambda paths: "台積電新聞標題")
     monkeypatch.setattr(runner, "_enrich_message_with_vision", fail_enrich)
     monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
 
-    result = await runner._prepare_inbound_message_text(
-        event=event,
-        source=source,
-        history=[],
-    )
+    result = await runner._handle_pending_image_ocr_choice(event)
 
     assert result is None
     assert sent["source"] == source
     assert sent["already_formatted"] is True
+    assert "新聞 OCR / 整理" in sent["reply"]
     assert "台積電新聞標題" in sent["reply"]
     assert "未呼叫 LLM" in sent["reply"]
+    assert session_key not in runner._pending_image_ocr_by_session

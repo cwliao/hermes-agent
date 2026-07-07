@@ -25,6 +25,27 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 
+def _resolve_notifier_gateway_identity() -> Optional[str]:
+    """Resolve the current gateway identity used for per-board dispatch owner checks.
+
+    Uses relay auth metadata when available so multi-gateway deployments can use
+    a shared ``dispatcher_owner`` contract without requiring a separate config.
+    Falls back to ``None`` when identity cannot be resolved, and notifier falls
+    back to legacy global behavior.
+    """
+    try:
+        from gateway.relay import relay_connection_auth
+    except Exception:
+        return None
+    try:
+        gateway_id, _ = relay_connection_auth()
+    except Exception:
+        return None
+    if not gateway_id:
+        return None
+    return str(gateway_id).strip()
+
+
 def _resolve_auto_decompose_settings(
     load_config: Callable[[], Any],
 ) -> "tuple[bool, int]":
@@ -134,7 +155,13 @@ class GatewayKanbanWatchersMixin:
         # Gate: only the dispatch-owning gateway opens kanban DBs for notifier polling.
         # Non-dispatch gateways have no subscriptions to deliver — all kanban state lives
         # in the dispatch owner's per-board DBs. This prevents N-gateway -shm contention.
-        # TODO: gate per-board when per-board dispatcher_owner tracking lands.
+        # Per-board owner gating: if a board declares dispatcher_owner and this gateway identity is known, only the owner processes it; otherwise legacy global behavior remains.
+        notifier_gateway_identity = _resolve_notifier_gateway_identity()
+        if notifier_gateway_identity:
+            logger.debug(
+                "kanban notifier: resolved gateway identity for per-board gate: %s",
+                notifier_gateway_identity,
+            )
         try:
             from hermes_cli.config import load_config as _load_config
         except Exception:
@@ -218,6 +245,16 @@ class GatewayKanbanWatchersMixin:
                     seen_db_paths: set[str] = set()
                     for board_meta in boards:
                         slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
+                        board_owner = (str(board_meta.get("dispatcher_owner") or "")).strip()
+                        if board_owner and notifier_gateway_identity and board_owner != notifier_gateway_identity:
+                            logger.debug(
+                                "kanban notifier: skipping board %s due to dispatcher_owner mismatch "
+                                "(board=%s, current=%s)",
+                                slug,
+                                board_owner,
+                                notifier_gateway_identity,
+                            )
+                            continue
                         db_path = board_meta.get("db_path")
                         try:
                             resolved_db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(_kb.kanban_db_path(slug).resolve())

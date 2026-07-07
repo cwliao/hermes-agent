@@ -72,3 +72,45 @@ def test_notifier_watcher_runs_when_dispatch_enabled():
                     asyncio.run(runner._kanban_notifier_watcher())
 
     assert past_gate, "list_boards should be called when dispatch_in_gateway=true"
+
+
+def test_notifier_watcher_skips_board_not_owned_by_current_gateway(monkeypatch):
+    """If a board declares dispatcher_owner, only the owning gateway processes it."""
+    runner = _make_runner(with_adapter=True)
+    monkeypatch.setenv("GATEWAY_RELAY_ID", "gw-primary")
+
+    sleep_calls = []
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+        if len(sleep_calls) >= 2:
+            runner._running = False
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    import hermes_cli.kanban_db as _kb
+    connect_calls = []
+
+    def fake_connect(board=None):
+        connect_calls.append(board)
+        m = MagicMock()
+        m.close.return_value = None
+        return m
+
+    with patch("hermes_cli.config.load_config", return_value=_fake_config(True)):
+        with patch.object(
+            _kb,
+            "list_boards",
+            side_effect=lambda *a, **kw: [
+                {"slug": "other", "db_path": "ignore-other", "dispatcher_owner": "gw-other"},
+                {"slug": "owner", "db_path": "owner-db", "dispatcher_owner": "gw-primary"},
+            ],
+        ):
+            with patch.object(_kb, "connect", side_effect=fake_connect):
+                with patch.object(_kb, "list_notify_subs", return_value=[]):
+                    with patch("asyncio.sleep", side_effect=fake_sleep):
+                        with patch("asyncio.to_thread", side_effect=fake_to_thread):
+                            asyncio.run(runner._kanban_notifier_watcher())
+
+    assert connect_calls == ["owner"], connect_calls
+

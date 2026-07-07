@@ -156,7 +156,7 @@ async def test_last30days_source_choice_asks_then_rewrites_with_search_sources(
 
 def test_last30days_source_code_parser_dedupes_and_maps_web_to_grounding():
     sources = GatewayRunner._parse_last30days_source_codes(
-        "r, reddit, x, w, web, p, i, instagram, y, t"
+        "r, reddit, x, w, web, p, i, instagram, y"
     )
 
     assert sources == [
@@ -166,7 +166,6 @@ def test_last30days_source_code_parser_dedupes_and_maps_web_to_grounding():
         "polymarket",
         "instagram",
         "youtube",
-        "tiktok",
     ]
 
 
@@ -261,7 +260,6 @@ def test_last30days_default_sources_include_youtube_and_instagram():
         "x",
         "youtube",
         "instagram",
-        "tiktok",
         "hackernews",
         "polymarket",
         "github",
@@ -274,9 +272,10 @@ def test_last30days_cjk_default_sources_prefer_social_and_web_over_github():
 
     sources = runner._last30days_engine_sources(topic="漁電共生")
 
-    assert sources == ["grounding", "youtube", "x", "instagram", "tiktok"]
+    assert sources == ["grounding", "youtube", "x", "instagram"]
     assert "github" not in sources
     assert "hackernews" not in sources
+    assert "tiktok" not in sources
 
 
 def test_last30days_cjk_topic_plan_preserves_original_query():

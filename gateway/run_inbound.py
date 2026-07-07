@@ -1946,7 +1946,6 @@ class GatewayInboundMixin:
             "x": "x", "twitter": "x", "x/twitter": "x",
             "y": "youtube", "yt": "youtube", "youtube": "youtube",
             "i": "instagram", "ig": "instagram", "instagram": "instagram",
-            "t": "tiktok", "tt": "tiktok", "tiktok": "tiktok",
             "h": "hackernews", "hn": "hackernews", "hackernews": "hackernews", "hacker-news": "hackernews",
             "p": "polymarket", "poly": "polymarket", "polymarket": "polymarket",
             "w": "grounding", "web": "grounding", "網路": "grounding",
@@ -1965,8 +1964,8 @@ class GatewayInboundMixin:
         if sources:
             return sources
         if self._last30days_topic_has_cjk(topic):
-            return ["grounding", "youtube", "x", "instagram", "tiktok"]
-        return ["reddit", "x", "youtube", "instagram", "tiktok", "hackernews", "polymarket", "github", "grounding"]
+            return ["grounding", "youtube", "x", "instagram"]
+        return ["reddit", "x", "youtube", "instagram", "hackernews", "polymarket", "github", "grounding"]
 
     @staticmethod
     def _last30days_topic_has_cjk(topic: str) -> bool:
@@ -1974,7 +1973,7 @@ class GatewayInboundMixin:
 
     @staticmethod
     def _write_last30days_plan_file(topic: str, sources: list[str]) -> str:
-        allowed_sources = {"grounding", "youtube", "reddit", "hackernews", "github", "polymarket", "x", "instagram", "tiktok"}
+        allowed_sources = {"grounding", "youtube", "reddit", "hackernews", "github", "polymarket", "x", "instagram"}
         plan_sources = [source for source in sources if source in allowed_sources]
         if not plan_sources:
             plan_sources = ["grounding", "youtube", "reddit", "hackernews"]

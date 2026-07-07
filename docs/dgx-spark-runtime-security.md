@@ -134,13 +134,14 @@ Operational notes:
   turns through text enrichment even when the active chat model supports native
   image input; OCR and translation need text injected into the turn.
 - If the Telegram image has no more specific caption/request, the gateway
-  treats it as an image-only OCR turn and directly replies before the main agent
-  runs. The primary engine is local Tesseract (`chi_tra+chi_sim+eng`); if
-  Tesseract extracts text, the response is deterministic OCR output and does not
-  call an LLM for free-form translation. If Tesseract returns no text, the
-  gateway falls back to the local vision model. This bypasses prior
-  group-session context, browser/web/social-media tools, and internal cache
-  paths.
+  first stores the image temporarily and asks the user to choose a purpose:
+  `1. OCR + 整理文字`, `2. 整理名片`, or `3. 整理新聞`. The selected path then
+  replies before the main agent runs. The primary engine is local Tesseract
+  (`chi_tra+chi_sim+eng`); if Tesseract extracts text, the response is
+  deterministic OCR output and does not call an LLM for free-form translation.
+  If Tesseract returns no text, the gateway falls back to the local vision
+  model. This bypasses prior group-session context, browser/web/social-media
+  tools, and internal cache paths.
 - If OCR quality is poor, first check `ollama list` and the health of
   `granite3.2-vision:latest`, then test `vision_analyze` against the saved image
   path from the gateway log.

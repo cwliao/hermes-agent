@@ -1192,6 +1192,13 @@ class GatewayInboundMixin:
         if _reply is not None:
             return _reply
 
+        # A numeric reply to the image-purpose prompt is consumed before the normal command and
+        # agent pipeline. The handler intentionally returns None after sending its direct reply,
+        # so check whether it matches a pending choice before invoking it.
+        if self._is_pending_image_ocr_choice(event):
+            await self._handle_pending_image_ocr_choice(event)
+            return None
+
         # Evict a leaked/reaped ``_running_agents`` slot before the busy-session fast-path.
         self._hm_evict_idle_stale_agent(_quick_key)
         if self._is_session_running(_quick_key):
@@ -1617,18 +1624,13 @@ class GatewayInboundMixin:
         if image_paths:
             image_only_ocr = self._should_ocr_translate_images_for_source(source) and not (event.text or "").strip()
             if image_only_ocr:
-                direct_ocr_text = await asyncio.to_thread(self._extract_images_text_with_tesseract, image_paths)
-                if direct_ocr_text:
-                    await self._deliver_direct_image_ocr_reply(
-                        source,
-                        self._format_tesseract_image_ocr_reply(direct_ocr_text),
-                        already_formatted=True,
-                    )
-                    return None
-            message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
-            if image_only_ocr:
-                await self._deliver_direct_image_ocr_reply(source, message_text)
+                await self._prompt_for_image_ocr_purpose(
+                    source=source,
+                    session_key=session_key,
+                    image_paths=image_paths,
+                )
                 return None
+            message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
         if audio_paths:
             message_text = await self._enrich_inbound_voice(event, source, message_text, audio_paths)
         message_text = self._prepend_inbound_media_file_notes(message_text, audio_file_paths, video_paths)
@@ -1912,6 +1914,85 @@ class GatewayInboundMixin:
         platform_name = getattr(platform, "value", platform)
         return str(platform_name or "").lower() in settings.get("platforms", set())
 
+    def _pending_image_ocr_choices(self) -> dict:
+        pending = getattr(self, "_pending_image_ocr_by_session", None)
+        if pending is None:
+            pending = {}
+            self._pending_image_ocr_by_session = pending
+        return pending
+
+    def _image_ocr_choice_key(self, source: SessionSource) -> str:
+        return self._session_key_for_source(source)
+
+    @staticmethod
+    def _normalize_image_ocr_choice(choice: str) -> Optional[str]:
+        return {
+            "1": "ocr",
+            "１": "ocr",
+            "ocr": "ocr",
+            "2": "business_card",
+            "２": "business_card",
+            "名片": "business_card",
+            "3": "news",
+            "３": "news",
+            "新聞": "news",
+        }.get((choice or "").strip().lower())
+
+    def _is_pending_image_ocr_choice(self, event: MessageEvent) -> bool:
+        source = getattr(event, "source", None)
+        if source is None or getattr(event, "media_urls", None):
+            return False
+        if self._normalize_image_ocr_choice(getattr(event, "text", "")) is None:
+            return False
+        return self._image_ocr_choice_key(source) in self._pending_image_ocr_choices()
+
+    async def _prompt_for_image_ocr_purpose(
+        self,
+        *,
+        source: SessionSource,
+        session_key: str,
+        image_paths: List[str],
+    ) -> None:
+        self._pending_image_ocr_choices()[session_key] = {
+            "source": dataclasses.replace(source),
+            "image_paths": list(image_paths),
+            "created_at": time.time(),
+        }
+        await self._deliver_platform_notice(
+            source,
+            "請選擇這張圖片要怎麼處理：\n"
+            "1. OCR + 整理文字\n"
+            "2. 整理名片\n"
+            "3. 整理新聞\n\n"
+            "請直接回覆 1、2 或 3。",
+        )
+
+    async def _handle_pending_image_ocr_choice(self, event: MessageEvent) -> Optional[str]:
+        source = getattr(event, "source", None)
+        if source is None or getattr(event, "media_urls", None):
+            return None
+        normalized = self._normalize_image_ocr_choice(getattr(event, "text", ""))
+        if normalized is None:
+            return None
+        key = self._image_ocr_choice_key(source)
+        pending = self._pending_image_ocr_choices().pop(key, None)
+        if not pending:
+            return None
+        image_paths = pending.get("image_paths") or []
+        if not image_paths:
+            return None
+        ocr_text = await asyncio.to_thread(self._extract_images_text_with_tesseract, image_paths)
+        if not ocr_text:
+            enriched = await self._enrich_message_with_vision("", image_paths, ocr_translate=True)
+            await self._deliver_direct_image_ocr_reply(source, enriched)
+            return None
+        await self._deliver_direct_image_ocr_reply(
+            source,
+            self._format_tesseract_image_ocr_reply(ocr_text, mode=normalized),
+            already_formatted=True,
+        )
+        return None
+
     def _image_analysis_prompt(self, *, ocr_translate: bool = False) -> str:
         if not ocr_translate:
             return (
@@ -1983,15 +2064,27 @@ class GatewayInboundMixin:
                 lines.append(line)
         return "\n".join(lines).strip()
 
-    def _format_tesseract_image_ocr_reply(self, ocr_text: str) -> str:
+    def _format_tesseract_image_ocr_reply(self, ocr_text: str, mode: str = "ocr") -> str:
         text = (ocr_text or "").strip() or "未辨識到可讀文字。"
-        return (
-            "📌 圖片 OCR\n\n"
-            f"{text}\n\n"
-            "📌 翻譯/整理\n"
-            "目前使用本機 Tesseract 做逐字 OCR；未呼叫 LLM 進行自由翻譯，"
-            "以避免產生未出現在圖片中的內容。"
-        )
+        if mode == "business_card":
+            title = "📇 名片 OCR / 整理"
+            guidance = (
+                "可依上方 OCR 內容整理姓名、職稱、公司、電話、Email、地址等欄位；"
+                "目前未呼叫 LLM 自由補完，避免產生名片上沒有的資訊。"
+            )
+        elif mode == "news":
+            title = "📰 新聞 OCR / 整理"
+            guidance = (
+                "可依上方 OCR 內容整理標題、日期、來源與重點；"
+                "目前未呼叫 LLM 自由摘要，避免產生新聞圖上沒有的內容。"
+            )
+        else:
+            title = "📌 圖片 OCR / 整理文字"
+            guidance = (
+                "目前使用本機 Tesseract 做逐字 OCR；未呼叫 LLM 進行自由翻譯，"
+                "以避免產生未出現在圖片中的內容。"
+            )
+        return f"{title}\n\n{text}\n\n📌 處理說明\n{guidance}"
 
     async def _deliver_direct_image_ocr_reply(
         self, source: SessionSource, enriched_text: str, *, already_formatted: bool = False

@@ -58,6 +58,7 @@ async def test_last30days_prompt_stores_topic_and_shows_three_options(monkeypatc
     assert "1. 快速摘要" in sent["content"]
     assert "2. 深入整理" in sent["content"]
     assert "3. 指定來源" in sent["content"]
+    assert "X/Twitter" in sent["content"]
     assert (
         runner._pending_last30days_by_session[session_key]["topic"]
         == "Hermes Telegram applications"
@@ -66,7 +67,7 @@ async def test_last30days_prompt_stores_topic_and_shows_three_options(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_last30days_quick_choice_rewrites_to_quick_skill_invocation(monkeypatch):
+async def test_last30days_quick_choice_runs_direct_engine(monkeypatch):
     runner = _make_runner()
     source = _source()
     session_key = runner._session_key_for_source(source)
@@ -76,17 +77,25 @@ async def test_last30days_quick_choice_rewrites_to_quick_skill_invocation(monkey
         "step": "choose_mode",
         "created_at": 1.0,
     }
+    notices = []
+    calls = []
 
-    async def fail_notice(*_args, **_kwargs):
-        pytest.fail("valid quick choice should not send another prompt")
+    async def fake_notice(src, content):
+        notices.append((src, content))
 
-    monkeypatch.setattr(runner, "_deliver_platform_notice", fail_notice)
+    async def fake_run(**kwargs):
+        calls.append(kwargs)
+        return "engine report"
 
-    event = _text_event("1")
-    result = await runner._handle_pending_last30days_choice(event)
+    monkeypatch.setattr(runner, "_deliver_platform_notice", fake_notice)
+    monkeypatch.setattr(runner, "_run_last30days_telegram_report", fake_run)
 
-    assert result == "/last30days AI Agent 應用 --quick --auto-resolve"
-    assert getattr(event, "_last30days_choice_resolved") is True
+    result = await runner._handle_pending_last30days_choice(_text_event("1"))
+
+    assert result == ""
+    assert calls == [{"topic": "AI Agent 應用", "mode": "quick"}]
+    assert "開始直接查詢「AI Agent 應用」" in notices[0][1]
+    assert notices[1][1] == "engine report"
     assert session_key not in runner._pending_last30days_by_session
 
 
@@ -115,20 +124,48 @@ async def test_last30days_source_choice_asks_then_rewrites_with_search_sources(
     assert first == ""
     assert runner._pending_last30days_by_session[session_key]["step"] == "choose_sources"
     assert "r = Reddit" in notices[-1][1]
+    assert "x = X/Twitter" in notices[-1][1]
     assert "g = GitHub" in notices[-1][1]
 
-    event = _text_event("r,g,h")
-    second = await runner._handle_pending_last30days_choice(event)
+    calls = []
 
-    assert (
-        second
-        == "/last30days Hermes gateway --quick --auto-resolve --search=reddit,github,hackernews"
-    )
-    assert getattr(event, "_last30days_choice_resolved") is True
+    async def fake_run(**kwargs):
+        calls.append(kwargs)
+        return "source report"
+
+    monkeypatch.setattr(runner, "_run_last30days_telegram_report", fake_run)
+
+    second = await runner._handle_pending_last30days_choice(_text_event("r,g,h"))
+
+    assert second == ""
+    assert calls == [
+        {
+            "topic": "Hermes gateway",
+            "mode": "quick",
+            "sources": ["reddit", "github", "hackernews"],
+        }
+    ]
+    assert notices[-1][1] == "source report"
     assert session_key not in runner._pending_last30days_by_session
 
 
 def test_last30days_source_code_parser_dedupes_and_maps_web_to_grounding():
-    sources = GatewayRunner._parse_last30days_source_codes("r, reddit, w, web, p")
+    sources = GatewayRunner._parse_last30days_source_codes("r, reddit, x, w, web, p")
 
-    assert sources == ["reddit", "grounding", "polymarket"]
+    assert sources == ["reddit", "x", "grounding", "polymarket"]
+
+
+def test_last30days_engine_output_cleanup_removes_bonus_and_ansi():
+    raw = (
+        "\x1b[95mProcessing\x1b[0m research\n"
+        "Bonus: TikTok and Instagram are available with a free key.\n"
+        "# Production Brief: 漁電共生\n"
+        "- Sources: reddit, x\n"
+    )
+
+    cleaned = GatewayRunner._clean_last30days_engine_output(raw)
+
+    assert "\x1b" not in cleaned
+    assert "TikTok" not in cleaned
+    assert "Instagram" not in cleaned
+    assert "Production Brief" in cleaned

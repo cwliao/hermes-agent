@@ -263,7 +263,7 @@ async def test_telegram_image_choice_news_uses_tesseract_and_skips_vision(monkey
 
     result = await runner._handle_pending_image_ocr_choice(event)
 
-    assert result is None
+    assert result == ""
     assert sent["source"] == source
     assert sent["already_formatted"] is True
     assert "新聞 OCR / 整理" in sent["reply"]

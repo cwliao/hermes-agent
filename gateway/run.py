@@ -14793,7 +14793,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not ocr_text:
             enriched = await self._enrich_message_with_vision("", image_paths, ocr_translate=True)
             await self._deliver_direct_image_ocr_reply(source, enriched)
-            return None
+            return ""
         if normalized == "news":
             reply_text = await self._format_news_ocr_reply(ocr_text)
         else:
@@ -14803,7 +14803,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             reply_text,
             already_formatted=True,
         )
-        return None
+        return ""
 
     def _extract_images_text_with_tesseract(self, image_paths: List[str]) -> str:
         texts: list[str] = []

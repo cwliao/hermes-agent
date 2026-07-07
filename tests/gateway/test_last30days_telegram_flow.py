@@ -174,6 +174,71 @@ def test_last30days_engine_output_cleanup_removes_bonus_and_ansi():
     assert "Production Brief" in cleaned
 
 
+def test_last30days_source_link_extraction_dedupes_and_strips_punctuation():
+    raw = (
+        "Story: https://example.com/a?x=1).\n"
+        "Again https://example.com/a?x=1\n"
+        "Other: https://news.example.org/post。\n"
+    )
+
+    links = GatewayRunner._extract_last30days_source_links(raw)
+
+    assert links == [
+        "https://example.com/a?x=1",
+        "https://news.example.org/post",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_last30days_telegram_summary_uses_local_llm_and_appends_links(monkeypatch):
+    runner = _make_runner()
+    prompts = []
+
+    async def fake_summary(prompt):
+        prompts.append(prompt)
+        return "📌 快速摘要\n- 有效摘要"
+
+    monkeypatch.setattr(runner, "_call_local_last30days_summary_llm", fake_summary)
+
+    result = await runner._summarize_last30days_for_telegram(
+        topic="漁電共生",
+        engine_output=(
+            "# Production Brief: 漁電共生\n"
+            "- Sources: web\n"
+            "Evidence https://example.com/source-1\n"
+        ),
+    )
+
+    assert "有效摘要" in result
+    assert "原始來源：" in result
+    assert "1. https://example.com/source-1" in result
+    assert "不要自行創造來源連結" in prompts[0]
+    assert "旅遊、美食或其他無關內容" in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_last30days_telegram_summary_falls_back_but_preserves_links(monkeypatch):
+    runner = _make_runner()
+
+    async def fake_summary(prompt):
+        return ""
+
+    monkeypatch.setattr(runner, "_call_local_last30days_summary_llm", fake_summary)
+
+    result = await runner._summarize_last30days_for_telegram(
+        topic="AI",
+        engine_output=(
+            "# Compact Research Brief: AI\n"
+            "- Sources: github\n"
+            "Link https://github.com/example/project\n"
+        ),
+    )
+
+    assert "Compact Research Brief" in result
+    assert "https://github.com/example/project" in result
+    assert "原始來源：" in result
+
+
 def test_last30days_default_sources_include_youtube():
     runner = _make_runner()
 

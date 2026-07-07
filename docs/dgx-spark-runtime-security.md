@@ -241,12 +241,18 @@ Telegram-friendly block:
 
 🔴 台灣加權指數 TAIEX
    現價 46410.09｜漲跌 -334.07 (-0.71%)
-   前收 46744.16｜資料 11:17:15｜量 N/A
+   前收 46744.16｜資料 11:17:15｜價源 即時｜量 N/A
 
 ⚪ 元大台灣50 ETF 0050
    現價 108.8000｜漲跌 +0.00 (+0.00%)
-   前收 108.8000｜資料 11:17:19｜量 48136
+   前收 108.8000｜資料 11:17:19｜價源 即時｜量 48136
 ```
+
+0050 quote handling was corrected on 2026-07-07 after the 12:30 and 13:00
+reports showed the previous close as if it were the live price. The script now
+uses TWSE MIS `z` first, falls back to `pz` only when `z` is unavailable, and
+prints `N/A` rather than silently substituting `y` (previous close) as current
+price. The output includes `價源` so missing live quotes are visible.
 
 Check status:
 

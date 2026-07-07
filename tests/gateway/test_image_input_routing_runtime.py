@@ -213,11 +213,13 @@ async def test_telegram_image_only_ocr_sends_direct_reply_and_skips_agent(monkey
             "\n[Gateway instruction: internal]"
         )
 
-    async def fake_direct_reply(src, enriched_text):
+    async def fake_direct_reply(src, enriched_text, *, already_formatted=False):
         sent["source"] = src
-        sent["reply"] = runner._format_direct_image_ocr_reply(enriched_text)
+        sent["reply"] = enriched_text if already_formatted else runner._format_direct_image_ocr_reply(enriched_text)
+        sent["already_formatted"] = already_formatted
 
     monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
+    monkeypatch.setattr(runner, "_extract_images_text_with_tesseract", lambda _paths: "")
     monkeypatch.setattr(runner, "_enrich_message_with_vision", fake_enrich)
     monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
 
@@ -229,8 +231,48 @@ async def test_telegram_image_only_ocr_sends_direct_reply_and_skips_agent(monkey
 
     assert result is None
     assert sent["source"] == source
+    assert sent["already_formatted"] is False
     assert "圖片 OCR / 翻譯" in sent["reply"]
     assert "Breaking news" in sent["reply"]
     assert "突發新聞" in sent["reply"]
     assert "Gateway instruction" not in sent["reply"]
     assert "vision_analyze" not in sent["reply"]
+
+@pytest.mark.asyncio
+async def test_telegram_image_only_ocr_uses_tesseract_before_vision(monkeypatch):
+    runner = _make_runner()
+    source = _source()
+    event = _image_event("")
+    cfg = _auto_config()
+    cfg["gateway"] = {
+        "image_ocr_translate": {
+            "enabled": True,
+            "platforms": ["telegram"],
+        }
+    }
+    sent = {}
+
+    async def fail_enrich(*_args, **_kwargs):
+        pytest.fail("vision fallback should not run when Tesseract returns text")
+
+    async def fake_direct_reply(src, enriched_text, *, already_formatted=False):
+        sent["source"] = src
+        sent["reply"] = enriched_text
+        sent["already_formatted"] = already_formatted
+
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
+    monkeypatch.setattr(runner, "_extract_images_text_with_tesseract", lambda paths: "台積電新聞標題")
+    monkeypatch.setattr(runner, "_enrich_message_with_vision", fail_enrich)
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result is None
+    assert sent["source"] == source
+    assert sent["already_formatted"] is True
+    assert "台積電新聞標題" in sent["reply"]
+    assert "未呼叫 LLM" in sent["reply"]

@@ -254,6 +254,13 @@ uses TWSE MIS `z` first, falls back to `pz` only when `z` is unavailable, and
 prints `N/A` rather than silently substituting `y` (previous close) as current
 price. The output includes `價源` so missing live quotes are visible.
 
+The live script under `~/.hermes/scripts/taiex_0050_report.sh` was updated on
+2026-07-07 and manually verified at 13:56 Asia/Taipei. The verification output
+matched TWSE official 2026-07-07 0050 data: close/current `106.2000`, previous
+close `108.2500`, change `-2.05 (-1.89%)`, volume `109650`. The live script is
+outside the repo checkout, so this document is the repo-tracked operational
+record of that local cron change.
+
 Check status:
 
 ```bash

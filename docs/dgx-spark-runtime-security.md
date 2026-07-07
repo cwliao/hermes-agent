@@ -144,8 +144,9 @@ Operational notes:
   present in OCR, and output Traditional Chinese only. The displayed OCR text is
   also normalized to Traditional Chinese to avoid Simplified Chinese leakage. If
   Tesseract returns no text, the gateway falls back to the local vision model.
-  This bypasses prior group-session context, browser/web/social-media tools, and
-  internal cache paths.
+  After the selected OCR path replies, the numeric choice message is consumed and
+  must not continue into the main agent turn. This bypasses prior group-session
+  context, browser/web/social-media tools, and internal cache paths.
 - If OCR quality is poor, first check `ollama list` and the health of
   `granite3.2-vision:latest`, then test `vision_analyze` against the saved image
   path from the gateway log.

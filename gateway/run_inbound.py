@@ -1910,7 +1910,7 @@ class GatewayInboundMixin:
             "2. 深入整理\n"
             "   較慢，會做較完整的來源交叉比對與重點整理。\n\n"
             "3. 指定來源\n"
-            "   你可以指定 Web、YouTube、X/Twitter、Instagram、Reddit、GitHub 等來源。\n\n"
+            "   你可以指定 Web、YouTube、Instagram、Threads、Reddit、GitHub 等來源。\n\n"
             "請直接回覆 1、2 或 3。"
         )
 
@@ -1920,14 +1920,13 @@ class GatewayInboundMixin:
             f"要查「{topic}」的哪些來源？可回覆多個代號：\n\n"
             "w = Web\n"
             "y = YouTube\n"
-            "x = X/Twitter\n"
             "i = Instagram\n"
-            "t = TikTok\n"
+            "th = Threads\n"
             "r = Reddit\n"
             "g = GitHub\n"
             "h = Hacker News\n"
             "p = Polymarket\n\n"
-            "例：w,y,x,i"
+            "例：w,y,i,th"
         )
 
     @staticmethod
@@ -1946,6 +1945,7 @@ class GatewayInboundMixin:
             "x": "x", "twitter": "x", "x/twitter": "x",
             "y": "youtube", "yt": "youtube", "youtube": "youtube",
             "i": "instagram", "ig": "instagram", "instagram": "instagram",
+            "th": "threads", "thread": "threads", "threads": "threads",
             "h": "hackernews", "hn": "hackernews", "hackernews": "hackernews", "hacker-news": "hackernews",
             "p": "polymarket", "poly": "polymarket", "polymarket": "polymarket",
             "w": "grounding", "web": "grounding", "網路": "grounding",
@@ -1964,8 +1964,8 @@ class GatewayInboundMixin:
         if sources:
             return sources
         if self._last30days_topic_has_cjk(topic):
-            return ["grounding", "youtube", "x", "instagram"]
-        return ["reddit", "x", "youtube", "instagram", "hackernews", "polymarket", "github", "grounding"]
+            return ["grounding", "youtube", "instagram", "threads"]
+        return ["reddit", "youtube", "instagram", "threads", "hackernews", "polymarket", "github", "grounding"]
 
     @staticmethod
     def _last30days_topic_has_cjk(topic: str) -> bool:
@@ -1973,7 +1973,7 @@ class GatewayInboundMixin:
 
     @staticmethod
     def _write_last30days_plan_file(topic: str, sources: list[str]) -> str:
-        allowed_sources = {"grounding", "youtube", "reddit", "hackernews", "github", "polymarket", "x", "instagram"}
+        allowed_sources = {"grounding", "youtube", "reddit", "hackernews", "github", "polymarket", "x", "instagram", "threads"}
         plan_sources = [source for source in sources if source in allowed_sources]
         if not plan_sources:
             plan_sources = ["grounding", "youtube", "reddit", "hackernews"]

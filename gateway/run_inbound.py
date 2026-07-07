@@ -1952,13 +1952,24 @@ class GatewayInboundMixin:
                         f"image_url: {path} ~]"
                     )
                     if ocr_translate:
-                        note += (
-                            "\n[Gateway instruction: If the user's message has no "
-                            "more specific request, reply with the OCR text and "
-                            "Traditional Chinese translation in a concise, readable "
-                            "format. Do not mention internal file paths unless the "
-                            "user asks for debugging details.]"
-                        )
+                        if user_text.strip():
+                            note += (
+                                "\n[Gateway instruction: Use this OCR/translation result as "
+                                "the primary evidence for the user's current image request. "
+                                "Do not mention internal file paths unless the user asks for "
+                                "debugging details.]"
+                            )
+                        else:
+                            note += (
+                                "\n[Gateway instruction: This is an image-only OCR turn. "
+                                "Treat it as independent from prior conversation history. "
+                                "Reply only with the OCR text and Traditional Chinese "
+                                "translation derived from the OCR result above. Do not browse "
+                                "the web, do not use browser tools, do not search social media, "
+                                "and do not re-analyze the image unless the OCR result is empty "
+                                "or explicitly says the text is unreadable. Do not mention "
+                                "internal file paths unless the user asks for debugging details.]"
+                            )
                 else:
                     note = (
                         "[The user sent an image but I couldn't quite see it "

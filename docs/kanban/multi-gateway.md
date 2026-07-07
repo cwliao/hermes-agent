@@ -37,3 +37,23 @@ Or set the env var: `HERMES_KANBAN_DISPATCH_IN_GATEWAY=false`
 
 Non-dispatch gateways still deliver messages for their own platform adapters
 (Telegram, Discord, etc.) — they just don't poll kanban boards.
+
+## Per-board dispatcher owner metadata
+
+When a deployment uses board metadata with `dispatcher_owner`, the gateway
+notifier applies an additional per-board gate. If the current gateway identity
+can be resolved from relay auth, the notifier only processes boards whose
+`dispatcher_owner` matches that identity and skips boards owned by another
+gateway.
+
+Boards without `dispatcher_owner`, or gateways whose identity cannot be
+resolved, keep the legacy global behavior. This fallback is intentional so older
+boards and non-relay local installs continue to work after an update.
+
+After changing gateway identity, board ownership, or pulling code that affects
+this path, restart the gateway before relying on the gate:
+
+```bash
+hermes gateway restart
+hermes gateway status
+```

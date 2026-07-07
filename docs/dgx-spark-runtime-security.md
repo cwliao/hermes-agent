@@ -78,6 +78,31 @@ The guard should be silent. If it prints `Gateway is running stale code`, the
 restart did not load the current checkout and must be investigated before
 closing the task.
 
+### Kanban notifier owner gate
+
+The local gateway loads the Kanban notifier from the same checkout as the
+dispatcher. After commit `ad849c39f6`, the notifier honors per-board
+`dispatcher_owner` metadata when the current gateway identity can be resolved
+from relay auth:
+
+- If a board declares `dispatcher_owner` and it differs from the current gateway
+  identity, the notifier skips that board.
+- If a board has no owner metadata, or the current gateway identity cannot be
+  resolved, Hermes preserves the legacy global notifier behavior.
+
+Operationally, this means a post-update restart is still required before relying
+on the owner gate:
+
+```bash
+hermes gateway restart
+hermes gateway status
+tail -n 40 ~/.hermes/logs/gateway.log
+```
+
+The expected log path is normal startup followed by `kanban dispatcher:
+embedded in gateway`. If stale-code warnings continue after restart, resolve
+that first; otherwise the live process may still be running pre-gate code.
+
 ### Upstream update record
 
 2026-07-06 upstream update:

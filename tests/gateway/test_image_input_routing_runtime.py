@@ -253,7 +253,11 @@ async def test_telegram_image_choice_news_uses_tesseract_and_skips_vision(monkey
         sent["reply"] = enriched_text
         sent["already_formatted"] = already_formatted
 
+    async def fake_news_reply(ocr_text):
+        return f"📰 新聞 OCR / 整理\n\n修正版：{ocr_text}"
+
     monkeypatch.setattr(runner, "_extract_images_text_with_tesseract", lambda paths: "台積電新聞標題")
+    monkeypatch.setattr(runner, "_format_news_ocr_reply", fake_news_reply)
     monkeypatch.setattr(runner, "_enrich_message_with_vision", fail_enrich)
     monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
 
@@ -264,5 +268,26 @@ async def test_telegram_image_choice_news_uses_tesseract_and_skips_vision(monkey
     assert sent["already_formatted"] is True
     assert "新聞 OCR / 整理" in sent["reply"]
     assert "台積電新聞標題" in sent["reply"]
-    assert "未呼叫 LLM" in sent["reply"]
     assert session_key not in runner._pending_image_ocr_by_session
+
+@pytest.mark.asyncio
+async def test_news_ocr_postprocess_normalizes_simplified_chinese(monkeypatch):
+    runner = _make_runner()
+
+    class _Resp:
+        choices = [type("Choice", (), {"message": type("Message", (), {"content": "导入数位变生，环境部发表会议"})()})()]
+
+    async def fake_call_llm(**kwargs):
+        assert kwargs["task"] == "title_generation"
+        assert kwargs["temperature"] == 0.0
+        assert "不得輸出簡體字" in kwargs["messages"][0]["content"]
+        return _Resp()
+
+    monkeypatch.setattr("agent.auxiliary_client.async_call_llm", fake_call_llm)
+
+    out = await runner._format_news_ocr_reply("导入数位变生，环境部发表会议")
+
+    assert "導入數位變生" in out
+    assert "環境部發表會議" in out
+    assert "导" not in out
+    assert "环境" not in out

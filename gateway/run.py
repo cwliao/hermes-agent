@@ -14794,9 +14794,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             enriched = await self._enrich_message_with_vision("", image_paths, ocr_translate=True)
             await self._deliver_direct_image_ocr_reply(source, enriched)
             return None
+        if normalized == "news":
+            reply_text = await self._format_news_ocr_reply(ocr_text)
+        else:
+            reply_text = self._format_tesseract_image_ocr_reply(ocr_text, mode=normalized)
         await self._deliver_direct_image_ocr_reply(
             source,
-            self._format_tesseract_image_ocr_reply(ocr_text, mode=normalized),
+            reply_text,
             already_formatted=True,
         )
         return None
@@ -14847,6 +14851,105 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if line:
                 lines.append(line)
         return "\n".join(lines).strip()
+
+    async def _format_news_ocr_reply(self, ocr_text: str) -> str:
+        text = (ocr_text or "").strip()
+        if not text:
+            return self._format_tesseract_image_ocr_reply(text, mode="news")
+        display_text = self._normalize_traditional_text(text)
+        prompt = (
+            "你正在整理一張新聞圖片的 Tesseract OCR 結果。\n"
+            "只能根據 OCR 原文整理，不得新增圖片中沒有的資訊，不得上網，不得猜測。\n"
+            "請全部使用繁體中文；不得輸出簡體字。若 OCR 原文含簡體字，請轉為台灣常用繁體。\n"
+            "請輸出以下段落：\n"
+            "1. 修正版新聞文字：校正常見 OCR 錯字、重排段落，但保留不確定處。\n"
+            "2. 重點摘要：3 到 5 點。\n"
+            "3. 不確定/可能錯字：列出仍不確定的詞句。\n\n"
+            f"OCR 原文：\n{text}"
+        )
+        try:
+            from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+
+            response = await async_call_llm(
+                task="title_generation",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=1200,
+                timeout=90,
+            )
+            content = extract_content_or_reasoning(response).strip()
+        except Exception as exc:
+            logger.warning("News OCR post-process failed, returning raw OCR: %s", exc)
+            content = ""
+        if not content:
+            return self._format_tesseract_image_ocr_reply(display_text, mode="news")
+        content = self._normalize_traditional_text(content)
+        return f"📰 新聞 OCR / 整理\n\n{content}\n\n📌 OCR 原文（已轉繁）\n{display_text}"
+
+    @staticmethod
+    def _normalize_traditional_text(text: str) -> str:
+        # Small dependency-free cleanup for common Simplified Chinese leakage.
+        replacements = {
+            "导": "導",
+            "变": "變",
+            "达": "達",
+            "发": "發",
+            "会": "會",
+            "国": "國",
+            "围": "圍",
+            "园": "園",
+            "报": "報",
+            "总": "總",
+            "经": "經",
+            "济": "濟",
+            "门": "門",
+            "为": "為",
+            "与": "與",
+            "个": "個",
+            "气": "氣",
+            "树": "樹",
+            "体": "體",
+            "现": "現",
+            "应": "應",
+            "议": "議",
+            "环": "環",
+            "境": "境",
+            "统": "統",
+            "计": "計",
+            "划": "畫",
+            "刘": "劉",
+            "陈": "陳",
+            "张": "張",
+            "广": "廣",
+            "东": "東",
+            "义": "義",
+            "业": "業",
+            "众": "眾",
+            "头": "頭",
+            "厂": "廠",
+            "万": "萬",
+            "这": "這",
+            "术": "術",
+            "数": "數",
+            "来": "來",
+            "无": "無",
+            "对": "對",
+            "开": "開",
+            "关": "關",
+            "项": "項",
+            "护": "護",
+            "产": "產",
+            "资": "資",
+            "讯": "訊",
+            "许": "許",
+            "处": "處",
+            "称": "稱",
+            "见": "見",
+        }
+        out = text or ""
+        for src, dst in replacements.items():
+            out = out.replace(src, dst)
+        return out
 
     def _format_tesseract_image_ocr_reply(self, ocr_text: str, mode: str = "ocr") -> str:
         text = (ocr_text or "").strip()

@@ -304,6 +304,7 @@ from hermes_cli.subcommands.pairing import build_pairing_parser
 from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
+from hermes_cli.subcommands.smartocr import build_smartocr_parser
 
 
 def _require_tty(command_name: str) -> None:
@@ -4273,6 +4274,13 @@ def cmd_doctor(args):
     from hermes_cli.doctor import run_doctor
 
     run_doctor(args)
+
+
+def cmd_smartocr(args):
+    """Dispatch `hermes smartocr <subcmd>`."""
+    from hermes_cli.smartocr import run_smartocr
+
+    run_smartocr(args)
 
 
 def cmd_security(args):
@@ -13010,6 +13018,11 @@ def main():
     # doctor command  (parser built in hermes_cli/subcommands/doctor.py)
     # =========================================================================
     build_doctor_parser(subparsers, cmd_doctor=cmd_doctor)
+
+    # =========================================================================
+    # smartocr command — CJK newspaper/document OCR
+    # =========================================================================
+    build_smartocr_parser(subparsers, cmd_smartocr=cmd_smartocr)
 
     # =========================================================================
     # security command — on-demand supply-chain audit

@@ -484,6 +484,7 @@ from hermes_cli.subcommands.pairing import build_pairing_parser
 from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.claw import build_claw_parser
+from hermes_cli.subcommands.smartocr import build_smartocr_parser
 
 
 def _require_tty(command_name: str) -> None:
@@ -5631,6 +5632,13 @@ def cmd_verify(args):
     from hermes_cli.verify_cmd import run_verify_command
 
     sys.exit(run_verify_command(args))
+
+
+def cmd_smartocr(args):
+    """Dispatch `hermes smartocr <subcmd>`."""
+    from hermes_cli.smartocr import run_smartocr
+
+    run_smartocr(args)
 
 
 def cmd_security(args):
@@ -12833,6 +12841,11 @@ def main():
     # verify command  (parser built in hermes_cli/subcommands/verify.py)
     # =========================================================================
     build_verify_parser(subparsers, cmd_verify=cmd_verify)
+
+    # =========================================================================
+    # smartocr command — CJK newspaper/document OCR
+    # =========================================================================
+    build_smartocr_parser(subparsers, cmd_smartocr=cmd_smartocr)
 
     # =========================================================================
     # security command — on-demand supply-chain audit

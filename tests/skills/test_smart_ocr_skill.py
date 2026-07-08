@@ -121,6 +121,42 @@ def test_sort_rtl_columns_empty():
     assert helper.sort_rtl_columns([]) == []
 
 
+def test_sort_rtl_columns_keeps_close_x_in_same_bucket():
+    """Regression: lines whose mean-x (cx) differs by a few pixels must
+    stay in the same column cluster. The preprocessed CJK newspaper
+    smoke test surfaced this — 今日新聞 at cx=1049 was being bucketed
+    separately from 頭版頭條 at cx=1052 because
+    ``int(round(cx // 10)) * 10`` truncates 1049 // 10 to 104.
+
+    Boxes use tight, realistic coordinates (4 corners within a few
+    pixels of the text) so cx ≈ the leading x of the text line.
+    """
+    if helper is None:
+        pytest.skip("helper not available")
+    a = {"box": [(1049, 80), (1078, 80), (1078, 120), (1049, 120)], "text": "A"}
+    b = {"box": [(1052, 180), (1080, 180), (1080, 220), (1052, 220)], "text": "B"}
+    c = {"box": [(1055, 280), (1085, 280), (1085, 320), (1055, 320)], "text": "C"}
+    sorted_ = helper.sort_rtl_columns([b, a, c])
+    assert [ln["text"] for ln in sorted_] == ["A", "B", "C"]
+
+
+def test_sort_rtl_columns_splits_distant_columns():
+    """Two clusters far apart in x form two columns. Reading order is
+    rightmost first (RTL), top-to-bottom within each column.
+    """
+    if helper is None:
+        pytest.skip("helper not available")
+    # Right column (cx ≈ 1050)
+    ra = {"box": [(1050, 80), (1100, 80), (1100, 120), (1050, 120)], "text": "RA"}
+    rb = {"box": [(1052, 180), (1102, 180), (1102, 220), (1052, 220)], "text": "RB"}
+    # Left column (cx ≈ 200)
+    la = {"box": [(200, 100), (250, 100), (250, 140), (200, 140)], "text": "LA"}
+    lb = {"box": [(202, 200), (252, 200), (252, 240), (202, 240)], "text": "LB"}
+    sorted_ = helper.sort_rtl_columns([la, ra, lb, rb])
+    # Right column first (RTL), then left column
+    assert [ln["text"] for ln in sorted_] == ["RA", "RB", "LA", "LB"]
+
+
 # ===========================================================================
 # Parse result
 # ===========================================================================

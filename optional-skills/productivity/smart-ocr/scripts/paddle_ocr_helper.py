@@ -25,7 +25,6 @@ import os
 import sys
 import tempfile
 import time
-from collections import defaultdict
 from pathlib import Path
 
 
@@ -145,20 +144,52 @@ def detect_rtl_layout(lines):
 
 
 def sort_rtl_columns(lines):
-    """Group by x-position, columns right->left, within each column top->bottom."""
-    buckets = defaultdict(list)
+    """Group by x-position, columns right->left, within each column top->bottom.
+
+    Clustering is gap-based: sort lines by cx ascending, then split into
+    columns wherever a gap exceeds half the largest gap in the page.
+    This is robust against per-line cx variance (the old fixed-bucket
+    approach with ``int(round(cx // 10)) * 10`` truncated, putting
+    cx=1049 in bucket 1040 while cx=1050 went to 1050 — a 1-pixel
+    boundary that split lines in the same physical column across
+    buckets, scrambling the RTL reading order).
+    """
+    items = []
     for ln in lines:
         bbox = ln.get("box")
         if not isinstance(bbox, list) or len(bbox) < 2:
             continue
         cx = sum(p[0] for p in bbox) / len(bbox)
-        key = int(round(cx // 10)) * 10
-        buckets[key].append(ln)
+        items.append((cx, ln))
+
+    if not items:
+        return []
+
+    items.sort(key=lambda x: x[0])
+
+    if len(items) == 1:
+        return [items[0][1]]
+
+    # Largest gap between adjacent sorted items is the column boundary.
+    # The 30-px floor is a safety net: when there's only one column,
+    # the "largest gap" is just within-column variance (typically
+    # < 10 px for PaddleOCR) and a half-gap threshold would wrongly
+    # split the column.  A 30-px floor keeps within-column noise in
+    # one bucket while still splitting on real column gaps.
+    gaps = [items[i + 1][0] - items[i][0] for i in range(len(items) - 1)]
+    threshold = max(max(gaps) * 0.5, 30.0) if gaps else 30.0
+
+    columns = [[items[0]]]
+    for cx, ln in items[1:]:
+        if cx - columns[-1][-1][0] > threshold:
+            columns.append([(cx, ln)])
+        else:
+            columns[-1].append((cx, ln))
 
     ordered = []
-    for key in sorted(buckets, reverse=True):
-        col = sorted(buckets[key], key=lambda x: sum(p[1] for p in x["box"]) / len(x["box"]))
-        ordered.extend(col)
+    for col in reversed(columns):
+        col_sorted = sorted(col, key=lambda x: sum(p[1] for p in x[1]["box"]) / len(x[1]["box"]))
+        ordered.extend([ln for _, ln in col_sorted])
     return ordered
 
 

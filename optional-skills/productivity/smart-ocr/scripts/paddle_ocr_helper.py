@@ -378,7 +378,17 @@ def _auto_preprocess_decision(img_rgb):
     arr = np.array(block_stds, dtype=np.float64)
     contrast_cv = arr.std() / (arr.mean() + 1e-6)
 
-    binarize = extremal_ratio < 0.95 or contrast_cv > 0.4
+    # Near-binary detection dominates the decision: when most pixels
+    # are at the extremes (<30 or >225) the image is already
+    # high-contrast and binarization would only hurt thin strokes
+    # (e.g. synthetic 28 px CJK text).  The local-contrast CV is
+    # still computed and reported but not used in the decision —
+    # the old `extremal_ratio < 0.95 or contrast_cv > 0.4` OR
+    # formula wrongly binarized clean high-contrast images that
+    # happened to have a single dark patch (the patch made one
+    # block's std huge while the rest were 0, inflating the CV).
+    near_binary = extremal_ratio > 0.95
+    binarize = not near_binary
     # Returns (deskew, binarize, denoise, contrast_cv, extremal_ratio)
     # deskew always on; denoise matches binarize
     return True, binarize, binarize, round(contrast_cv, 4), round(extremal_ratio, 4)
@@ -583,44 +593,62 @@ def detect_columns_image(img_rgb: np.ndarray) -> list[tuple[int, int]]:
     proj = binary.astype(np.float32).sum(axis=0) / 255.0  # shape: (W,)
 
     # --- Gaussian smooth (font-aware sigma) ---
+    # cv2.filter2D on a 1-D projection with a 1-D kernel returns a column
+    # vector shape (W, 1) on numpy 2.x / cv2 4.x, not 1-D (W,).  Flatten
+    # so downstream operations produce scalars and 1-D arrays.
     sigma = _detect_columns_sigma(w, font_h)
     ksize = int(sigma * 6) | 1
     kernel = cv2.getGaussianKernel(ksize, sigma)
-    smoothed = cv2.filter2D(proj, -1, kernel.ravel())
+    smoothed = np.asarray(cv2.filter2D(proj, -1, kernel.ravel())).ravel()
 
-    # --- Effective page area (font-aware margin) ---
-    if font_h > 0:
-        margin = max(int(w * 0.03), font_h * 3)
-    else:
-        margin = max(1, int(w * 0.05))
-    inner = smoothed[margin : w - margin]
-    if inner.size == 0:
+    # --- Dynamic content extent (where the page actually has ink) ---
+    # The fixed 5 %-of-width margin can't tell a real 60-px page margin
+    # from a 60-px column gap, so single-column images with wide
+    # margins were getting the margins mis-classified as gaps.  Find
+    # the actual content extent from the *binary* projection (before
+    # smoothing) — this avoids Gaussian bleed from the column edge
+    # being counted as content, which would pull the margin back in.
+    proj_binary = (binary > 0).any(axis=0)
+    if not proj_binary.any():
         return []
+    content_idx = np.where(proj_binary)[0]
+    content_start = int(content_idx[0])
+    content_end = int(content_idx[-1]) + 1  # exclusive
 
-    # --- Robust valley threshold: P30 of inner region ---
-    sorted_vals = np.sort(inner)
-    p30 = sorted_vals[int(len(sorted_vals) * 0.3)]
-    threshold = max(p30, 1.0)
+    # --- Robust valley threshold: P5 of content area ---
+    # A real column gap has projection ~ 0, while the Gaussian-smoothed
+    # transition at a column edge only falls to ~ peak/2.  Using P5
+    # (instead of P30) keeps the threshold low enough to ignore edge
+    # transitions on single-column images while still catching the
+    # true zero-projection gap between two columns.
+    content = smoothed[content_start:content_end]
+    if content.size == 0:
+        return []
+    sorted_vals = np.sort(content)
+    p5 = sorted_vals[int(len(sorted_vals) * 0.05)]
+    threshold = max(float(p5), 1.0)
 
-    # --- Find valleys ---
+    # --- Find valleys within content extent ---
     in_gap = False
     valleys: list[tuple[int, int]] = []
     start = 0
-    for x in range(margin, w - margin):
-        if smoothed[x] < threshold:
+    for i in range(content.size):
+        v = float(content[i])
+        if v < threshold:
             if not in_gap:
                 in_gap = True
-                start = x
+                start = i
         else:
             if in_gap:
-                valleys.append((start, x))
+                valleys.append((start + content_start, i + content_start))
                 in_gap = False
     if in_gap:
-        valleys.append((start, w - margin))
+        valleys.append((start + content_start, content.size + content_start))
 
     if _DEBUG:
         print(f"[detect_columns] sigma={sigma:.1f}, ksize={ksize}, font_h={font_h},"
-              f" margin={margin}, threshold={threshold:.1f}", file=sys.stderr)
+              f" content=[{content_start},{content_end}), threshold={threshold:.1f}",
+              file=sys.stderr)
         print(f"[detect_columns] valleys before merge: {valleys}", file=sys.stderr)
 
     # --- Merge nearby valleys ---

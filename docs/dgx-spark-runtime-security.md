@@ -317,6 +317,189 @@ and reporting `healthy`. A separate no-agent Hermes cron guard may still be
 used for SPARK-visible alerts, but the active auto-restart path is the user
 systemd timer above.
 
+## Bearer token for remote LLM clients
+
+Remote LAN clients (Windows laptops, etc.) authenticate against the nginx
+proxy on 8081/8443 with a bearer token. The token is **out of the
+nginx site config** and lives in a dedicated file with restrictive
+permissions, included by both server blocks:
+
+- File: `/etc/nginx/ollama-token.conf` (mode 0600, owned by `root:root`)
+- Contents: a single `set $ollama_token "Bearer <token>";` line — the
+  literal token value is not in this doc; see the file or the backup at
+  `/home/cwliao/.hermes-backup/hermes-secrets-<TS>.tar.gz`
+- The site config in `/etc/nginx/sites-available/ollama-api.conf`
+  references it via `include /etc/nginx/ollama-token.conf;` (the same
+  in both the 8081 and 8443 server blocks)
+
+Rotation:
+
+1. Edit `/etc/nginx/ollama-token.conf` (value only; keep the `set ...` line)
+2. `sudo nginx -t && sudo systemctl reload nginx`
+3. Update the API key in every client
+4. Old clients holding the prior value will start getting 401s
+
+**Do not** put the token value in any repo-tracked file, in chat, or
+in unencrypted cloud sync.
+
+## TLS endpoint (8443) for remote clients
+
+In addition to plaintext port 8081, the proxy listens on 8443 with TLS
+1.2/1.3 for clients that need transport security. A self-signed
+RSA-2048 cert is used; clients must install it in their local trust
+store.
+
+- Cert: `/etc/nginx/ssl/ollama-api.crt` (mode 0644, world-readable —
+  public material)
+- Key: `/etc/nginx/ssl/ollama-api.key` (mode 0600, owned by
+  `root:root` — secret)
+- Validity: 10-year self-signed, through 2036-07-06
+- SAN: `IP:140.96.58.171, IP:127.0.0.1, DNS:localhost`
+- Cipher list: ECDHE-{RSA,ECDSA}-{AES128,AES256}-GCM-SHA{256,384} +
+  CHACHA20-POLY1305
+- HTTP/2 enabled
+- HSTS: `max-age=31536000`
+
+A bearer-authenticated `/cert` endpoint serves the cert for easy client
+install:
+
+```bash
+curl -H "Authorization: Bearer <token>" \
+  https://140.96.58.171:8443/cert -o ollama.crt
+```
+
+The fingerprint (for client pinning) is recorded in
+`/home/cwliao/.hermes-backup/secrets/README.md`. A Windows PowerShell
+install script that embeds the cert and avoids the `.NET` cert-bypass
+quirk is at `/home/cwliao/.hermes-backup/install-cert.ps1`.
+
+Cert rotation:
+
+1. Generate a new pair (RSA-2048, 10y, SAN as above)
+2. Install to `/etc/nginx/ssl/ollama-api.{crt,key}`, `chmod 600` the
+   key, `chown root:root` both
+3. `sudo nginx -t && sudo systemctl reload nginx`
+4. Distribute the new public cert to all clients; pin the new
+   fingerprint
+
+## Firewall (ufw) rules
+
+`ufw` defaults to `deny incoming`. A rule was added so the LAN can
+reach 8443:
+
+```text
+8443/tcp    ALLOW IN    Anywhere
+8443/tcp    ALLOW IN    Anywhere (v6)
+```
+
+The rule mirrors the existing 8081 rule. The nginx 8443 server block
+also has its own LAN-only ACL on top of this (allow 140.96.0.0/16,
+172.20.0.0/16, 10.0.0.0/8, 192.168.0.0/16, deny all).
+
+Verify with:
+
+```bash
+sudo ufw status | grep 8443
+```
+
+## server_tokens off
+
+The top-level `/etc/nginx/nginx.conf` has `server_tokens off;` (line
+21, uncommented) so the `Server:` response header is just `nginx`
+(no version). This blocks distro-specific vulnerability scanning that
+fingerprints `nginx/1.24.0 (Ubuntu)`.
+
+## Ollama GPU optimizations
+
+The ollama container is tuned for the GB10 (compute capability 12.1,
+121.7 GiB unified memory). The current env in
+`/home/cwliao/open-webui-stack/compose.yaml`:
+
+```yaml
+- OLLAMA_NUM_PARALLEL=8
+- OLLAMA_FLASH_ATTENTION=1
+- OLLAMA_KEEP_ALIVE=24h
+- OLLAMA_MAX_LOADED_MODELS=4
+- OLLAMA_KV_CACHE_TYPE=q8_0
+- OLLAMA_LLM_LIBRARY=cuda_v13
+- OLLAMA_SCHED_SPREAD=true
+```
+
+Effects measured:
+
+- 4 concurrent requests: ~5.9 s wall-clock for all 4
+- 8 concurrent requests: ~9.4 s wall-clock for all 8
+- 8x concurrent runs hit 92% GPU util, 35 W draw
+- Per-request generation rate unchanged (~37 tok/s on `ornith:9b` —
+  hardware bound on this iGPU)
+- KV cache size at default ctx drops ~20% with `q8_0` (e.g.
+  `ornith:9b` 15 GB → 12 GB)
+
+## Per-model num_ctx pinned variants
+
+11 pinned model variants exist alongside the base tags. Each has a fixed
+context length baked into the Modelfile, so KV-cache memory is
+predictable and 8 concurrent requests can be served without OOMing.
+
+| Base | Pinned | num_ctx |
+|---|---|---|
+| `ornith:9b`              | `ornith:9b-32k`                    | 32768 |
+| `ornith:35b`             | `ornith:35b-16k`                   | 16384 |
+| `llama3.3:70b`           | `llama3.3:70b-16k`                 | 16384 |
+| `gpt-oss:120b`           | `gpt-oss:120b-8k`                  |  8192 |
+| `gpt-oss:20b`            | `gpt-oss:20b-16k`                  | 16384 |
+| `gemma4:26b`             | `gemma4:26b-16k`                   | 16384 |
+| `command-r:35b`          | `command-r:35b-16k`                | 16384 |
+| `minicpm-v:latest`       | `minicpm-v:latest-8k`              |  8192 |
+| `granite3.2-vision:latest` | `granite3.2-vision:latest-8k`    |  8192 |
+| `llama3.2-vision:latest` | `llama3.2-vision:latest-8k`        |  8192 |
+| `llava:latest`           | `llava:latest-8k`                  |  8192 |
+
+The seed script is at `/home/cwliao/bin/ollama-ctx-seed.sh` (mode 0700).
+It is idempotent: re-running skips existing tags. `--force` re-creates.
+The 11 base tags are unchanged; the pinned variants share weight blobs
+(tiny extra disk overhead, KB-level).
+
+To add a new pinned variant or change a context length, edit the
+`CONTEXT_TABLE` in the seed script and re-run with `--force`.
+
+## Open WebUI secret management
+
+The Open WebUI container's `WEBUI_SECRET_KEY` was moved out of
+`/home/cwliao/open-webui-stack/compose.yaml` and into a sibling `.env`
+file. The compose file now uses `${WEBUI_SECRET_KEY}` substitution;
+docker compose's automatic `.env` loading picks it up.
+
+- `.env`: `/home/cwliao/open-webui-stack/.env` (mode 0600, owned by `cwliao:cwliao`)
+- The compose file references it via `WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}`
+- The value is **unchanged** from the old in-compose literal (kept
+  stable so existing sessions remain valid)
+- The open-webui container is recreated automatically only when its
+  compose file changes; for a same-value move like this, the running
+  container keeps using the in-memory env until the next recreate
+
+The `.env` is dotfile-prefixed (project convention) and not committed.
+
+## Secret backup
+
+A backup bundle of the secret material lives at
+`/home/cwliao/.hermes-backup/`:
+
+- `secrets/ollama-token.conf` — the bearer token file
+- `secrets/ollama-api.key` — the TLS private key
+- `secrets/README.md` — self-describing restore / rotation guide with
+  the cert fingerprint, restore commands, and rotation procedures
+- `hermes-secrets-<TS>.tar.gz` — single-file portable bundle with
+  SHA-256 checksum
+- `install-cert.ps1` — Windows PowerShell script to install the
+  self-signed cert (embeds the cert directly; no network call, no
+  `.NET` TLS plumbing to fight)
+
+The tarball is the recommended artifact to move off-host (password
+manager, secondary box, encrypted USB). It is **not** committed to git
+and must not be put in unencrypted cloud sync. The directory itself is
+mode 0700 with all contents 0600, owned by `cwliao:cwliao`.
+
 ## docagent
 
 `docagent` is not managed by Hermes. It may be started from Claude/Codex shell sessions. Current external-service requirement is to bind to all interfaces:
@@ -384,4 +567,20 @@ CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
 hermes doctor
 ss -ltnp
 docker ps --format '{{.Names}}\t{{.Ports}}\t{{.Status}}'
+
+# Bearer-authenticated remote endpoints (token extracted at runtime, never
+# inlined here; see /etc/nginx/ollama-token.conf and the backup at
+# /home/cwliao/.hermes-backup/hermes-secrets-<TS>.tar.gz)
+TOK=$(sudo grep -oP '"Bearer \K[^"]+' /etc/nginx/ollama-token.conf)
+curl -sk -o /dev/null -w "  8443 /v1/models: HTTP %{http_code}\n" \
+  -H "Authorization: Bearer $TOK" https://140.96.58.171:8443/v1/models
+curl -s -o /dev/null -w "  8081 /api/tags:  HTTP %{http_code}\n" \
+  -H "Authorization: Bearer $TOK" http://140.96.58.171:8081/api/tags
+sudo ufw status | grep -E '8081|8443'
+
+# Per-model num_ctx pinned variants (should be 11 entries, one per base)
+docker exec ollama ollama list 2>/dev/null | awk 'NR>1 && $1 ~ /-[0-9]+k$/ {n++} END {print "  pinned num_ctx variants: "n"/11"}'
+
+# GPU
+nvidia-smi --query-gpu=utilization.gpu,memory.used,power.draw --format=csv,noheader | head -1
 ```

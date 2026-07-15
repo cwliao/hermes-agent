@@ -8,7 +8,8 @@
 - `web_gate.v1`、repo-local wiring、`subprocess_json` 與 active config 已完成
 - Allow、deny、adapter-failure smoke tests 已通過
 - Actual `web`、`browser`、`vision` 已在 CLI 與 Telegram platform config 啟用
-- Mandatory interception 尚未啟用；toolset 變更應以 fresh session 驗證
+- Mandatory interception 已實作，透過 `web_gate.mandatory` config flag 控制
+  （opt-in，預設 `false`）；toolset 變更應以 fresh session 驗證
 - User-level `hermes-gateway.service` 已建立並啟用；gateway 目前由 systemd user
   service 管理
 
@@ -76,6 +77,56 @@ Policy deny 與 malformed request 都輸出有效 deny decision 並 exit 0；Her
 | Default local fake | `gate_not_configured` |
 
 任何 policy、wiring、process、schema 或 version failure 都不會產生 allow。
+
+## Mandatory interception
+
+`web_gate.mandatory: true`（`~/.hermes/config.yaml`，`web_gate:` block 內，
+預設 `false`）啟用後，以下三個 URL-bearing 工具在執行前都會先經
+`web_gate` 判定：
+
+- `web_extract`（`urls` 陣列，最多 5 個）
+- `browser_navigate`（`url`）
+- `vision_analyze`（`image_url`，**僅當是 `http(s)://` 時才受控** — local
+  file path 與 `data:` URL 不在範圍內）
+
+`web_search` 刻意排除在外 — 它接受的是 search query 字串，不是 target
+URL，套用 HTTPS/allowlist/DNS policy 沒有意義。
+
+檢查點在 `tools/web_gate.py::mandatory_web_gate_block_message()`，掛在
+`hermes_cli/plugins.py::_get_pre_tool_call_directive_details()`（既有
+fail-closed choke point，所有 `resolve_pre_tool_block` 呼叫路徑都會經過，
+故四個既有 call site 都不需修改），且排在 plugin `pre_tool_call` hook
+**之前**，保證 mandatory deny 不會被無關 plugin 的 `approve` directive
+覆蓋。
+
+Policy：
+
+- **Multi-URL all-or-nothing**：`web_extract` 只要有一個 URL 被 deny，
+  整個 call 就被擋下（不會靜默過濾成只保留 allow 的 URL），確保 model
+  看到的結果跟它請求的完全一致。
+- **Flag 讀取本身 fail-open**：讀 `web_gate.mandatory` 本身若出錯，視為
+  `false`（避免 config 讀取小故障就把從未 opt-in 的使用者鎖死）；但一旦
+  確認 `mandatory=true`，後續每個 URL 的判定都沿用 `web_gate_tool()`
+  既有的 fail-closed 邏輯。
+- **`local_fake` + `mandatory=true` 會讓三個工具完全不可用** — `local_fake`
+  永遠 deny，這是刻意的 fail-closed 行為，不是 bug；啟用 mandatory 前必須
+  先把 `adapter_mode` 換成 `subprocess_json` 並設好 `command`。
+
+已知限制（刻意記錄，非遺漏）：
+
+1. Model 被擋下後仍可能透過其他管道達到類似效果（例如請使用者貼上頁面內容，
+   或透過已啟用的 `terminal` 工具跑 `curl`）— 這個 gate 只覆蓋這三個工具
+   自己的 dispatch path，不是 network-level 的邊界。
+2. 未來新增的 URL-bearing 工具（新的 browser action、新的 fetch 工具、
+   MCP 工具）預設不會被 gate 覆蓋，除非手動加進
+   `tools/web_gate.py::WEB_GATE_TARGET_TOOLS`。
+3. `vision_analyze` 只在 `image_url` 是 `http(s)://` 時才受控；model 若能
+   透過其他工具把內容先落地成本機檔案，再以 local path 餵給
+   `vision_analyze`，等於繞過此 gate — 目前接受此限制，未解。
+4. `request_source` 對應較粗略：`{telegram, webui, web, api_server, tui,
+   desktop}` 以外的 platform 一律收斂成 `"cli"`（因為 contract 只允許
+   `cli`/`telegram`/`webui` 三個值）；`channel` 欄位仍保留真實的 platform
+   字串供 adapter 自己使用。
 
 ## Smoke validation
 
@@ -161,4 +212,4 @@ Do not change Telegram token/user allowlist values unless explicitly requested.
 - Web、browser、vision rollout 已依 active platform config 開始
 - External path 只在 non-secret `config.yaml`，未 hardcode 進 Hermes source
 
-Baseline ready 表示 Hermes 可由 active config 選擇 `subprocess_json`、呼叫 local CLI、保留原 target，並對 allow、policy deny 與 adapter failure 做 fail-closed 判定。Web、browser、vision 已在 CLI/Telegram rollout；強制所有 web-capable calls 經 gate 仍刻意 deferred。Systemd-managed gateway 已建立並由 user service 管理。
+Baseline ready 表示 Hermes 可由 active config 選擇 `subprocess_json`、呼叫 local CLI、保留原 target，並對 allow、policy deny 與 adapter failure 做 fail-closed 判定。Web、browser、vision 已在 CLI/Telegram rollout；強制所有 web-capable calls 經 gate 現已可透過 `web_gate.mandatory: true` 啟用（見上方「Mandatory interception」章節），預設仍為 `false`（opt-in）。Systemd-managed gateway 已建立並由 user service 管理。

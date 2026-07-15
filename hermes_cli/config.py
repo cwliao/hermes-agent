@@ -2640,6 +2640,37 @@ DEFAULT_CONFIG = {
     # Or dict format: {"name": {"description": "...", "system_prompt": "...", "tone": "...", "style": "..."}}
     "personalities": {},
 
+    # codex/claude CLI bridge -- lets /codex and /claude Telegram commands
+    # (plugins/coding-cli/) shell out to the real codex/claude CLI binaries.
+    # Off by default and requires at least one allowed_roots entry before
+    # a prompt will run (fail-closed, mirrors web_gate/security below).
+    "external_cli": {
+        "enabled": False,
+        "allowed_roots": [],
+        "timeout_seconds": 180,
+        "codex_bin": "codex",
+        "claude_bin": "claude",
+        "codex_sandbox": "workspace-write",
+        "claude_permission_mode": "acceptEdits",
+    },
+
+    # Web access gate -- fail-closed URL-access decision layer for
+    # URL-bearing web-capable tools (web_extract, browser_navigate,
+    # vision_analyze). See tools/web_gate.py and docs/handover-webgate.md.
+    "web_gate": {
+        "wiring_version": "web_gate.wiring.v1",
+        "adapter_mode": "local_fake",  # local_fake always denies (gate_not_configured)
+        # When true, EVERY call to web_extract / browser_navigate /
+        # vision_analyze must first pass web_gate for each http(s) URL it
+        # touches, enforced at hermes_cli.plugins._get_pre_tool_call_
+        # directive_details (fail-closed: any gate error or deny blocks the
+        # underlying tool call). Off by default -- flip only after wiring a
+        # real `adapter_mode: subprocess_json` adapter via `command`, since
+        # local_fake denies everything and mandatory=true + local_fake means
+        # web_extract/browser_navigate/vision_analyze become unusable.
+        "mandatory": False,
+    },
+
     # Pre-exec security scanning via tirith
     "security": {
         "allow_private_urls": False,  # Allow requests to private/internal IPs (for OpenWrt, proxies, VPNs)
@@ -3346,7 +3377,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 33,
+    "_config_version": 35,
 }
 
 # =============================================================================

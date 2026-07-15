@@ -1024,6 +1024,194 @@ class TestResolvePreToolBlock:
         assert msg is not None and "gate failed" in msg  # fail-closed
 
 
+class TestMandatoryWebGate:
+    """Mandatory web_gate interception, wired into the same fail-closed
+    chokepoint as TestResolvePreToolBlock above (_get_pre_tool_call_
+    directive_details), gated behind tools.web_gate.is_web_gate_mandatory."""
+
+    def _no_plugin_hooks(self, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_hook", lambda hook_name, **kwargs: []
+        )
+
+    @pytest.mark.parametrize(
+        ("tool_name", "args"),
+        [
+            ("browser_navigate", {"url": "https://example.com"}),
+            ("web_extract", {"urls": ["https://example.com"]}),
+            ("vision_analyze", {"image_url": "https://example.com/x.png"}),
+            ("web_search", {"query": "hello"}),
+        ],
+    )
+    def test_flag_off_regression_unaffected(self, monkeypatch, tool_name, args):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        import tools.web_gate as web_gate
+
+        self._no_plugin_hooks(monkeypatch)
+        monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: False)
+        assert resolve_pre_tool_block(tool_name, args) is None
+
+    def test_flag_on_blocks_browser_navigate_on_deny(self, monkeypatch):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        import tools.web_gate as web_gate
+
+        self._no_plugin_hooks(monkeypatch)
+        monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+        monkeypatch.setattr(
+            web_gate,
+            "resolve_web_gate_adapter",
+            lambda wiring=None: (
+                type(
+                    "DenyAdapter",
+                    (),
+                    {"evaluate": staticmethod(
+                        lambda req: {
+                            "contract_version": web_gate.WEB_GATE_CONTRACT_VERSION,
+                            "decision": "deny",
+                            "reason": "https_required",
+                        }
+                    )},
+                )(),
+                None,
+            ),
+        )
+        msg = resolve_pre_tool_block("browser_navigate", {"url": "http://evil.example"})
+        assert msg is not None
+        assert "browser_navigate" in msg
+        assert "https_required" in msg
+
+    def test_flag_on_passes_browser_navigate_on_allow(self, monkeypatch):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        import tools.web_gate as web_gate
+
+        self._no_plugin_hooks(monkeypatch)
+        monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+        monkeypatch.setattr(
+            web_gate,
+            "resolve_web_gate_adapter",
+            lambda wiring=None: (
+                type(
+                    "AllowAdapter",
+                    (),
+                    {"evaluate": staticmethod(
+                        lambda req: {
+                            "contract_version": web_gate.WEB_GATE_CONTRACT_VERSION,
+                            "decision": "allow",
+                            "reason": "policy_allowed",
+                        }
+                    )},
+                )(),
+                None,
+            ),
+        )
+        assert resolve_pre_tool_block(
+            "browser_navigate", {"url": "https://example.com"}
+        ) is None
+
+    @pytest.mark.parametrize(
+        ("tool_name", "args"),
+        [
+            ("web_extract", {"urls": ["https://example.com"]}),
+            ("vision_analyze", {"image_url": "https://example.com/x.png"}),
+        ],
+    )
+    def test_flag_on_blocks_web_extract_and_vision_analyze(
+        self, monkeypatch, tool_name, args
+    ):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        import tools.web_gate as web_gate
+
+        self._no_plugin_hooks(monkeypatch)
+        monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+        monkeypatch.setattr(
+            web_gate,
+            "resolve_web_gate_adapter",
+            lambda wiring=None: (
+                type(
+                    "DenyAdapter",
+                    (),
+                    {"evaluate": staticmethod(
+                        lambda req: {
+                            "contract_version": web_gate.WEB_GATE_CONTRACT_VERSION,
+                            "decision": "deny",
+                            "reason": "policy_denied",
+                        }
+                    )},
+                )(),
+                None,
+            ),
+        )
+        msg = resolve_pre_tool_block(tool_name, args)
+        assert msg is not None
+        assert tool_name in msg
+
+    def test_flag_on_vision_analyze_local_path_bypasses_gate(self, monkeypatch):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        import tools.web_gate as web_gate
+
+        self._no_plugin_hooks(monkeypatch)
+        monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+
+        def _always_deny(wiring=None):
+            raise AssertionError("adapter should never be resolved for a local path")
+
+        monkeypatch.setattr(web_gate, "resolve_web_gate_adapter", _always_deny)
+        assert resolve_pre_tool_block(
+            "vision_analyze", {"image_url": "/local/file.png"}
+        ) is None
+
+    def test_flag_on_web_search_never_gated(self, monkeypatch):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        import tools.web_gate as web_gate
+
+        self._no_plugin_hooks(monkeypatch)
+        monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+
+        def _always_deny(wiring=None):
+            raise AssertionError("adapter should never be resolved for web_search")
+
+        monkeypatch.setattr(web_gate, "resolve_web_gate_adapter", _always_deny)
+        assert resolve_pre_tool_block("web_search", {"query": "hello"}) is None
+
+    def test_gate_block_takes_precedence_over_plugin_approve(self, monkeypatch):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        import tools.web_gate as web_gate
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_hook",
+            lambda hook_name, **kwargs: [{"action": "approve", "message": "let it through"}],
+        )
+        approval_calls = []
+        monkeypatch.setattr(
+            "tools.approval.request_tool_approval",
+            lambda *a, **k: approval_calls.append((a, k)) or {"approved": True, "message": None},
+        )
+        monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+        monkeypatch.setattr(
+            web_gate,
+            "resolve_web_gate_adapter",
+            lambda wiring=None: (
+                type(
+                    "DenyAdapter",
+                    (),
+                    {"evaluate": staticmethod(
+                        lambda req: {
+                            "contract_version": web_gate.WEB_GATE_CONTRACT_VERSION,
+                            "decision": "deny",
+                            "reason": "policy_denied",
+                        }
+                    )},
+                )(),
+                None,
+            ),
+        )
+        msg = resolve_pre_tool_block("browser_navigate", {"url": "https://evil.example"})
+        assert msg is not None
+        assert "browser_navigate" in msg
+        # The plugin's approve directive must never even be reached.
+        assert approval_calls == []
+
+
 class TestGetPreVerifyContinueMessage:
     """`pre_verify` directive aggregation — mirrors the pre_tool_call block path."""
 

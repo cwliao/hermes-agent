@@ -2142,6 +2142,24 @@ def _get_pre_tool_call_directive_details(
             message=fmt.format(tool_name=tool_name),
         )
 
+    # Mandatory web_gate interception (opt-in via the web_gate.mandatory
+    # config flag) -- runs before plugin hooks so a denied URL can't be
+    # overridden by an unrelated plugin's approve directive.
+    try:
+        from tools.web_gate import mandatory_web_gate_block_message
+        gate_block = mandatory_web_gate_block_message(
+            tool_name, args, session_id=session_id,
+        )
+    except Exception:
+        # tools/web_gate is imported at process startup (its own
+        # registry.register() call) -- an ImportError here means the whole
+        # tool registry is already broken; don't additionally brick every
+        # tool call over it. mandatory_web_gate_block_message already
+        # fail-closes real gate errors internally.
+        gate_block = None
+    if gate_block is not None:
+        return _PreToolCallDirective(action="block", message=gate_block)
+
     hook_results = invoke_hook(
         "pre_tool_call",
         tool_name=tool_name,

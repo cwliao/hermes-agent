@@ -56,6 +56,7 @@ The repo ships these bundled plugins under `plugins/`. All are opt-in — enable
 | Plugin | Kind | Purpose |
 |---|---|---|
 | `disk-cleanup` | hooks + slash command | Auto-track ephemeral files and clean them on session end |
+| `coding-cli` | slash command | `/codex` and `/claude` — drive the real codex/claude CLIs from a gateway chat, resumable per chat |
 | `security-guidance` | hooks | Pattern-match dangerous code on `write_file`/`patch` and append a security warning (or block) — 25 rules (Apache-2.0 fork of Anthropic's `claude-plugins-official` patterns) |
 | `observability/langfuse` | hooks | Trace turns / LLM calls / tools to [Langfuse](https://langfuse.com) |
 | `observability/nemo_relay` | hooks | Relay observability events (turns / LLM calls / tools) to an NVIDIA NeMo endpoint |
@@ -117,6 +118,62 @@ Auto-tracks and removes ephemeral files created during sessions — test scripts
 **Enabling:** `hermes plugins enable disk-cleanup` (or check the box in `hermes plugins`).
 
 **Disabling again:** `hermes plugins disable disk-cleanup`.
+
+### coding-cli
+
+Drive the real `codex` and `claude` CLIs from a gateway chat (Telegram,
+etc.) via `/codex` and `/claude` slash commands — not routed through
+Hermes' own LLM loop, just used as the messaging transport. Each call is a
+single non-interactive turn (`codex exec [resume <id>]` / `claude -p
+[--resume <id>]`), not a live interactive terminal session; continuity
+across messages comes from each CLI's own session/thread id, persisted
+per chat.
+
+**Usage:**
+
+```
+/codex <prompt>       Send a prompt (resumes this chat's codex session if one exists)
+/codex dir <path>     Set the working directory for this chat (must be under allowed_roots)
+/codex reset          Start a fresh codex session next time (keeps the dir)
+
+/claude <prompt>       Same, for the claude CLI
+/claude dir <path>
+/claude reset
+```
+
+**Fail-closed by design** — a prompt refuses to run unless
+`external_cli.enabled: true` *and* `external_cli.allowed_roots` has at
+least one entry in `config.yaml`; `/codex dir <path>` / `/claude dir
+<path>` must resolve under one of those roots (or a subdirectory of one).
+This exists because both CLIs are themselves agentic and can run shell
+commands — directory scoping bounds what they can touch, and
+`codex_sandbox` / `claude_permission_mode` (below) defer the rest of the
+destructive-action gating to each CLI's own built-in sandbox/permission
+system rather than bypassing it.
+
+**Config** (`external_cli:` in `config.yaml`):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `false` | Master switch. Prompts fail closed until true. |
+| `allowed_roots` | `[]` | Directories `dir` may point at (and any subdirectory). Empty = feature can't run. |
+| `timeout_seconds` | `180` | Per-turn subprocess timeout. |
+| `codex_bin` / `claude_bin` | `"codex"` / `"claude"` | Resolved via `PATH` at call time. |
+| `codex_sandbox` | `"workspace-write"` | Passed as codex's own `--sandbox` flag. |
+| `claude_permission_mode` | `"acceptEdits"` | Passed as claude's own `--permission-mode` flag. |
+
+**State** — per-chat session id + working directory persisted at
+`$HERMES_HOME/coding-cli-sessions.json`.
+
+**Known limitations:** no live streaming (the whole CLI call finishes
+before Telegram sees anything); long tasks that exceed `timeout_seconds`
+are killed and must be re-prompted; the `/codex`/`/claude` prefix is
+required every turn (no persistent mode-switch); state is per-chat, not
+per-user, so a group chat shares one session across all members.
+
+**Enabling:** `hermes plugins enable coding-cli`, then set `external_cli.enabled: true` and `allowed_roots` in `config.yaml`.
+
+**Disabling again:** `hermes plugins disable coding-cli`.
 
 ### security-guidance
 

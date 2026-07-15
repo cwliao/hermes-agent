@@ -1779,6 +1779,17 @@ def _get_pre_tool_call_directive_details(
     if allowed is not None and tool_name not in allowed:
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
         return _PreToolCallDirective(action="block", message=fmt.format(tool_name=tool_name))
+
+    # Mandatory web_gate interception is evaluated before plugin hooks so an URL deny cannot be
+    # overridden by an unrelated plugin approval directive.
+    try:
+        from tools.web_gate import mandatory_web_gate_block_message
+        gate_block = mandatory_web_gate_block_message(tool_name, args, session_id=session_id)
+    except Exception:
+        gate_block = None
+    if gate_block is not None:
+        return _PreToolCallDirective(action="block", message=gate_block)
+
     from hermes_cli.lifecycle import invoke_hook as invoke_lifecycle_hook
     hook_results = invoke_lifecycle_hook(
         "pre_tool_call", tool_name=tool_name, args=args if isinstance(args, dict) else {},

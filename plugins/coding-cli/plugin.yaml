@@ -1,0 +1,5 @@
+name: coding-cli
+version: 1.0.0
+description: "Drive the codex/claude CLIs from Telegram via /codex and /claude slash commands."
+author: "cwliao"
+hooks: []

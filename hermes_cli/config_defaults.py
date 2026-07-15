@@ -2127,6 +2127,27 @@ DEFAULT_CONFIG = {
     # Or dict format: {"name": {"description": "...", "system_prompt": "...", "tone": "...", "style": "..."}}
     "personalities": {},
 
+    # codex/claude CLI bridge -- lets /codex and /claude Telegram commands
+    # shell out to the real codex/claude CLI binaries. Off by default and
+    # requires at least one allowed_roots entry before a prompt will run.
+    "external_cli": {
+        "enabled": False,
+        "allowed_roots": [],
+        "timeout_seconds": 180,
+        "codex_bin": "codex",
+        "claude_bin": "claude",
+        "codex_sandbox": "workspace-write",
+        "claude_permission_mode": "acceptEdits",
+    },
+
+    # Web access gate -- fail-closed URL-access decision layer for
+    # URL-bearing web-capable tools.
+    "web_gate": {
+        "wiring_version": "web_gate.wiring.v1",
+        "adapter_mode": "local_fake",
+        "mandatory": False,
+    },
+
     # Pre-exec security scanning via tirith
     "security": {
         "allow_private_urls": False,  # Allow requests to private/internal IPs (for OpenWrt, proxies, VPNs)
@@ -3122,7 +3143,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 33,
+    "_config_version": 35,
 }
 
 # Optional environment variables that enhance functionality

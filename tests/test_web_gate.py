@@ -214,3 +214,273 @@ def test_adapter_exception_fails_closed():
         "allowed": False,
         "reason": "gate_adapter_error",
     }
+
+
+# ---------------------------------------------------------------------------
+# Mandatory interception
+# ---------------------------------------------------------------------------
+
+
+def test_is_web_gate_mandatory_defaults_false_when_unset(monkeypatch):
+    monkeypatch.setattr(
+        web_gate,
+        "_load_web_gate_wiring",
+        lambda: {"wiring_version": "web_gate.wiring.v1", "adapter_mode": "local_fake"},
+    )
+    assert web_gate.is_web_gate_mandatory() is False
+
+
+def test_is_web_gate_mandatory_reads_true(monkeypatch):
+    monkeypatch.setattr(
+        web_gate,
+        "_load_web_gate_wiring",
+        lambda: {
+            "wiring_version": "web_gate.wiring.v1",
+            "adapter_mode": "local_fake",
+            "mandatory": True,
+        },
+    )
+    assert web_gate.is_web_gate_mandatory() is True
+
+
+def test_is_web_gate_mandatory_fails_closed_to_false_on_bad_config(monkeypatch):
+    def boom():
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(web_gate, "_load_web_gate_wiring", boom)
+    assert web_gate.is_web_gate_mandatory() is False
+
+
+def test_is_web_gate_mandatory_false_for_non_mapping_wiring(monkeypatch):
+    monkeypatch.setattr(web_gate, "_load_web_gate_wiring", lambda: "not-a-mapping")
+    assert web_gate.is_web_gate_mandatory() is False
+
+
+def test_urls_for_web_extract_filters_non_http():
+    args = {
+        "urls": [
+            "https://a.example",
+            "/etc/passwd",
+            "ftp://x.example",
+            "data:text/plain;base64,aGk=",
+            "http://b.example",
+        ]
+    }
+    assert web_gate._urls_for_web_extract(args) == [
+        "https://a.example",
+        "http://b.example",
+    ]
+
+
+def test_urls_for_web_extract_truncates_to_first_five_before_filtering():
+    # Mirrors web_extract_tool's own args.get("urls", [])[:5] truncation --
+    # a 6th http(s) URL must never be gated, since it will never execute.
+    args = {
+        "urls": [
+            "https://a.example",
+            "https://b.example",
+            "https://c.example",
+            "https://d.example",
+            "https://e.example",
+            "https://f.example",
+        ]
+    }
+    assert web_gate._urls_for_web_extract(args) == [
+        "https://a.example",
+        "https://b.example",
+        "https://c.example",
+        "https://d.example",
+        "https://e.example",
+    ]
+
+
+def test_urls_for_web_extract_non_list_returns_empty():
+    assert web_gate._urls_for_web_extract({"urls": "https://a.example"}) == []
+    assert web_gate._urls_for_web_extract({}) == []
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://example.com", ["https://example.com"]),
+        ("http://example.com", ["http://example.com"]),
+        ("/local/path", []),
+        ("", []),
+        (None, []),
+    ],
+)
+def test_urls_for_browser_navigate(url, expected):
+    assert web_gate._urls_for_browser_navigate({"url": url}) == expected
+
+
+@pytest.mark.parametrize(
+    ("image_url", "expected"),
+    [
+        ("https://example.com/x.png", ["https://example.com/x.png"]),
+        ("/tmp/local.png", []),
+        ("data:image/png;base64,aGk=", []),
+        (None, []),
+    ],
+)
+def test_urls_for_vision_analyze_excludes_non_http(image_url, expected):
+    assert web_gate._urls_for_vision_analyze({"image_url": image_url}) == expected
+
+
+def test_mandatory_check_noop_when_flag_off(monkeypatch):
+    monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: False)
+    adapter = FakeAdapter(adapter_response(decision="deny", reason="policy_denied"))
+    monkeypatch.setattr(
+        web_gate, "resolve_web_gate_adapter", lambda wiring=None: (adapter, None)
+    )
+    result = web_gate.mandatory_web_gate_block_message(
+        "browser_navigate", {"url": "https://example.com"}
+    )
+    assert result is None
+    assert adapter.requests == []
+
+
+def test_mandatory_check_noop_for_ungated_tool(monkeypatch):
+    monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+    adapter = FakeAdapter(adapter_response(decision="deny", reason="policy_denied"))
+    monkeypatch.setattr(
+        web_gate, "resolve_web_gate_adapter", lambda wiring=None: (adapter, None)
+    )
+    result = web_gate.mandatory_web_gate_block_message(
+        "web_search", {"query": "hello"}
+    )
+    assert result is None
+    assert adapter.requests == []
+
+
+def test_mandatory_check_noop_when_no_http_url(monkeypatch):
+    monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+    adapter = FakeAdapter(adapter_response(decision="deny", reason="policy_denied"))
+    monkeypatch.setattr(
+        web_gate, "resolve_web_gate_adapter", lambda wiring=None: (adapter, None)
+    )
+    result = web_gate.mandatory_web_gate_block_message(
+        "vision_analyze", {"image_url": "/local/file.png"}
+    )
+    assert result is None
+    assert adapter.requests == []
+
+
+def test_mandatory_check_allows_when_gate_allows(monkeypatch):
+    monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+    adapter = FakeAdapter(adapter_response(decision="allow", reason="policy_allowed"))
+    monkeypatch.setattr(
+        web_gate, "resolve_web_gate_adapter", lambda wiring=None: (adapter, None)
+    )
+    monkeypatch.setattr(
+        web_gate, "_derive_web_gate_identity", lambda session_id: ("me", "telegram", "telegram")
+    )
+    result = web_gate.mandatory_web_gate_block_message(
+        "browser_navigate", {"url": "https://example.com"}, session_id="sess-1"
+    )
+    assert result is None
+    assert adapter.requests == [
+        {
+            "contract_version": "web_gate.v1",
+            "url": "https://example.com",
+            "tool": "browser_navigate",
+            "actor": "me",
+            "channel": "telegram",
+            "request_source": "telegram",
+        }
+    ]
+
+
+def test_mandatory_check_blocks_when_gate_denies(monkeypatch):
+    monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+    adapter = FakeAdapter(adapter_response(decision="deny", reason="https_required"))
+    monkeypatch.setattr(
+        web_gate, "resolve_web_gate_adapter", lambda wiring=None: (adapter, None)
+    )
+    result = web_gate.mandatory_web_gate_block_message(
+        "browser_navigate", {"url": "http://example.com"}
+    )
+    assert result is not None
+    assert "browser_navigate" in result
+    assert "http://example.com" in result
+    assert "https_required" in result
+
+
+def test_mandatory_check_web_extract_any_deny_blocks_whole_call(monkeypatch):
+    monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+
+    class SequencedAdapter:
+        def __init__(self):
+            self.requests = []
+
+        def evaluate(self, request):
+            self.requests.append(request)
+            if request["url"] == "https://b.example":
+                return adapter_response(decision="deny", reason="blocked_b")
+            return adapter_response(decision="allow", reason="policy_allowed")
+
+    adapter = SequencedAdapter()
+    monkeypatch.setattr(
+        web_gate, "resolve_web_gate_adapter", lambda wiring=None: (adapter, None)
+    )
+    result = web_gate.mandatory_web_gate_block_message(
+        "web_extract", {"urls": ["https://a.example", "https://b.example", "https://c.example"]}
+    )
+    assert result is not None
+    assert "https://b.example" in result
+    # Short-circuits: never evaluates the 3rd URL once the 2nd is denied.
+    assert [r["url"] for r in adapter.requests] == ["https://a.example", "https://b.example"]
+
+
+def test_mandatory_check_fails_closed_on_unexpected_exception(monkeypatch):
+    monkeypatch.setattr(web_gate, "is_web_gate_mandatory", lambda: True)
+
+    def boom(payload, adapter=None, wiring=None):
+        raise RuntimeError("gate exploded")
+
+    monkeypatch.setattr(web_gate, "web_gate_tool", boom)
+    result = web_gate.mandatory_web_gate_block_message(
+        "browser_navigate", {"url": "https://example.com"}
+    )
+    assert result is not None
+    assert "browser_navigate" in result
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected_request_source"),
+    [
+        ("telegram", "telegram"),
+        ("webui", "webui"),
+        ("web", "webui"),
+        ("api_server", "webui"),
+        ("tui", "webui"),
+        ("desktop", "webui"),
+        ("whatsapp", "cli"),
+        ("", "cli"),
+    ],
+)
+def test_derive_web_gate_identity_maps_known_platforms(platform, expected_request_source):
+    from gateway.session_context import set_session_vars, clear_session_vars
+
+    tokens = set_session_vars(platform=platform, user_id="user-42")
+    try:
+        actor, channel, request_source = web_gate._derive_web_gate_identity("sess-1")
+    finally:
+        clear_session_vars(tokens)
+
+    assert actor == "user-42"
+    assert channel == (platform or "cli")
+    assert request_source == expected_request_source
+
+
+def test_derive_web_gate_identity_falls_back_to_session_id_and_unknown():
+    from gateway.session_context import set_session_vars, clear_session_vars
+
+    tokens = set_session_vars(platform="", user_id="")
+    try:
+        actor, channel, request_source = web_gate._derive_web_gate_identity("sess-42")
+    finally:
+        clear_session_vars(tokens)
+
+    assert actor == "sess-42"
+    assert channel == "cli"
+    assert request_source == "cli"

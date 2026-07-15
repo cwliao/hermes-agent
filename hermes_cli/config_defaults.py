@@ -1737,6 +1737,25 @@ DEFAULT_CONFIG = {
         # for one login without changing this key.
         "codex_login_flow": "device_code",
     },
+
+    # codex/claude CLI bridge. Disabled by default and requires at least one allowed_roots entry.
+    "external_cli": {
+        "enabled": False,
+        "allowed_roots": [],
+        "timeout_seconds": 180,
+        "codex_bin": "codex",
+        "claude_bin": "claude",
+        "codex_sandbox": "workspace-write",
+        "claude_permission_mode": "acceptEdits",
+    },
+
+    # Fail-closed URL-access decision layer for web-capable tools.
+    "web_gate": {
+        "wiring_version": "web_gate.wiring.v1",
+        "adapter_mode": "local_fake",
+        "mandatory": False,
+    },
+
     "security": {  # Security: pre-exec scanning via tirith plus related guards.
         "allow_private_urls": False,  # allow requests to private/internal IPs (OpenWrt, VPNs)
         # CIDR blocks a local TUN proxy answers DNS with (Mihomo/Clash fake-ip, Surge enhanced).

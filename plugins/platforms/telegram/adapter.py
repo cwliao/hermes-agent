@@ -22,6 +22,11 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
 
+from plugins.platforms.telegram.docubot_mcp_gateway import (
+    ingest_document_to_docubot,
+    query_via_klib_mcp,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -9177,6 +9182,32 @@ class TelegramAdapter(BasePlatformAdapter):
         elif msg.document:
             doc = msg.document
             try:
+                async def _ingest_cached_doc(cached_path: str, *, fallback_name: str) -> None:
+                    try:
+                        ingest_result = ingest_document_to_docubot(
+                            source="telegram",
+                            action="document-upload",
+                            metadata={
+                                "platform": "telegram",
+                                "chat_id": str(getattr(getattr(msg, "chat", None), "id", "")),
+                                "message_id": str(msg.message_id),
+                                "file_id": getattr(doc, "file_id", ""),
+                                "file_unique_id": getattr(doc, "file_unique_id", ""),
+                                "file_name": fallback_name,
+                                "mime_type": doc_mime or "",
+                            },
+                            local_path=cached_path,
+                            stable_key=getattr(doc, "file_unique_id", None),
+                        )
+                        logger.info("[Telegram] DocuBot ingest response for document %s: %s", doc.file_unique_id, ingest_result)
+                    except Exception as e:
+                        logger.warning(
+                            "[Telegram] DocuBot ingest call failed for document %s: %s",
+                            getattr(doc, "file_id", ""),
+                            e,
+                            exc_info=True,
+                        )
+
                 # Determine file extension
                 ext = ""
                 original_filename = doc.file_name or ""
@@ -9229,6 +9260,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     event.media_urls = [cached_path]
                     event.media_types = [doc_mime if doc_mime.startswith("image/") else _TELEGRAM_IMAGE_EXT_TO_MIME.get(image_ext, "image/jpeg")]
                     logger.info("[Telegram] Cached user image-document at %s", cached_path)
+                    await _ingest_cached_doc(cached_path, fallback_name=original_filename or doc_mime or "document")
 
                     media_group_id = getattr(msg, "media_group_id", None)
                     if media_group_id:
@@ -9258,6 +9290,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     event.media_types = [SUPPORTED_VIDEO_TYPES[ext]]
                     event.message_type = MessageType.VIDEO
                     logger.info("[Telegram] Cached user video document at %s", cached_path)
+                    await _ingest_cached_doc(cached_path, fallback_name=original_filename or f"document{ext}")
                     await self.handle_message(event)
                     return
 
@@ -9298,6 +9331,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     cached.path,
                     cached.media_type,
                 )
+                await _ingest_cached_doc(cached.path, fallback_name=original_filename or f"document{ext or '.bin'}")
 
                 # For text-readable files, inject content into event.text (capped
                 # at 100 KB). Gate on a text-like extension/MIME — NOT a blind

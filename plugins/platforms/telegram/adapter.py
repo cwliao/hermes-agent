@@ -24,6 +24,11 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
+from plugins.platforms.telegram.docubot_mcp_gateway import (
+    ingest_document_to_docubot,
+    query_via_klib_mcp,
+)
+
 logger = logging.getLogger(__name__)
 
 _DELIVERY_CORRELATION_KEY = "telegram_delivery_correlation_id"
@@ -9886,6 +9891,29 @@ class TelegramAdapter(BasePlatformAdapter):
 
         event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
+        clean_text = (event.text or "").strip()
+
+        if clean_text.startswith("/"):
+            parts = clean_text.split(None, 1)
+            command = parts[0].lstrip("/").lower()
+            if command == "query" or command.startswith("query"):
+                query_text = parts[1] if len(parts) > 1 else ""
+                result = query_via_klib_mcp(query_text.strip())
+                if isinstance(result, dict) and "error" in result:
+                    response = f"KLIB query failed: {result['error']}"
+                else:
+                    response = json.dumps(result, ensure_ascii=False, indent=2)
+
+                thread_id = self._effective_message_thread_id(msg)
+                metadata = {"thread_id": str(thread_id)} if thread_id else None
+                await self.send(
+                    str(msg.chat.id),
+                    response or "KLIB query completed with no output.",
+                    reply_to=str(msg.message_id),
+                    metadata=metadata,
+                )
+                return
+
         await self._cache_replied_media(msg, event)
         event = self._apply_telegram_group_observe_attribution(event)
         self._log_inbound_accepted(event)
@@ -10270,6 +10298,32 @@ class TelegramAdapter(BasePlatformAdapter):
         elif msg.document:
             doc = msg.document
             try:
+                async def _ingest_cached_doc(cached_path: str, *, fallback_name: str) -> None:
+                    try:
+                        ingest_result = ingest_document_to_docubot(
+                            source="telegram",
+                            action="document-upload",
+                            metadata={
+                                "platform": "telegram",
+                                "chat_id": str(getattr(getattr(msg, "chat", None), "id", "")),
+                                "message_id": str(msg.message_id),
+                                "file_id": getattr(doc, "file_id", ""),
+                                "file_unique_id": getattr(doc, "file_unique_id", ""),
+                                "file_name": fallback_name,
+                                "mime_type": doc_mime or "",
+                            },
+                            local_path=cached_path,
+                            stable_key=getattr(doc, "file_unique_id", None),
+                        )
+                        logger.info("[Telegram] DocuBot ingest response for document %s: %s", doc.file_unique_id, ingest_result)
+                    except Exception as e:
+                        logger.warning(
+                            "[Telegram] DocuBot ingest call failed for document %s: %s",
+                            getattr(doc, "file_id", ""),
+                            e,
+                            exc_info=True,
+                        )
+
                 # Determine file extension
                 ext = ""
                 original_filename = doc.file_name or ""
@@ -10329,6 +10383,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     else:
                         batch_key = self._photo_batch_key(event, msg)
                         self._enqueue_photo_event(batch_key, event)
+                    await _ingest_cached_doc(cached_path, fallback_name=original_filename or doc_mime or "document")
                     return
 
                 if not ext and doc.mime_type:
@@ -10351,6 +10406,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     event.media_types = [SUPPORTED_VIDEO_TYPES[ext]]
                     event.message_type = MessageType.VIDEO
                     logger.info("[Telegram] Cached user video document at %s", cached_path)
+                    await _ingest_cached_doc(cached_path, fallback_name=original_filename or f"document{ext}")
                     await self.handle_message(event)
                     return
 
@@ -10390,6 +10446,10 @@ class TelegramAdapter(BasePlatformAdapter):
                     cached.kind,
                     cached.path,
                     cached.media_type,
+                )
+                await _ingest_cached_doc(
+                    cached.path,
+                    fallback_name=original_filename or f"document{ext or '.bin'}",
                 )
 
                 # For text-readable files, inject content into event.text (capped

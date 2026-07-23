@@ -2647,6 +2647,7 @@ DEFAULT_CONFIG = {
     "external_cli": {
         "enabled": False,
         "allowed_roots": [],
+        "profile_home": "",
         "timeout_seconds": 180,
         "codex_bin": "codex",
         "claude_bin": "claude",

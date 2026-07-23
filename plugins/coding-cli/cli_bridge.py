@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import stat
 import shutil
 import threading
 from pathlib import Path
@@ -36,12 +38,50 @@ class CliTurnError(Exception):
 _STATE_LOCK = threading.Lock()
 
 
-def _state_path() -> Path:
-    return get_hermes_home() / "coding-cli-sessions.json"
+def resolve_profile_home(profile_home: str | Path) -> Optional[Path]:
+    """Return a private profile directory, or None when it is unsafe."""
+    try:
+        path = Path(profile_home).expanduser().resolve()
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except (OSError, TypeError, ValueError):
+        return None
+    if not path.is_dir() or mode & 0o077:
+        return None
+    return path
 
 
-def _load_state() -> dict[str, Any]:
-    path = _state_path()
+def build_subprocess_env(profile_home: str | Path) -> dict[str, str]:
+    """Build a minimal environment for an external coding CLI."""
+    profile = resolve_profile_home(profile_home)
+    if profile is None:
+        raise CliTurnError(
+            "external_cli.profile_home must be an existing private directory"
+        )
+    env: dict[str, str] = {}
+    if os.environ.get("PATH"):
+        env["PATH"] = os.environ["PATH"]
+    for name in ("LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "NO_COLOR"):
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    env["HOME"] = str(profile)
+    env["XDG_CONFIG_HOME"] = str(profile / "config")
+    env["XDG_DATA_HOME"] = str(profile / "data")
+    env["XDG_CACHE_HOME"] = str(profile / "cache")
+    return env
+
+
+def _state_path(profile_home: str | Path | None = None) -> Path:
+    if profile_home is None:
+        return get_hermes_home() / "coding-cli-sessions.json"
+    profile = resolve_profile_home(profile_home)
+    if profile is None:
+        raise ValueError("external_cli.profile_home is not a private directory")
+    return profile / "coding-cli-sessions.json"
+
+
+def _load_state(profile_home: str | Path | None = None) -> dict[str, Any]:
+    path = _state_path(profile_home)
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -53,8 +93,8 @@ def _load_state() -> dict[str, Any]:
         return {}
 
 
-def _save_state(state: dict[str, Any]) -> None:
-    path = _state_path()
+def _save_state(state: dict[str, Any], profile_home: str | Path | None = None) -> None:
+    path = _state_path(profile_home)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -62,30 +102,30 @@ def _save_state(state: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def get_chat_state(chat_key: str) -> dict[str, Any]:
+def get_chat_state(chat_key: str, *, profile_home: str | Path | None = None) -> dict[str, Any]:
     """Return the persisted {"resume_id": ..., "cwd": ...} for a chat/backend key."""
     with _STATE_LOCK:
-        return dict(_load_state().get(chat_key, {}))
+        return dict(_load_state(profile_home).get(chat_key, {}))
 
 
-def set_chat_state(chat_key: str, **updates: Any) -> None:
+def set_chat_state(chat_key: str, *, profile_home: str | Path | None = None, **updates: Any) -> None:
     """Merge ``updates`` into the persisted state for ``chat_key``."""
     with _STATE_LOCK:
-        state = _load_state()
+        state = _load_state(profile_home)
         entry = dict(state.get(chat_key, {}))
         entry.update(updates)
         state[chat_key] = entry
-        _save_state(state)
+        _save_state(state, profile_home)
 
 
-def clear_resume_id(chat_key: str) -> None:
+def clear_resume_id(chat_key: str, *, profile_home: str | Path | None = None) -> None:
     """Drop the stored resume id for ``chat_key`` (keeps ``cwd``)."""
     with _STATE_LOCK:
-        state = _load_state()
+        state = _load_state(profile_home)
         entry = dict(state.get(chat_key, {}))
         entry.pop("resume_id", None)
         state[chat_key] = entry
-        _save_state(state)
+        _save_state(state, profile_home)
 
 
 def resolve_allowed_dir(requested: str, allowed_roots: list[str]) -> Optional[Path]:
@@ -121,6 +161,7 @@ async def _run_subprocess(
     *,
     cwd: str,
     timeout: float,
+    profile_home: str | Path,
 ) -> tuple[str, str]:
     """Run argv, returning (stdout, stderr). Raises CliTurnError on timeout/failure."""
     try:
@@ -129,6 +170,7 @@ async def _run_subprocess(
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=build_subprocess_env(profile_home),
         )
     except Exception as exc:
         raise CliTurnError(f"failed to start {argv[0]!r}: {exc}") from exc
@@ -195,6 +237,7 @@ async def run_codex_turn(
     *,
     sandbox: str,
     timeout: float,
+    profile_home: str | Path,
     codex_bin: str = "codex",
 ) -> tuple[str, str]:
     """Run one codex CLI turn. Returns (response_text, new_resume_id)."""
@@ -209,7 +252,7 @@ async def run_codex_turn(
             binary, "exec", prompt,
             "--json", "--skip-git-repo-check", "-C", cwd, "-s", sandbox,
         ]
-    stdout, _stderr = await _run_subprocess(argv, cwd=cwd, timeout=timeout)
+    stdout, _stderr = await _run_subprocess(argv, cwd=cwd, timeout=timeout, profile_home=profile_home)
     return _parse_codex_jsonl(stdout)
 
 
@@ -240,6 +283,7 @@ async def run_claude_turn(
     *,
     permission_mode: str,
     timeout: float,
+    profile_home: str | Path,
     claude_bin: str = "claude",
 ) -> tuple[str, str]:
     """Run one claude CLI turn. Returns (response_text, new_resume_id)."""
@@ -251,5 +295,5 @@ async def run_claude_turn(
     ]
     if resume_id:
         argv += ["--resume", resume_id]
-    stdout, _stderr = await _run_subprocess(argv, cwd=cwd, timeout=timeout)
+    stdout, _stderr = await _run_subprocess(argv, cwd=cwd, timeout=timeout, profile_home=profile_home)
     return _parse_claude_json(stdout)

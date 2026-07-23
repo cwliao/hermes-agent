@@ -2018,7 +2018,7 @@ from gateway.session import (
 # rationale); ``thread_id`` goes in ``route_metadata`` so the anchorless cron send bypasses the
 # DeliveryRouter's private-chat reply-anchor requirement. Compute the routed metadata ONCE so both the text
 # send (via DeliveryRouter) and the media send agree.
-from gateway.delivery import DeliveryRouter
+from gateway.delivery import DeliveryRouter, resolve_delivery_transport
 from gateway.turn_lease import SessionTurnLeaseRegistry
 from gateway.session_state import SessionState, legacy_dict_property, legacy_lease_token_property
 from gateway.authz_mixin import GatewayAuthorizationMixin
@@ -4136,6 +4136,648 @@ class GatewayRunner(
         Platform.EMAIL, Platform.SMS, Platform.DINGTALK,
         Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL,
     })
+
+    def _schedule_update_notification_watch(self) -> None:
+        """Ensure a background task is watching for update completion."""
+        existing_task = getattr(self, "_update_notification_task", None)
+        if existing_task and not existing_task.done():
+            return
+
+        try:
+            self._update_notification_task = asyncio.create_task(
+                self._watch_update_progress()
+            )
+        except RuntimeError:
+            logger.debug("Skipping update notification watcher: no running event loop")
+
+    async def _watch_update_progress(
+        self,
+        poll_interval: float = 2.0,
+        stream_interval: float = 4.0,
+        timeout: float = 1800.0,
+    ) -> None:
+        """Watch ``hermes update --gateway``, streaming output + forwarding prompts.
+
+        Polls ``.update_output.txt`` for new content and sends chunks to the
+        user periodically.  Detects ``.update_prompt.json`` (written by the
+        update process when it needs user input) and forwards the prompt to
+        the messenger.  The user's next message is intercepted by
+        ``_handle_message`` and written to ``.update_response``.
+        """
+        pending_path = _hermes_home / ".update_pending.json"
+        claimed_path = _hermes_home / ".update_pending.claimed.json"
+        output_path = _hermes_home / ".update_output.txt"
+        exit_code_path = _hermes_home / ".update_exit_code"
+        prompt_path = _hermes_home / ".update_prompt.json"
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        # Resolve the adapter and chat_id for sending messages
+        adapter = None
+        chat_id = None
+        session_key = None
+        metadata = None
+        for path in (claimed_path, pending_path):
+            if path.exists():
+                try:
+                    pending = json.loads(path.read_text(encoding="utf-8"))
+                    platform_str = pending.get("platform")
+                    chat_id = pending.get("chat_id")
+                    chat_type = pending.get("chat_type")
+                    session_key = pending.get("session_key")
+                    thread_id = pending.get("thread_id")
+                    message_id = pending.get("message_id")
+                    if platform_str and chat_id:
+                        platform = Platform(platform_str)
+                        adapter = self.adapters.get(platform)
+                        metadata = self._thread_metadata_for_target(
+                            platform,
+                            chat_id,
+                            thread_id,
+                            chat_type=chat_type,
+                            reply_to_message_id=message_id,
+                            adapter=adapter,
+                        )
+                        # Fallback session key if not stored (old pending files)
+                        if not session_key:
+                            session_key = f"{platform_str}:{chat_id}"
+                    break
+                except Exception:
+                    pass
+
+        if not adapter or not chat_id:
+            logger.warning("Update watcher: cannot resolve adapter/chat_id, falling back to completion-only")
+            # Fall back to completion-only: wait for the exit code and send the
+            # final notification. _send_update_notification re-resolves the
+            # adapter on every call, so when the target platform is still
+            # reconnecting it returns False and keeps the markers. Keep polling
+            # until it actually delivers (returns True) instead of giving up
+            # after the first completion check — otherwise a platform that
+            # reconnects a few seconds after completion never gets notified.
+            while (pending_path.exists() or claimed_path.exists()) and loop.time() < deadline:
+                if exit_code_path.exists() and await self._send_update_notification():
+                    return
+                await asyncio.sleep(poll_interval)
+            if (pending_path.exists() or claimed_path.exists()) and not exit_code_path.exists():
+                exit_code_path.write_text("124", encoding="utf-8")
+                await self._send_update_notification()
+            return
+
+        def _strip_ansi(text: str) -> str:
+            from tools.ansi_strip import strip_ansi
+            return strip_ansi(text)
+
+        def _read_output_since(path: Path, offset: int) -> tuple[str, int]:
+            """Read update output defensively; logs may contain invalid UTF-8."""
+            try:
+                data = path.read_bytes()
+            except OSError:
+                return "", offset
+            if len(data) <= offset:
+                return "", len(data)
+            return data[offset:].decode("utf-8", errors="replace"), len(data)
+
+        bytes_sent = 0
+        last_stream_time = loop.time()
+        buffer = ""
+
+        async def _flush_buffer() -> None:
+            """Send buffered output to the user."""
+            nonlocal buffer, last_stream_time
+            if not buffer.strip():
+                buffer = ""
+                return
+            # Chunk to fit message limits (Telegram: 4096, others: generous)
+            clean = _strip_ansi(buffer).strip()
+            buffer = ""
+            last_stream_time = loop.time()
+            if not clean:
+                return
+            # Split into chunks if too long
+            max_chunk = 3500
+            chunks = [clean[i:i + max_chunk] for i in range(0, len(clean), max_chunk)]
+            for chunk in chunks:
+                try:
+                    await adapter.send(
+                        chat_id,
+                        f"```\n{chunk}\n```",
+                        metadata=_non_conversational_metadata(metadata, platform=platform),
+                    )
+                except Exception as e:
+                    logger.debug("Update stream send failed: %s", e)
+
+        while loop.time() < deadline:
+            # Check for completion
+            if exit_code_path.exists():
+                # Read any remaining output
+                if output_path.exists():
+                    try:
+                        chunk, bytes_sent = _read_output_since(output_path, bytes_sent)
+                        if chunk:
+                            buffer += chunk
+                    except OSError:
+                        pass
+                await _flush_buffer()
+
+                # Send final status
+                try:
+                    exit_code_raw = exit_code_path.read_text(encoding="utf-8").strip() or "1"
+                    exit_code = int(exit_code_raw)
+                    if exit_code == 0:
+                        await adapter.send(
+                            chat_id,
+                            "✅ Hermes update finished.",
+                            metadata=_non_conversational_metadata(metadata, platform=platform),
+                        )
+                    else:
+                        await adapter.send(
+                            chat_id,
+                            "❌ Hermes update failed (exit code {}).".format(exit_code),
+                            metadata=_non_conversational_metadata(metadata, platform=platform),
+                        )
+                    logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
+                except Exception as e:
+                    logger.warning("Update final notification failed: %s", e)
+
+                # Cleanup
+                for p in (pending_path, claimed_path, output_path,
+                          exit_code_path, prompt_path):
+                    p.unlink(missing_ok=True)
+                (_hermes_home / ".update_response").unlink(missing_ok=True)
+                _up_done = self._peek_session_state(session_key)
+                if _up_done is not None:
+                    _up_done.persistent.update_prompt_pending = False
+                return
+
+            # Check for new output
+            if output_path.exists():
+                try:
+                    chunk, bytes_sent = _read_output_since(output_path, bytes_sent)
+                    if chunk:
+                        buffer += chunk
+                except OSError:
+                    pass
+
+            # Flush buffer periodically
+            if buffer.strip() and (loop.time() - last_stream_time) >= stream_interval:
+                await _flush_buffer()
+
+            # Check for prompts — only forward if we haven't already sent
+            # one that's still awaiting a response.  Without this guard the
+            # watcher would re-read the same .update_prompt.json every poll
+            # cycle and spam the user with duplicate prompt messages.
+            _up_pending_state = (
+                self._peek_session_state(session_key) if session_key else None
+            )
+            if (prompt_path.exists() and session_key
+                    and not (
+                        _up_pending_state is not None
+                        and _up_pending_state.persistent.update_prompt_pending
+                    )):
+                try:
+                    prompt_data = json.loads(prompt_path.read_text(encoding="utf-8"))
+                    prompt_text = prompt_data.get("prompt", "")
+                    default = prompt_data.get("default", "")
+                    if prompt_text:
+                        # Flush any buffered output first so the user sees
+                        # context before the prompt
+                        await _flush_buffer()
+                        # Try platform-native buttons first (Discord, Telegram)
+                        sent_buttons = False
+                        if getattr(type(adapter), "send_update_prompt", None) is not None:
+                            try:
+                                await adapter.send_update_prompt(
+                                    chat_id=chat_id,
+                                    prompt=prompt_text,
+                                    default=default,
+                                    session_key=session_key,
+                                    metadata=_non_conversational_metadata(metadata, platform=platform),
+                                )
+                                sent_buttons = True
+                            except Exception as btn_err:
+                                logger.debug("Button-based update prompt failed: %s", btn_err)
+                        if not sent_buttons:
+                            default_hint = f" (default: {default})" if default else ""
+                            _p = getattr(adapter, "typed_command_prefix", "/")
+                            await adapter.send(
+                                chat_id,
+                                f"⚕ **Update needs your input:**\n\n"
+                                f"{prompt_text}{default_hint}\n\n"
+                                f"Reply `{_p}approve` (yes) or `{_p}deny` (no), "
+                                f"or type your answer directly.",
+                                metadata=_non_conversational_metadata(metadata, platform=platform),
+                            )
+                        # Keep the prompt marker on disk until the user
+                        # answers. If the gateway restarts mid-prompt, the
+                        # next watcher can recover by re-forwarding it from
+                        # disk. Duplicate sends in the same process are
+                        # still suppressed by _update_prompt_pending.
+                        self._session_state(
+                            session_key
+                        ).persistent.update_prompt_pending = True
+                        # .update_response to continue — it doesn't re-check
+                        logger.info("Forwarded update prompt to %s: %s", session_key, prompt_text[:80])
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.debug("Failed to read update prompt: %s", e)
+
+            await asyncio.sleep(poll_interval)
+
+        # Timeout
+        if not exit_code_path.exists():
+            logger.warning("Update watcher timed out after %.0fs", timeout)
+            exit_code_path.write_text("124", encoding="utf-8")
+            await _flush_buffer()
+            try:
+                await adapter.send(
+                    chat_id,
+                    "❌ Hermes update timed out after 30 minutes.",
+                    metadata=_non_conversational_metadata(metadata, platform=platform),
+                )
+            except Exception:
+                pass
+            for p in (pending_path, claimed_path, output_path,
+                      exit_code_path, prompt_path):
+                p.unlink(missing_ok=True)
+            (_hermes_home / ".update_response").unlink(missing_ok=True)
+            _up_timeout_state = self._peek_session_state(session_key)
+            if _up_timeout_state is not None:
+                _up_timeout_state.persistent.update_prompt_pending = False
+
+    async def _send_update_notification(self) -> bool:
+        """If an update finished, notify the user.
+
+        Returns False when the update is still running so a caller can retry
+        later. Returns True after a definitive send/skip decision.
+
+        This is the legacy notification path used when the streaming watcher
+        cannot resolve the adapter (e.g. after a gateway restart where the
+        platform hasn't reconnected yet).
+        """
+        pending_path = _hermes_home / ".update_pending.json"
+        claimed_path = _hermes_home / ".update_pending.claimed.json"
+        output_path = _hermes_home / ".update_output.txt"
+        exit_code_path = _hermes_home / ".update_exit_code"
+
+        if not pending_path.exists() and not claimed_path.exists():
+            return False
+
+        cleanup = True
+        active_pending_path = claimed_path
+        try:
+            if pending_path.exists():
+                try:
+                    pending_path.replace(claimed_path)
+                except FileNotFoundError:
+                    if not claimed_path.exists():
+                        return True
+            elif not claimed_path.exists():
+                return True
+
+            pending = json.loads(claimed_path.read_text(encoding="utf-8"))
+            platform_str = pending.get("platform")
+            chat_id = pending.get("chat_id")
+            chat_type = pending.get("chat_type")
+            thread_id = pending.get("thread_id")
+            message_id = pending.get("message_id")
+
+            if not exit_code_path.exists():
+                logger.info("Update notification deferred: update still running")
+                cleanup = False
+                active_pending_path = pending_path
+                claimed_path.replace(pending_path)
+                return False
+
+            exit_code_raw = exit_code_path.read_text(encoding="utf-8").strip() or "1"
+            exit_code = int(exit_code_raw)
+
+            # Read the captured update output
+            output = ""
+            if output_path.exists():
+                output = output_path.read_bytes().decode("utf-8", errors="replace")
+
+            # Resolve adapter
+            platform = Platform(platform_str)
+            adapter = self.adapters.get(platform)
+
+            if not adapter and chat_id:
+                # The update finished, but the target platform has not
+                # reconnected yet (common right after the restart that
+                # `hermes update` triggers). Treating "adapter missing" as a
+                # definitive skip would delete the markers and silently lose the
+                # completion notification — the user never learns whether the
+                # update succeeded or timed out. Preserve the markers instead so
+                # a later retry (the watcher poll loop, or the next gateway
+                # startup) can deliver the result once the adapter is back.
+                logger.info(
+                    "Update notification deferred: %s adapter not connected yet",
+                    platform_str,
+                )
+                cleanup = False
+                active_pending_path = pending_path
+                claimed_path.replace(pending_path)
+                return False
+
+            if adapter and chat_id:
+                metadata = self._thread_metadata_for_target(
+                    platform,
+                    chat_id,
+                    thread_id,
+                    chat_type=chat_type,
+                    reply_to_message_id=message_id,
+                    adapter=adapter,
+                )
+                # Strip ANSI escape codes for clean display
+                from tools.ansi_strip import strip_ansi
+                output = strip_ansi(output).strip()
+                if output:
+                    if len(output) > 3500:
+                        output = "…" + output[-3500:]
+                    if exit_code == 0:
+                        msg = f"✅ Hermes update finished.\n\n```\n{output}\n```"
+                    else:
+                        msg = f"❌ Hermes update failed.\n\n```\n{output}\n```"
+                elif exit_code == 0:
+                    msg = "✅ Hermes update finished successfully."
+                else:
+                    msg = "❌ Hermes update failed. Check the gateway logs or run `hermes update` manually for details."
+                await adapter.send(
+                    chat_id,
+                    msg,
+                    metadata=_non_conversational_metadata(metadata, platform=platform),
+                )
+                logger.info(
+                    "Sent post-update notification to %s:%s (exit=%s)",
+                    platform_str,
+                    chat_id,
+                    exit_code,
+                )
+        except Exception as e:
+            logger.warning("Post-update notification failed: %s", e)
+        finally:
+            if cleanup:
+                active_pending_path.unlink(missing_ok=True)
+                claimed_path.unlink(missing_ok=True)
+                output_path.unlink(missing_ok=True)
+                exit_code_path.unlink(missing_ok=True)
+
+        return True
+
+    async def _send_restart_notification(self) -> Optional[tuple[str, str, Optional[str]]]:
+        """Notify the chat that initiated /restart that the gateway is back."""
+        notify_path = _hermes_home / ".restart_notify.json"
+        if not notify_path.exists():
+            return None
+
+        try:
+            data = json.loads(notify_path.read_text(encoding="utf-8"))
+            platform_str = data.get("platform")
+            chat_id = data.get("chat_id")
+            chat_type = data.get("chat_type")
+            thread_id = data.get("thread_id")
+            message_id = data.get("message_id")
+
+            if not platform_str or not chat_id:
+                return None
+
+            platform = Platform(platform_str)
+            transport = resolve_delivery_transport(platform, self.config, self.adapters)
+            if transport is None:
+                logger.debug(
+                    "Restart notification skipped: no live transport for %s",
+                    platform_str,
+                )
+                return None
+
+            platform_cfg = self.config.platforms.get(platform)
+            if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
+                logger.info(
+                    "Restart notification suppressed: %s has gateway_restart_notification=false",
+                    platform_str,
+                )
+                return None
+
+            metadata = self._thread_metadata_for_target(
+                platform,
+                chat_id,
+                thread_id,
+                chat_type=chat_type,
+                reply_to_message_id=message_id,
+                adapter=transport.adapter,
+            )
+            if data.get("delivered_via_upstream_relay") is True:
+                metadata = dict(metadata or {})
+                if data.get("user_id"):
+                    metadata["user_id"] = str(data["user_id"])
+                if data.get("scope_id"):
+                    metadata["scope_id"] = str(data["scope_id"])
+            result = await transport.send(
+                platform,
+                str(chat_id),
+                "♻ Gateway restarted successfully. Your session continues.",
+                metadata=_non_conversational_metadata(metadata, platform=platform),
+            )
+            # adapter.send() catches provider errors (e.g. "Chat not found")
+            # and returns SendResult(success=False) rather than raising, so
+            # we must inspect the result before claiming success — otherwise
+            # the log line is misleading and hides real delivery failures.
+            if result is not None and getattr(result, "success", True) is False:
+                logger.warning(
+                    "Restart notification to %s:%s was not delivered: %s",
+                    platform_str,
+                    chat_id,
+                    getattr(result, "error", "send returned success=False"),
+                )
+                return None
+
+            logger.info(
+                "Sent restart notification to %s:%s",
+                platform_str,
+                chat_id,
+            )
+            return str(platform_str), str(chat_id), str(thread_id) if thread_id else None
+        except Exception as e:
+            logger.warning("Restart notification failed: %s", e)
+            return None
+        finally:
+            notify_path.unlink(missing_ok=True)
+
+    async def _send_home_channel_startup_notifications(
+        self,
+        *,
+        skip_targets: Optional[set[tuple[str, str, Optional[str]]]] = None,
+    ) -> set[tuple[str, str, Optional[str]]]:
+        """Notify configured home channels that the gateway is back online.
+
+        The notification is best-effort and sent once per connected platform
+        home channel. ``skip_targets`` lets startup avoid duplicate messages
+        when a more specific restart notification is queued for the same chat.
+        """
+        delivered: set[tuple[str, str, Optional[str]]] = set()
+        skipped = skip_targets or set()
+        message = "♻️ Gateway online — Hermes is back and ready."
+
+        for platform, platform_cfg in self.config.platforms.items():
+            home = platform_cfg.home_channel
+            if not home or not home.chat_id:
+                continue
+
+            transport = resolve_delivery_transport(platform, self.config, self.adapters)
+            if transport is None:
+                continue
+
+            if not platform_cfg.gateway_restart_notification:
+                logger.info(
+                    "Home-channel startup notification suppressed: %s has gateway_restart_notification=false",
+                    platform.value,
+                )
+                continue
+
+            target = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
+            if target in skipped or target in delivered:
+                continue
+
+            wait_until_ready = getattr(type(transport.adapter), "wait_until_send_path_ready", None)
+            if callable(wait_until_ready):
+                ready = await transport.adapter.wait_until_send_path_ready(timeout=60.0)
+                if not ready:
+                    logger.info(
+                        "Home-channel startup notification skipped for %s:%s: send path not ready",
+                        platform.value,
+                        home.chat_id,
+                    )
+                    continue
+
+            try:
+                metadata = self._thread_metadata_for_target(
+                    platform,
+                    home.chat_id,
+                    home.thread_id,
+                    adapter=transport.adapter,
+                )
+                if transport.is_relay:
+                    metadata = dict(metadata or {})
+                    if home.user_id:
+                        metadata["user_id"] = home.user_id
+                    if home.scope_id:
+                        metadata["scope_id"] = home.scope_id
+                send_metadata = _non_conversational_metadata(metadata, platform=platform)
+                if send_metadata is not None or transport.is_relay:
+                    result = await transport.send(
+                        platform,
+                        str(home.chat_id),
+                        message,
+                        metadata=send_metadata,
+                    )
+                else:
+                    result = await transport.adapter.send(str(home.chat_id), message)
+                if result is not None and getattr(result, "success", True) is False:
+                    logger.warning(
+                        "Home-channel startup notification failed for %s:%s: %s",
+                        platform.value,
+                        home.chat_id,
+                        getattr(result, "error", "send returned success=False"),
+                    )
+                    continue
+
+                delivered.add(target)
+                logger.info(
+                    "Sent home-channel startup notification to %s:%s",
+                    platform.value,
+                    home.chat_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Home-channel startup notification failed for %s:%s: %s",
+                    platform.value,
+                    home.chat_id,
+                    exc,
+                )
+
+        return delivered
+
+    async def _send_session_db_warning_notifications(self) -> None:
+        """Broadcast a state.db failure warning to all home channels (#88235).
+
+        When SessionDB init fails at gateway startup, messages may flow but
+        nothing is persisted — /resume, /history, and session_search all
+        silently break.  This sends a one-time warning to each connected
+        platform's home channel so the user knows to investigate before
+        losing data.  Best-effort: failures are logged, not raised.
+        """
+        error = getattr(self, "_session_db_init_error", None)
+        if not error:
+            return
+
+        from hermes_state import classify_persistence_error, format_session_db_unavailable
+
+        cause = classify_persistence_error(error)
+        hint = format_session_db_unavailable()
+        if cause == "corrupt":
+            message = (
+                "⚠️ Session database corruption detected. Messages may not be "
+                "persisted. Recovery options:\n"
+                "1. Run `hermes doctor --fix`\n"
+                "2. Salvage with: sqlite3 ~/.hermes/state.db \".recover\" "
+                "(then replace state.db)\n"
+                "3. Restore from a backup in ~/.hermes/backups/\n"
+                f"Error: {error}"
+            )
+        else:
+            message = (
+                f"⚠️ Session database unavailable — messages may not be persisted. "
+                f"{hint}\n"
+                f"Run `hermes doctor` for diagnostics."
+            )
+
+        logger.warning(
+            "Broadcasting state.db failure warning to home channels: %s", error
+        )
+
+        for platform, platform_cfg in self.config.platforms.items():
+            home = platform_cfg.home_channel
+            if not home or not home.chat_id:
+                continue
+            transport = resolve_delivery_transport(platform, self.config, self.adapters)
+            if transport is None:
+                continue
+            try:
+                metadata = self._thread_metadata_for_target(
+                    platform,
+                    home.chat_id,
+                    home.thread_id,
+                    adapter=transport.adapter,
+                )
+                if transport.is_relay:
+                    metadata = dict(metadata or {})
+                    if home.user_id:
+                        metadata["user_id"] = home.user_id
+                    if home.scope_id:
+                        metadata["scope_id"] = home.scope_id
+                send_metadata = _non_conversational_metadata(metadata, platform=platform)
+                if send_metadata is not None or transport.is_relay:
+                    result = await transport.send(
+                        platform,
+                        str(home.chat_id),
+                        message,
+                        metadata=send_metadata,
+                    )
+                else:
+                    result = await transport.adapter.send(str(home.chat_id), message)
+                if result is not None and getattr(result, "success", True) is False:
+                    logger.warning(
+                        "state.db warning notification failed for %s:%s: %s",
+                        platform.value,
+                        home.chat_id,
+                        getattr(result, "error", "send returned success=False"),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "state.db warning notification failed for %s:%s: %s",
+                    platform.value,
+                    home.chat_id,
+                    exc,
+                )
 
     def _set_session_env(self, context: SessionContext) -> list:
         """Set session context variables (contextvars, not os.environ, so concurrent messages can't

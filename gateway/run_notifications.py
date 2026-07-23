@@ -703,6 +703,15 @@ class GatewayNotificationsMixin:
             target = _notice_target_key(platform.value, home.chat_id, home.thread_id)
             if target in skipped or target in delivered:
                 continue
+            wait_until_ready = getattr(type(transport.adapter), "wait_until_send_path_ready", None)
+            if callable(wait_until_ready):
+                ready = await transport.adapter.wait_until_send_path_ready(timeout=60.0)
+                if not ready:
+                    logger.info(
+                        "Home-channel startup notification skipped for %s:%s: send path not ready",
+                        platform.value, home.chat_id,
+                    )
+                    continue
             if await self._send_home_channel_message(
                 platform, home, transport, message, "Home-channel startup notification failed for %s:%s: %s",
             ):

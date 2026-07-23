@@ -1940,6 +1940,31 @@ class TelegramAdapter(BasePlatformAdapter):
                 self.name, exc_info=True,
             )
 
+    async def wait_until_send_path_ready(self, timeout: float = 60.0) -> bool:
+        """Wait for successful polling progress before sending startup traffic."""
+        if getattr(self, "_polling_teardown_started", False):
+            return False
+        if self.has_fatal_error:
+            return False
+        if not self._send_path_degraded:
+            return True
+
+        generation = self._polling_generation
+        progress = self._polling_progress_event
+        try:
+            await asyncio.wait_for(progress.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+
+        return (
+            not getattr(self, "_polling_teardown_started", False)
+            and not self.has_fatal_error
+            and generation == self._polling_generation
+            and progress is self._polling_progress_event
+            and progress.is_set()
+            and not self._send_path_degraded
+        )
+
     def _begin_polling_generation(self) -> tuple[int, asyncio.Event]:
         """Start accepting progress for a new getUpdates polling generation."""
         if getattr(self, "_polling_teardown_started", False):

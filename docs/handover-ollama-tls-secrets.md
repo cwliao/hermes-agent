@@ -186,13 +186,27 @@ docker compose -f /home/cwliao/open-webui-stack/compose.yaml restart open-webui
    fingerprint (`openssl x509 -in /etc/nginx/ssl/ollama-api.crt -noout
    -fingerprint -sha256`)
 
-## Pending items (not done in this session)
+## In-progress Todo / Roadmap (this session)
 
-| Item | Why it's pending | What's needed |
+| # | Priority | Item | Why now | What's needed | Status |
+|---|---|---|---|---|---|
+| A1 | High | **Retire 8081 plaintext** | All clients confirmed on TLS. Plaintext is a security risk we should not ship into 2027. | Edit `/etc/nginx/sites-available/ollama-api.conf` — remove block 1 (`listen 8081`) and the corresponding `location` / access-control directives. Run `sudo nginx -t && sudo systemctl reload nginx`. Update ufw rule to REMOVE if no longer needed: `sudo ufw delete allow 8081/tcp`. | **TODO** — first thing in session; 5-minute change. |
+| A2 | Medium | Narrow `NOPASSWD: ALL` sudoers entry | Security hardening the stack built on top of. Needed for compliance / audit cleanup. | Edit `/etc/sudoers.d/90-ollama-nginx`, replacing blanket `NOPASSWD: ALL` with an explicit allow-list (only the nginx reload + cert rotate commands). Requires a user decision on shape before writing — **ask first**, do not guess. | **TODO** after A1. |
+| A3 | Low | Retire open-webui `/openai` relative path workaround | `OPENAI_PROXY_RELATIVE_PATHS: /openai` was a 2026 workaround. With nginx now doing full reverse-proxy on 8443, it may no longer be needed and causes subtle routing issues if left in. | Test current open-webui without the env var; if broken re-instate temporarily while we build proper proxy passthrough via nginx `location /openai/` block. | **TODO** — only after A1 + client confirmation. |
+| A4 | Deferred | Reap stray native `ollama serve`(PID 585748) zombie tree | Harmless; children are zombies waiting for parent shell to reap. No customer impact. | Optional: `pkill -f "original pts/0"` or let exit reap happen. | **Deferred — no urgency.** |
+
+**Order of operations:** A1 (quick win + security improvement), then A2 (requires user input), then A3 (low-risk once clients are on TLS). Always re-run health check after any change:
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+TOK=$(sudo grep -oP '"Bearer \K[^"]+' /etc/nginx/ollama-token.conf)
+curl -sk https://140.96.58.171:8443/v1/models -H "Authorization: Bearer $TOK" | head -c 200
+```
+
+## Pending items (not done in this session — superseded by roadmap above where applicable)
+
+| Item | Status | Notes |
 |---|---|---|
-| Retire 8081 plaintext | Windows client confirmed on 8443 first | `sed` to remove block 1, `nginx -t && systemctl reload nginx` |
-| Narrow `NOPASSWD: ALL` sudo rule | Need the user's preferred shape | Edit `/etc/sudoers.d/90-ollama-nginx` with narrow or broader-but-explicit rule |
-| Open WebUI auth/TLS | Separate, larger conversation | Add bearer auth to the `open-webui.conf` site, mirroring what 8081/8443 do |
+| Open WebUI auth/TLS | Deferred to follow-up conversation | Large change; mirroring bearer token pattern from 8443 site |
 | The stray native `ollama serve` (PID was 585748) | Killed in this session; children are zombies waiting for the original `pts/0` to reap them | Harmless; the parent shell (PID 585725) will reap on exit. Or `kill 585725` to force |
 
 ## Known issues / gotchas

@@ -24500,6 +24500,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if target in skipped or target in delivered:
                 continue
 
+            wait_until_ready = getattr(type(transport.adapter), "wait_until_send_path_ready", None)
+            if callable(wait_until_ready):
+                ready = await transport.adapter.wait_until_send_path_ready(timeout=60.0)
+                if not ready:
+                    logger.info(
+                        "Home-channel startup notification skipped for %s:%s: send path not ready",
+                        platform.value,
+                        home.chat_id,
+                    )
+                    continue
+
             try:
                 metadata = self._thread_metadata_for_target(
                     platform,

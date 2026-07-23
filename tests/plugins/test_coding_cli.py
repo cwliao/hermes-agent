@@ -25,6 +25,7 @@ import pytest
 def _isolate_env(tmp_path, monkeypatch):
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
+    hermes_home.chmod(0o700)
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     yield hermes_home
 
@@ -263,7 +264,7 @@ class TestRunCodexTurn:
         monkeypatch.setattr(cb.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(cb.shutil, "which", lambda x: x)
         text, thread_id = _run(cb.run_codex_turn(
-            "hi", str(tmp_path), None, sandbox="workspace-write", timeout=5,
+            "hi", str(tmp_path), None, sandbox="workspace-write", timeout=5, profile_home=str(tmp_path),
         ))
         assert text == "ok" and thread_id == "t-1"
         assert "resume" not in seen["argv"]
@@ -284,7 +285,7 @@ class TestRunCodexTurn:
         monkeypatch.setattr(cb.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(cb.shutil, "which", lambda x: x)
         _run(cb.run_codex_turn(
-            "hi", str(tmp_path), "prev-thread", sandbox="workspace-write", timeout=5,
+            "hi", str(tmp_path), "prev-thread", sandbox="workspace-write", timeout=5, profile_home=str(tmp_path),
         ))
         assert "resume" in seen["argv"]
         assert "prev-thread" in seen["argv"]
@@ -299,7 +300,7 @@ class TestRunCodexTurn:
         monkeypatch.setattr(cb.shutil, "which", lambda x: x)
         with pytest.raises(cb.CliTurnError, match="timed out"):
             _run(cb.run_codex_turn(
-                "hi", str(tmp_path), None, sandbox="workspace-write", timeout=0.05,
+                "hi", str(tmp_path), None, sandbox="workspace-write", timeout=0.05, profile_home=str(tmp_path),
             ))
 
     def test_nonzero_exit_raises_cli_turn_error(self, monkeypatch, tmp_path):
@@ -312,7 +313,7 @@ class TestRunCodexTurn:
         monkeypatch.setattr(cb.shutil, "which", lambda x: x)
         with pytest.raises(cb.CliTurnError, match="exited 1"):
             _run(cb.run_codex_turn(
-                "hi", str(tmp_path), None, sandbox="workspace-write", timeout=5,
+                "hi", str(tmp_path), None, sandbox="workspace-write", timeout=5, profile_home=str(tmp_path),
             ))
 
 
@@ -330,7 +331,7 @@ class TestRunClaudeTurn:
         monkeypatch.setattr(cb.shutil, "which", lambda x: x)
         text, session_id = _run(cb.run_claude_turn(
             "hi", str(tmp_path), "prev-session",
-            permission_mode="acceptEdits", timeout=5,
+            permission_mode="acceptEdits", timeout=5, profile_home=str(tmp_path),
         ))
         assert text == "ok" and session_id == "s-2"
         assert "--resume" in seen["argv"]
@@ -348,7 +349,7 @@ class TestRunClaudeTurn:
         monkeypatch.setattr(cb.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(cb.shutil, "which", lambda x: x)
         _run(cb.run_claude_turn(
-            "hi", str(tmp_path), None, permission_mode="acceptEdits", timeout=5,
+            "hi", str(tmp_path), None, permission_mode="acceptEdits", timeout=5, profile_home=str(tmp_path),
         ))
         assert "--resume" not in seen["argv"]
 
@@ -381,10 +382,11 @@ class TestCodingCliCommands:
     def test_reset_clears_resume_id(self, _isolate_env, monkeypatch):
         mod = _load_plugin_init()
         _mock_session_context(monkeypatch, mod)
-        mod.cli_bridge.set_chat_state("telegram:42:codex", resume_id="abc", cwd="/tmp")
+        _mock_config(monkeypatch, mod, {"profile_home": str(_isolate_env)})
+        mod.cli_bridge.set_chat_state("telegram:42:codex", profile_home=_isolate_env, resume_id="abc", cwd="/tmp")
         result = _run(mod._handle_codex("reset"))
         assert "reset" in result.lower()
-        assert mod.cli_bridge.get_chat_state("telegram:42:codex") == {"cwd": "/tmp"}
+        assert mod.cli_bridge.get_chat_state("telegram:42:codex", profile_home=_isolate_env) == {"cwd": "/tmp"}
 
     def test_dir_rejects_when_no_allowed_roots_configured(self, _isolate_env, monkeypatch, tmp_path):
         mod = _load_plugin_init()
@@ -400,7 +402,7 @@ class TestCodingCliCommands:
         allowed.mkdir()
         outside = tmp_path / "outside"
         outside.mkdir()
-        _mock_config(monkeypatch, mod, {"allowed_roots": [str(allowed)]})
+        _mock_config(monkeypatch, mod, {"allowed_roots": [str(allowed)], "profile_home": str(_isolate_env)})
         result = _run(mod._handle_codex(f"dir {outside}"))
         assert "not an existing directory under an allowed root" in result
 
@@ -409,7 +411,7 @@ class TestCodingCliCommands:
         _mock_session_context(monkeypatch, mod)
         sub = tmp_path / "proj"
         sub.mkdir()
-        _mock_config(monkeypatch, mod, {"allowed_roots": [str(tmp_path)]})
+        _mock_config(monkeypatch, mod, {"allowed_roots": [str(tmp_path)], "profile_home": str(_isolate_env)})
         result = _run(mod._handle_codex(f"dir {sub}"))
         assert "working directory set" in result
         assert mod.cli_bridge.get_chat_state("telegram:42:codex")["cwd"] == str(sub.resolve())
@@ -431,7 +433,7 @@ class TestCodingCliCommands:
     def test_prompt_fails_closed_without_cwd_set(self, _isolate_env, monkeypatch, tmp_path):
         mod = _load_plugin_init()
         _mock_session_context(monkeypatch, mod)
-        _mock_config(monkeypatch, mod, {"enabled": True, "allowed_roots": [str(tmp_path)]})
+        _mock_config(monkeypatch, mod, {"enabled": True, "allowed_roots": [str(tmp_path)], "profile_home": str(_isolate_env)})
         result = _run(mod._handle_codex("do something"))
         assert "no working directory set" in result
 
@@ -443,11 +445,12 @@ class TestCodingCliCommands:
         _mock_config(monkeypatch, mod, {
             "enabled": True,
             "allowed_roots": [str(tmp_path)],
+            "profile_home": str(_isolate_env),
             "timeout_seconds": 5,
             "codex_sandbox": "workspace-write",
             "codex_bin": "codex",
         })
-        mod.cli_bridge.set_chat_state("telegram:42:codex", cwd=str(sub))
+        mod.cli_bridge.set_chat_state("telegram:42:codex", profile_home=_isolate_env, cwd=str(sub))
 
         async def fake_run_codex_turn(prompt, cwd, resume_id, **kwargs):
             assert prompt == "do something"
@@ -457,7 +460,7 @@ class TestCodingCliCommands:
         monkeypatch.setattr(mod.cli_bridge, "run_codex_turn", fake_run_codex_turn)
         result = _run(mod._handle_codex("do something"))
         assert "did it" in result
-        assert mod.cli_bridge.get_chat_state("telegram:42:codex")["resume_id"] == "new-thread-id"
+        assert mod.cli_bridge.get_chat_state("telegram:42:codex", profile_home=_isolate_env)["resume_id"] == "new-thread-id"
 
     def test_prompt_reports_cli_turn_error(self, _isolate_env, monkeypatch, tmp_path):
         mod = _load_plugin_init()
@@ -467,9 +470,10 @@ class TestCodingCliCommands:
         _mock_config(monkeypatch, mod, {
             "enabled": True,
             "allowed_roots": [str(tmp_path)],
+            "profile_home": str(_isolate_env),
             "timeout_seconds": 5,
         })
-        mod.cli_bridge.set_chat_state("telegram:42:codex", cwd=str(sub))
+        mod.cli_bridge.set_chat_state("telegram:42:codex", profile_home=_isolate_env, cwd=str(sub))
 
         async def fake_run_codex_turn(*a, **k):
             raise mod.cli_bridge.CliTurnError("boom")
@@ -506,3 +510,82 @@ class TestBundledDiscovery:
         assert loaded.enabled
         assert "codex" in loaded.commands_registered
         assert "claude" in loaded.commands_registered
+
+
+def test_build_subprocess_env_uses_isolated_profile_and_strips_secrets(
+    _isolate_env, monkeypatch, tmp_path
+):
+    cb = _load_lib()
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o700)
+    monkeypatch.setenv("PATH", "/safe/bin")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-secret")
+    monkeypatch.setenv("PROVIDER_API_KEY", "provider-secret")
+    monkeypatch.setenv("HERMES_HOME", "/private/hermes")
+
+    env = cb.build_subprocess_env(profile)
+
+    assert env["HOME"] == str(profile)
+    assert env["PATH"] == "/safe/bin"
+    assert env["XDG_CONFIG_HOME"] == str(profile / "config")
+    assert env["XDG_DATA_HOME"] == str(profile / "data")
+    assert env["XDG_CACHE_HOME"] == str(profile / "cache")
+    assert "TELEGRAM_BOT_TOKEN" not in env
+    assert "PROVIDER_API_KEY" not in env
+    assert "HERMES_HOME" not in env
+
+
+def test_resolve_profile_home_requires_private_directory(_isolate_env, tmp_path):
+    cb = _load_lib()
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o755)
+    assert cb.resolve_profile_home(profile) is None
+    profile.chmod(0o700)
+    assert cb.resolve_profile_home(profile) == profile.resolve()
+
+
+def test_prompt_fails_closed_without_profile_home(
+    _isolate_env, monkeypatch, tmp_path
+):
+    mod = _load_plugin_init()
+    _mock_session_context(monkeypatch, mod)
+    _mock_config(
+        monkeypatch,
+        mod,
+        {"enabled": True, "allowed_roots": [str(tmp_path)]},
+    )
+    mod.cli_bridge.set_chat_state("telegram:42:codex", cwd=str(tmp_path))
+
+    result = _run(mod._handle_codex("do something"))
+
+    assert "profile_home" in result
+
+
+def test_prompt_passes_profile_home_to_claude(
+    _isolate_env, monkeypatch, tmp_path
+):
+    mod = _load_plugin_init()
+    _mock_session_context(monkeypatch, mod)
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o700)
+    _mock_config(
+        monkeypatch,
+        mod,
+        {
+            "enabled": True,
+            "allowed_roots": [str(tmp_path)],
+            "profile_home": str(profile),
+        },
+    )
+    mod.cli_bridge.set_chat_state("telegram:42:claude", profile_home=profile, cwd=str(tmp_path))
+    seen = {}
+
+    async def fake_run_claude_turn(prompt, cwd, resume_id, **kwargs):
+        seen.update(kwargs)
+        return "claude did it", "claude-session"
+
+    monkeypatch.setattr(mod.cli_bridge, "run_claude_turn", fake_run_claude_turn)
+    result = _run(mod._handle_claude("do something"))
+
+    assert "claude did it" in result
+    assert seen["profile_home"] == str(profile)

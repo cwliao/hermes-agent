@@ -56,6 +56,19 @@ def _load_external_cli_config() -> dict[str, Any]:
         return {}
 
 
+def _resolve_profile_home(cfg: dict[str, Any]):
+    raw = cfg.get("profile_home")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return cli_bridge.resolve_profile_home(raw)
+
+
+def _profile_home_error(backend: str) -> str:
+    return (
+        f"{backend}: external_cli.profile_home must be an existing private "
+        f"directory (mode 700 or stricter)."
+    )
+
 async def _handle_backend_command(backend: str, raw_args: str) -> str:
     args = raw_args.strip()
 
@@ -65,7 +78,10 @@ async def _handle_backend_command(backend: str, raw_args: str) -> str:
     chat_key = _chat_state_key(backend)
 
     if args == "reset":
-        cli_bridge.clear_resume_id(chat_key)
+        profile_home = _resolve_profile_home(_load_external_cli_config())
+        if profile_home is None:
+            return _profile_home_error(backend)
+        cli_bridge.clear_resume_id(chat_key, profile_home=profile_home)
         return f"{backend}: session reset. Next prompt starts a fresh conversation."
 
     if args.startswith("dir "):
@@ -80,13 +96,16 @@ async def _handle_backend_command(backend: str, raw_args: str) -> str:
                 f"{backend}: no external_cli.allowed_roots configured. "
                 f"An admin must add at least one directory to config.yaml first."
             )
+        profile_home = _resolve_profile_home(cfg)
+        if profile_home is None:
+            return _profile_home_error(backend)
         resolved = cli_bridge.resolve_allowed_dir(requested, allowed_roots)
         if resolved is None:
             return (
                 f"{backend}: {requested!r} is not an existing directory under "
                 f"an allowed root. Allowed roots: {allowed_roots}"
             )
-        cli_bridge.set_chat_state(chat_key, cwd=str(resolved))
+        cli_bridge.set_chat_state(chat_key, profile_home=profile_home, cwd=str(resolved))
         return f"{backend}: working directory set to {resolved}"
 
     # Otherwise: treat the whole argument string as a prompt.
@@ -105,7 +124,10 @@ async def _handle_backend_command(backend: str, raw_args: str) -> str:
             f"An admin must add at least one directory to config.yaml first."
         )
 
-    state = cli_bridge.get_chat_state(chat_key)
+    profile_home = _resolve_profile_home(cfg)
+    if profile_home is None:
+        return _profile_home_error(backend)
+    state = cli_bridge.get_chat_state(chat_key, profile_home=profile_home)
     cwd = state.get("cwd")
     if not cwd:
         return (
@@ -128,6 +150,7 @@ async def _handle_backend_command(backend: str, raw_args: str) -> str:
                 args, cwd, resume_id,
                 sandbox=str(cfg.get("codex_sandbox", "workspace-write")),
                 timeout=timeout,
+                profile_home=str(profile_home),
                 codex_bin=str(cfg.get("codex_bin", "codex")),
             )
         else:
@@ -135,12 +158,13 @@ async def _handle_backend_command(backend: str, raw_args: str) -> str:
                 args, cwd, resume_id,
                 permission_mode=str(cfg.get("claude_permission_mode", "acceptEdits")),
                 timeout=timeout,
+                profile_home=str(profile_home),
                 claude_bin=str(cfg.get("claude_bin", "claude")),
             )
     except cli_bridge.CliTurnError as exc:
         return f"{backend}: {exc}"
 
-    cli_bridge.set_chat_state(chat_key, resume_id=new_resume_id)
+    cli_bridge.set_chat_state(chat_key, profile_home=profile_home, resume_id=new_resume_id)
     return f"🤖 {backend}:\n{text}"
 
 

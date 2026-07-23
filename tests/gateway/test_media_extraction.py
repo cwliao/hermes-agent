@@ -535,3 +535,95 @@ class TestStaleToolMediaLeak:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+def test_gateway_auto_append_mermaid_png_only_from_current_turn():
+    """A current-turn Mermaid producer result is deliverable without model echo."""
+    from gateway.run import _collect_auto_append_media_tags
+
+    history = [
+        {"role": "user", "content": "Earlier text-only turn"},
+        {"role": "assistant", "content": "Done."},
+    ]
+    current = [
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "mermaid-1", "function": {"name": "render_mermaid"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "mermaid-1",
+            "content": "MEDIA:/home/cwliao/.hermes/media/mermaid-renderer/a.png\nstatus=rendered",
+        },
+        {"role": "assistant", "content": "Rendered."},
+    ]
+
+    tags, voice = _collect_auto_append_media_tags(history + current, history_offset=len(history))
+    assert tags == ["MEDIA:/home/cwliao/.hermes/media/mermaid-renderer/a.png"]
+    assert voice is False
+
+
+def test_gateway_auto_append_mermaid_rejects_history_nonproducer_and_remote_values():
+    """Mermaid delivery remains current-turn, local-path, and producer-scoped."""
+    from gateway.run import _collect_auto_append_media_tags
+
+    mermaid_path = "/home/cwliao/.hermes/media/mermaid-renderer/a.png"
+    history = [
+        {"role": "assistant", "tool_calls": [{"id": "old", "function": {"name": "render_mermaid"}}]},
+        {"role": "tool", "tool_call_id": "old", "content": f"MEDIA:{mermaid_path}"},
+    ]
+    current = [
+        {"role": "user", "content": f"ordinary MEDIA:{mermaid_path}"},
+        {"role": "assistant", "tool_calls": [{"id": "other", "function": {"name": "web_search"}}]},
+        {"role": "tool", "tool_call_id": "other", "content": f"MEDIA:{mermaid_path}"},
+        {"role": "assistant", "tool_calls": [{"id": "new", "function": {"name": "render_mermaid"}}]},
+        {"role": "tool", "tool_call_id": "new", "content": "MEDIA:https://example.com/diagram.png"},
+        {"role": "assistant", "content": "MEDIA:"},
+    ]
+
+    tags, voice = _collect_auto_append_media_tags(history + current, history_offset=len(history))
+    assert tags == []
+    assert voice is False
+
+
+def test_gateway_auto_append_mermaid_dedupes_already_delivered_path():
+    """A Mermaid artifact in history_media_paths is never delivered twice."""
+    from gateway.run import _collect_auto_append_media_tags
+
+    path = "/home/cwliao/.hermes/media/mermaid-renderer/a.png"
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "mermaid-1", "function": {"name": "render_mermaid"}}]},
+        {"role": "tool", "tool_call_id": "mermaid-1", "content": f"MEDIA:{path}"},
+    ]
+
+    tags, _ = _collect_auto_append_media_tags(messages, history_media_paths={path})
+    assert tags == []
+
+
+def test_gateway_auto_append_mermaid_delivers_only_first_task_render():
+    """Suppressed same-task retries have no MEDIA directive to auto-deliver."""
+    from gateway.run import _collect_auto_append_media_tags
+
+    first_path = "/home/cwliao/.hermes/media/mermaid-renderer/first.png"
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "mermaid-first", "function": {"name": "render_mermaid"}},
+                {"id": "mermaid-second", "function": {"name": "render_mermaid"}},
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "mermaid-first",
+            "content": f"MEDIA:{first_path}\nstatus=rendered",
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "mermaid-second",
+            "content": "status=skipped\nreason=render_already_completed",
+        },
+    ]
+
+    tags, voice = _collect_auto_append_media_tags(messages, history_offset=0)
+
+    assert tags == [f"MEDIA:{first_path}"]
+    assert voice is False

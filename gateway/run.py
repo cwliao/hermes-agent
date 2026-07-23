@@ -1268,8 +1268,17 @@ def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
     return None
 
 
-# Tool output may hold literal MEDIA: examples (docs, logs); only deliberate media producers may auto-append.
-_AUTO_APPEND_MEDIA_TOOL_NAMES = {"text_to_speech", "text_to_speech_tool", "image_generate"}
+# Tool results can contain literal MEDIA: examples in docs, logs, or other
+# ordinary outputs. Only tools that intentionally create deliverable media
+# artifacts should be eligible for automatic append when the model omits them
+# from the final gateway reply.
+_AUTO_APPEND_MEDIA_TOOL_NAMES = {
+    "text_to_speech",
+    "text_to_speech_tool",
+    "image_generate",
+    "bfl_flux3_get_result",
+    "render_mermaid",
+}
 
 # Replay-tail sanitization lives in agent/replay_cleanup.py so every resume surface shares one implementation.
 from agent.replay_cleanup import (  # noqa: E402

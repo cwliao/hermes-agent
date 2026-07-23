@@ -11,6 +11,7 @@ Off by default. Requires two things before it will run a prompt:
    ```yaml
    external_cli:
      enabled: true
+     profile_home: /home/you/.hermes-coding-cli-home
      allowed_roots:
        - /home/you/work/some-repo
    ```
@@ -38,6 +39,7 @@ session/thread id, persisted per chat at
 | Key | Default | Purpose |
 |---|---|---|
 | `enabled` | `false` | Master switch. Prompts fail closed until true. |
+| `profile_home` | `""` | Existing mode-700-or-stricter HOME/profile for the external CLI; required before prompts run. |
 | `allowed_roots` | `[]` | Directories `/codex dir` / `/claude dir` may point at (and any subdirectory). Empty = feature can't run. |
 | `timeout_seconds` | `180` | Per-turn subprocess timeout. |
 | `codex_bin` / `claude_bin` | `"codex"` / `"claude"` | Resolved via `PATH` at call time. |

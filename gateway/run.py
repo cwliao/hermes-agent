@@ -1406,6 +1406,7 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "text_to_speech_tool",
     "image_generate",
     "bfl_flux3_get_result",
+    "render_mermaid",
 }
 
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------

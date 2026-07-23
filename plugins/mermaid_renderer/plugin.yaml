@@ -1,0 +1,9 @@
+name: mermaid_renderer
+version: 0.1.0
+description: "Render strict-security Mermaid text to a local PNG artifact."
+author: Hermes local integration
+kind: standalone
+platforms:
+  - linux
+provides_tools:
+  - render_mermaid

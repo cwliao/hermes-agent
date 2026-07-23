@@ -34,6 +34,45 @@ Continuity across messages comes entirely from each CLI's own
 session/thread id, persisted per chat at
 `$HERMES_HOME/coding-cli-sessions.json`.
 
+## Spark rollout verification
+
+For the Hermes deployment on Spark, the isolated external-CLI profile and
+workspace are:
+
+```text
+/home/cwliao/.hermes-coding-cli-home
+/home/cwliao/hermes-coding-cli-workspace
+```
+
+Check the gateway, cron ticker, and plugin state from the Hermes repository:
+
+```bash
+systemctl --user is-active hermes-gateway.service
+./venv/bin/hermes cron status
+./venv/bin/hermes plugins list
+```
+
+The expected results are `active`, a running ticker with 7 active jobs, and
+`coding-cli` shown as `enabled`.
+
+Then run the end-to-end smoke test from a Telegram disposable chat:
+
+```text
+/codex dir /home/cwliao/hermes-coding-cli-workspace
+/codex 建立 test.txt，內容只寫 codex smoke ok，完成後回報檔案內容
+/codex reset
+
+/claude dir /home/cwliao/hermes-coding-cli-workspace
+/claude 建立 claude-test.txt，內容只寫 claude smoke ok，完成後回報檔案內容
+```
+
+Verify that both files are created only inside the dedicated workspace. The
+CLI must not access the Hermes repository, `dgx-workspace`, `.env`, Telegram
+session files, or provider credentials. A direct CLI smoke test on Spark
+checks binary authentication and workspace-write behavior, but does not
+replace this Telegram end-to-end test.
+
+
 ## Config (`external_cli:` in config.yaml)
 
 | Key | Default | Purpose |

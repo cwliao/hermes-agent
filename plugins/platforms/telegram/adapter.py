@@ -3898,7 +3898,8 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id: str,
         content: str,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        reply_markup: Optional[Any] = None,
     ) -> SendResult:
         """Send a message to a Telegram chat."""
         if not self._bot:
@@ -3918,7 +3919,7 @@ class TelegramAdapter(BasePlatformAdapter):
             # through to the legacy MarkdownV2 path on permanent/capability
             # errors or DM-topic routing skips; returns directly on success or
             # on a transient failure (which must NOT be legacy-resent).
-            if self._should_attempt_rich(content, metadata=metadata):
+            if reply_markup is None and self._should_attempt_rich(content, metadata=metadata):
                 rich_result = await self._try_send_rich(chat_id, content, reply_to, metadata)
                 if rich_result is not None:
                     if rich_result.success:
@@ -4027,6 +4028,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 **thread_kwargs,
                                 **self._link_preview_kwargs(),
                                 **self._notification_kwargs(metadata),
+                                **({"reply_markup": reply_markup} if reply_markup is not None else {}),
                             )
                         except Exception as md_error:
                             # Markdown parsing failed, try plain text
@@ -4041,6 +4043,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                     **thread_kwargs,
                                     **self._link_preview_kwargs(),
                                     **self._notification_kwargs(metadata),
+                                    **({"reply_markup": reply_markup} if reply_markup is not None else {}),
                                 )
                             else:
                                 raise
@@ -5968,6 +5971,29 @@ class TelegramAdapter(BasePlatformAdapter):
                         "Telegram clarify button: resolve_gateway_clarify returned False (id=%s)",
                         clarify_id,
                     )
+            return
+
+        # --- Plugin callback handlers -------------------------------------
+        # This branch deliberately comes after every existing callback family
+        # above.  A plugin cannot intercept model-picker, Gmail-triage,
+        # approval, slash-confirm, or clarify callback data even if it happens
+        # to register an overlapping prefix.
+        plugin_callback_handler = None
+        try:
+            from hermes_cli.plugins import get_plugin_callback_handler
+            plugin_callback_handler = get_plugin_callback_handler(data)
+        except Exception as exc:
+            logger.warning("[%s] Plugin callback lookup failed: %s", self.name, exc)
+
+        if plugin_callback_handler is not None and query_chat_id is not None:
+            try:
+                new_text, keyboard = await plugin_callback_handler(data, query_chat_id)
+                await query.edit_message_text(
+                    text=new_text,
+                    reply_markup=keyboard,
+                )
+            except Exception as exc:
+                logger.warning("[%s] Plugin callback handler failed: %s", self.name, exc)
             return
 
         # --- Update prompt callbacks ---

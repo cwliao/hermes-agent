@@ -3211,7 +3211,8 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def _send_chunk_with_retries(
         self, chat_id: str, chunk: str, index: int, reply_to: Optional[str], metadata: Optional[Dict[str, Any]],
-        thread_id: Optional[str], used_thread_fallback: bool, error_types: tuple):
+        thread_id: Optional[str], used_thread_fallback: bool, error_types: tuple,
+        reply_markup: Optional[Any] = None):
         """Deliver one chunk: routing, up to 3 attempts, thread-not-found / deleted-anchor / flood handling.
 
         Returns ``(msg, used_thread_fallback)`` on success or a ``SendResult`` to return verbatim (fail-loud DM-topic
@@ -3232,6 +3233,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 send_kwargs = {
                     "chat_id": normalize_telegram_chat_id(chat_id), "reply_to_message_id": reply_to_id, **thread_kwargs,
                     **self._link_preview_kwargs(), **self._notification_kwargs(metadata)}
+                if reply_markup is not None:
+                    send_kwargs["reply_markup"] = reply_markup
                 return await self._send_chunk_markdown_or_plain(chunk, send_kwargs), used_thread_fallback
             except _NetErr as send_err:
                 # BadRequest subclasses NetworkError in PTB but is permanent; handle specific cases.
@@ -3313,17 +3316,19 @@ class TelegramAdapter(BasePlatformAdapter):
             await self.send_typing(chat_id, metadata=metadata)
 
     async def send(
-        self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        self, chat_id: str, content: str, reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None, reply_markup: Optional[Any] = None,
+    ) -> SendResult:
         """Send a message to a Telegram chat."""
         if not self._bot:
             live = self._replacement_telegram_adapter()
             if live is not None:
-                return await live.send(chat_id, content, reply_to, metadata)
+                return await live.send(chat_id, content, reply_to, metadata, reply_markup=reply_markup)
             if self._is_permanent_fatal() or not await self._wait_for_reconnection():
                 return SendResult(success=False, error="Not connected", retryable=not self._is_permanent_fatal())
             live = self._replacement_telegram_adapter()
             if not self._bot and live is not None:
-                return await live.send(chat_id, content, reply_to, metadata)
+                return await live.send(chat_id, content, reply_to, metadata, reply_markup=reply_markup)
             if not self._bot:
                 return SendResult(success=False, error="Not connected", retryable=True)
         # getattr() — tests build adapters via object.__new__() (no __init__).
@@ -3336,7 +3341,7 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             # Bot API 10.1 rich fast-path; falls through to legacy MarkdownV2 on permanent/capability
             # errors or DM-topic skips; returns directly on success or transient failure (no legacy resend).
-            if self._should_attempt_rich(content, metadata=metadata):
+            if reply_markup is None and self._should_attempt_rich(content, metadata=metadata):
                 rich_result = await self._try_send_rich(chat_id, content, reply_to, metadata)
                 if rich_result is not None:
                     if rich_result.success:
@@ -3355,7 +3360,8 @@ class TelegramAdapter(BasePlatformAdapter):
             used_thread_fallback = False
             for i, chunk in enumerate(chunks):
                 outcome = await self._send_chunk_with_retries(
-                    chat_id, chunk, i, reply_to, metadata, thread_id, used_thread_fallback, error_types)
+                    chat_id, chunk, i, reply_to, metadata, thread_id, used_thread_fallback, error_types,
+                    reply_markup=reply_markup)
                 if isinstance(outcome, SendResult):
                     return outcome
                 msg, used_thread_fallback = outcome
@@ -4241,6 +4247,23 @@ class TelegramAdapter(BasePlatformAdapter):
             if data.startswith(prefix):
                 await handler(query, data, cb)
                 return
+
+        # Plugin callbacks are evaluated only after all built-in callback families above, so a
+        # plugin cannot intercept approvals, confirmations, model pickers, or clarify prompts.
+        try:
+            from hermes_cli.plugins import get_plugin_callback_handler
+            plugin_callback_handler = get_plugin_callback_handler(data)
+        except Exception as exc:
+            logger.warning("[%s] Plugin callback lookup failed: %s", self.name, exc)
+            plugin_callback_handler = None
+        if plugin_callback_handler is not None and query.message is not None:
+            try:
+                chat_id = query.message.chat_id
+                new_text, keyboard = await plugin_callback_handler(data, chat_id)
+                await query.edit_message_text(text=new_text, reply_markup=keyboard)
+            except Exception as exc:
+                logger.warning("[%s] Plugin callback handler failed: %s", self.name, exc)
+            return
 
     async def _claim_callback_state(self, query, cb: Dict[str, Any], state: dict, key, denial: str, resolved: str, *, pop: bool = True):
         """Auth-gate a button tap, then claim its pending entry; None (after answering) when refused or expired."""

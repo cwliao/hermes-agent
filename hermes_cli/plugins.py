@@ -25,7 +25,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set, Tuple, Union
 
 from hermes_constants import get_hermes_home, hermes_home_key
 from registration_lifecycle import replacement_coordinator
@@ -78,6 +78,17 @@ class PluginToolOverrideError(PermissionError):
 
 
 logger = logging.getLogger(__name__)
+
+try:
+    from telegram import InlineKeyboardMarkup
+    if not isinstance(InlineKeyboardMarkup, type):
+        raise ImportError
+except (ImportError, AttributeError):
+    class InlineKeyboardMarkup:  # type: ignore[no-redef]
+        pass
+
+
+CallbackHandler = Callable[[str, int | str], Awaitable[tuple[str, InlineKeyboardMarkup | None]]]
 
 # ``HERMES_PLUGINS_DEBUG=1`` tees verbose discovery logs to stderr in addition to agent.log. Read
 # once at import; tests flip it mid-process via ``_install_plugin_debug_handler(force=True)``.
@@ -676,6 +687,17 @@ class PluginContext:
         return self._register_entry("command", clean, self._manager._plugin_commands, entry,
                                     "Plugin %s registered command: /%s", clean)
 
+    def register_callback_handler(self, prefix: str, handler: CallbackHandler) -> None:
+        """Register a Telegram inline-keyboard callback handler for a data prefix."""
+        clean = str(prefix).strip()
+        if not clean:
+            logger.warning("Plugin '%s' tried to register an empty callback prefix.", self.manifest.name)
+            return
+        self._manager._plugin_callback_handlers[clean] = {
+            "handler": handler, "plugin": self.manifest.name,
+        }
+        logger.debug("Plugin %s registered Telegram callback handler: %s", self.manifest.name, clean)
+
     def dispatch_tool(self, tool_name: str, args: dict, **kwargs) -> str:
         """Dispatch a tool call through the registry with the parent agent (when available)
         resolved automatically; returns the handler's JSON string. ``kwargs`` forward to dispatch."""
@@ -1132,6 +1154,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._plugin_platform_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
         self._plugin_commands: Dict[str, dict] = {}
+        self._plugin_callback_handlers: Dict[str, dict] = {}
         self._system_prompt_sections: Dict[str, PluginSystemPromptSection] = {}
         self._plugin_skills: Dict[str, Dict[str, Any]] = {}
         self._portable_mcp_servers: Dict[str, Dict[str, Any]] = {}
@@ -1423,6 +1446,13 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
     def get_telegram_handler_factories(self) -> List[tuple]:
         """Back-compat alias for ``get_platform_handler_factories("telegram")``."""
         return self.get_platform_handler_factories("telegram")
+
+    def get_plugin_callback_handler(self, callback_data: str) -> Optional[CallbackHandler]:
+        """Return the first Telegram callback handler matching *callback_data*."""
+        for prefix, entry in self._plugin_callback_handlers.items():
+            if callback_data.startswith(prefix):
+                return entry["handler"]
+        return None
 
     def list_plugins(self) -> List[Dict[str, Any]]:
         """Return a list of info dicts for all discovered plugins."""
@@ -1984,6 +2014,11 @@ def get_plugin_command_handler(name: str) -> Optional[Callable]:
     """Return the handler for a plugin-registered slash command, or ``None``."""
     entry = _ensure_plugins_discovered()._plugin_commands.get(name)
     return entry["handler"] if entry else None
+
+
+def get_plugin_callback_handler(callback_data: str) -> Optional[CallbackHandler]:
+    """Return a plugin Telegram callback handler matching *callback_data*."""
+    return _ensure_plugins_discovered().get_plugin_callback_handler(callback_data)
 
 
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0

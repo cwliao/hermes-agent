@@ -36,6 +36,14 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
+try:
+    from telegram import InlineKeyboardMarkup
+    if not isinstance(InlineKeyboardMarkup, type):
+        raise ImportError
+except (ImportError, AttributeError):
+    class InlineKeyboardMarkup:  # type: ignore[no-redef]
+        pass
+
 
 class GatewayInboundMixin:
     """Inbound message pipeline (_handle_message, text/media preparation, durable-turn markers, plugin injection) for GatewayRunner."""
@@ -987,6 +995,26 @@ class GatewayInboundMixin:
                     result = plugin_handler(event.get_command_args().strip())
                     if asyncio.iscoroutine(result):
                         result = await result
+                    if (
+                        isinstance(result, tuple)
+                        and len(result) == 2
+                        and isinstance(result[0], str)
+                        and (result[1] is None or isinstance(result[1], InlineKeyboardMarkup))
+                    ):
+                        result_text, result_keyboard = result
+                        if result_keyboard is not None and source.platform == Platform.TELEGRAM:
+                            adapter = self._adapter_for_source(source)
+                            if adapter is not None:
+                                reply_to = self._reply_anchor_for_event(event)
+                                await adapter.send(
+                                    source.chat_id,
+                                    result_text,
+                                    reply_to=reply_to,
+                                    metadata=self._thread_metadata_for_source(source, reply_to),
+                                    reply_markup=result_keyboard,
+                                )
+                                return True, None, command
+                        return True, result_text, command
                     return True, str(result) if result else None, command
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)

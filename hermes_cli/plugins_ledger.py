@@ -257,6 +257,7 @@ class PluginLedgerMixin:
             self._ownership_ledger, self._plugins, self._hooks, self._middleware,
             self._plugin_tool_names, self._plugin_platform_names, self._cli_commands,
             self._plugin_commands, self._plugin_skills, self._portable_mcp_servers,
+            self._plugin_callback_handlers,
             self._aux_tasks, self._system_prompt_sections, self._approval_transports,
             self._slack_action_handlers, self._predeclared_modules, self._predeclared_tools,
             self._platform_handler_factories,

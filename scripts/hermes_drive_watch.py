@@ -252,10 +252,11 @@ def main() -> int:
         except Exception:
             pass
 
-    state["processed_file_ids"] = list(dict.fromkeys(state_ids))[-STATE_MAX_IDS:]
-    if max_seen:
-        state["last_seen_time"] = _to_iso_z(max_seen)
-    _save_state(state)
+    if not DRY_RUN:
+        state["processed_file_ids"] = list(dict.fromkeys(state_ids))[-STATE_MAX_IDS:]
+        if max_seen:
+            state["last_seen_time"] = _to_iso_z(max_seen)
+        _save_state(state)
 
     print(f"processed={processed} scanned={len(files)}")
     return 0

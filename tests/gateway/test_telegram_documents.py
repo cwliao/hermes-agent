@@ -189,6 +189,25 @@ def _make_photo(file_obj=None):
 
 class TestDocumentDownloadBlock:
     @pytest.mark.asyncio
+    async def test_docubot_ingest_uses_multipart_upload(self, adapter):
+        """Telegram must upload cached document bytes, not only its local path."""
+        file_obj = _make_file_obj(b"%PDF-1.4 fake")
+        doc = _make_document(file_name="report.pdf", file_size=1024, file_obj=file_obj)
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        with patch(
+            "plugins.platforms.telegram.adapter.ingest_document_to_docubot",
+            return_value={"status": "accepted"},
+        ) as ingest_mock:
+            await adapter._handle_media_message(update, MagicMock())
+
+        ingest_mock.assert_called_once()
+        assert ingest_mock.call_args.kwargs["source"] == "telegram"
+        assert ingest_mock.call_args.kwargs["action"] == "document-upload"
+        assert ingest_mock.call_args.kwargs["multipart"] is True
+
+    @pytest.mark.asyncio
     async def test_supported_pdf_is_cached(self, adapter):
         pdf_bytes = b"%PDF-1.4 fake"
         file_obj = _make_file_obj(pdf_bytes)

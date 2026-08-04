@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import re
 from datetime import datetime, timezone
@@ -92,8 +93,14 @@ def ingest_document_to_docubot(
     stable_key: Optional[str] = None,
     timestamp: Optional[str | datetime] = None,
     timeout_sec: Optional[int] = None,
+    multipart: bool = False,
 ) -> Dict[str, Any]:
-    """Call DocuBot ingestion endpoint and return parsed JSON / structured result."""
+    """Call DocuBot ingestion endpoint and return parsed JSON / structured result.
+
+    Set ``multipart=True`` when ``local_path`` should be uploaded as file
+    content to DocuBot's ``/jobs/upload`` endpoint.  The default preserves the
+    existing JSON-mode behavior for callers that do not have a local file.
+    """
     endpoint = _docubot_url()
     if not endpoint:
         logger.warning("DOCUBOT_INGEST_URL is not configured; skipping ingest request")
@@ -121,7 +128,7 @@ def ingest_document_to_docubot(
     headers.setdefault("Idempotency-Key", idempotency_key)
 
     payload: Dict[str, Any] = {
-        "source": source,
+        "source_system": source,
         "action": action,
         "idempotency_key": idempotency_key,
     }
@@ -130,23 +137,36 @@ def ingest_document_to_docubot(
     if path:
         payload["document_path"] = str(path)
 
-    use_multipart = os.getenv("DOCUBOT_INGEST_MULTIPART", "0").strip() not in {
-        "",
-        "0",
-        "false",
-        "False",
-        "FALSE",
-    }
     timeout = timeout_sec or _docubot_timeout()
 
     try:
         with Session() as session:
-            if path and use_multipart:
+            if path and multipart:
+                form_data = {
+                    "action": action,
+                    "source_system": source,
+                }
+                if metadata:
+                    form_data["purpose_hint"] = json.dumps(
+                        metadata,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+
+                content_type = mimetypes.guess_type(path.name)[0]
+                if not content_type and metadata:
+                    metadata_mime = metadata.get("mime_type")
+                    if isinstance(metadata_mime, str) and metadata_mime:
+                        content_type = metadata_mime
+                content_type = content_type or "application/octet-stream"
+
                 with path.open("rb") as fp:
                     response: Response = session.post(
                         endpoint,
-                        data={"payload": json.dumps(payload)},
-                        files={"file": (path.name, fp, "application/octet-stream")},
+                        data=form_data,
+                        files={"file": (path.name, fp, content_type)},
                         headers={k: v for k, v in headers.items() if k.lower() != "content-type"},
                         timeout=timeout,
                     )

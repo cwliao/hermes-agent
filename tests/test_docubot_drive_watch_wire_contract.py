@@ -175,6 +175,19 @@ def _load_drive_watch_module(monkeypatch):
     return module
 
 
+def test_safe_name_preserves_real_incident_filename(monkeypatch):
+    drive_watch = _load_drive_watch_module(monkeypatch)
+    filename = "DNV-SE-0656 Verification and certification of power-to-X.pdf"
+
+    assert drive_watch._safe_name(filename) == filename
+
+
+def test_safe_name_replaces_reserved_characters(monkeypatch):
+    drive_watch = _load_drive_watch_module(monkeypatch)
+
+    assert drive_watch._safe_name("report:final?.pdf") == "report_final_.pdf"
+
+
 def test_drive_watch_requests_multipart_document_review(monkeypatch, tmp_path):
     drive_watch = _load_drive_watch_module(monkeypatch)
     downloaded = tmp_path / "from-drive.pdf"

@@ -8870,8 +8870,6 @@ class TelegramAdapter(BasePlatformAdapter):
 
         event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
-<<<<<<< HEAD
-=======
         clean_text = (event.text or "").strip()
 
         if clean_text.startswith("/"):
@@ -8904,7 +8902,6 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
                 return
 
->>>>>>> 2743d9659a (fix(T0098): collapse Telegram /query into /klib plugin's implementation)
         await self._cache_replied_media(msg, event)
         event = self._apply_telegram_group_observe_attribution(event)
         # Telegram clients split messages above 4096 chars into multiple
@@ -9284,6 +9281,7 @@ class TelegramAdapter(BasePlatformAdapter):
                             },
                             local_path=cached_path,
                             stable_key=getattr(doc, "file_unique_id", None),
+                            multipart=True,
                         )
                         logger.info("[Telegram] DocuBot ingest response for document %s: %s", doc.file_unique_id, ingest_result)
                     except Exception as e:

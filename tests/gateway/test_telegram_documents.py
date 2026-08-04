@@ -204,7 +204,7 @@ class TestDocumentDownloadBlock:
 
         ingest_mock.assert_called_once()
         assert ingest_mock.call_args.kwargs["source"] == "telegram"
-        assert ingest_mock.call_args.kwargs["action"] == "document-upload"
+        assert ingest_mock.call_args.kwargs["action"] == "document_review"
         assert ingest_mock.call_args.kwargs["multipart"] is True
 
     @pytest.mark.asyncio

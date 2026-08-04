@@ -8290,7 +8290,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     try:
                         ingest_result = ingest_document_to_docubot(
                             source="telegram",
-                            action="document-upload",
+                            action="document_review",
                             metadata={
                                 "platform": "telegram",
                                 "chat_id": str(getattr(getattr(msg, "chat", None), "id", "")),

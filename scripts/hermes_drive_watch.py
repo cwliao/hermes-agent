@@ -54,7 +54,7 @@ def _safe_name(value: str) -> str:
     value = (value or "").strip()
     if not value:
         return "document"
-    value = re.sub(r"[\\x00-\\x1f\\\\/\\\\*?:\"<>|]", "_", value)
+    value = re.sub(r"[\x00-\x1f\\/*?:\"<>|]", "_", value)
     return value[:150] or "document"
 
 

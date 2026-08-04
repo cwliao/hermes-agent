@@ -21,9 +21,9 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
 
+from plugins.klib import _handle_klib
 from plugins.platforms.telegram.docubot_mcp_gateway import (
     ingest_document_to_docubot,
-    query_via_klib_mcp,
 )
 
 logger = logging.getLogger(__name__)
@@ -7918,13 +7918,21 @@ class TelegramAdapter(BasePlatformAdapter):
         if clean_text.startswith("/"):
             parts = clean_text.split(None, 1)
             command = parts[0].lstrip("/").lower()
-            if command == "query" or command.startswith("query"):
+            if command.startswith("query"):
                 query_text = parts[1] if len(parts) > 1 else ""
-                result = query_via_klib_mcp(query_text.strip())
-                if isinstance(result, dict) and "error" in result:
-                    response = f"KLIB query failed: {result['error']}"
+                result = await _handle_klib(
+                    query_text.strip(),
+                    chat_id=getattr(msg.chat, "id", None),
+                )
+                reply_markup = None
+                if (
+                    isinstance(result, tuple)
+                    and len(result) == 2
+                    and isinstance(result[0], str)
+                ):
+                    response, reply_markup = result
                 else:
-                    response = json.dumps(result, ensure_ascii=False, indent=2)
+                    response = str(result) if result else ""
 
                 thread_id = self._effective_message_thread_id(msg)
                 metadata = {"thread_id": str(thread_id)} if thread_id else None
@@ -7933,6 +7941,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     response or "KLIB query completed with no output.",
                     reply_to=str(msg.message_id),
                     metadata=metadata,
+                    reply_markup=reply_markup,
                 )
                 return
 

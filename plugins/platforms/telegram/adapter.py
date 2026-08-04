@@ -22,9 +22,9 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
 
+from plugins.klib import _handle_klib
 from plugins.platforms.telegram.docubot_mcp_gateway import (
     ingest_document_to_docubot,
-    query_via_klib_mcp,
 )
 
 logger = logging.getLogger(__name__)
@@ -8870,6 +8870,41 @@ class TelegramAdapter(BasePlatformAdapter):
 
         event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
+<<<<<<< HEAD
+=======
+        clean_text = (event.text or "").strip()
+
+        if clean_text.startswith("/"):
+            parts = clean_text.split(None, 1)
+            command = parts[0].lstrip("/").lower()
+            if command.startswith("query"):
+                query_text = parts[1] if len(parts) > 1 else ""
+                result = await _handle_klib(
+                    query_text.strip(),
+                    chat_id=getattr(msg.chat, "id", None),
+                )
+                reply_markup = None
+                if (
+                    isinstance(result, tuple)
+                    and len(result) == 2
+                    and isinstance(result[0], str)
+                ):
+                    response, reply_markup = result
+                else:
+                    response = str(result) if result else ""
+
+                thread_id = self._effective_message_thread_id(msg)
+                metadata = {"thread_id": str(thread_id)} if thread_id else None
+                await self.send(
+                    str(msg.chat.id),
+                    response or "KLIB query completed with no output.",
+                    reply_to=str(msg.message_id),
+                    metadata=metadata,
+                    reply_markup=reply_markup,
+                )
+                return
+
+>>>>>>> 2743d9659a (fix(T0098): collapse Telegram /query into /klib plugin's implementation)
         await self._cache_replied_media(msg, event)
         event = self._apply_telegram_group_observe_attribution(event)
         # Telegram clients split messages above 4096 chars into multiple

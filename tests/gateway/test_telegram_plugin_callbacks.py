@@ -37,6 +37,8 @@ from gateway.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 from plugins.platforms.telegram.adapter import TelegramAdapter
+from plugins.platforms.telegram import adapter as telegram_adapter_module
+from plugins import klib as klib_plugin
 
 
 def _make_adapter():
@@ -67,6 +69,45 @@ def _make_update(query):
     return SimpleNamespace(callback_query=query)
 
 
+def _make_command_update(text):
+    message = SimpleNamespace(
+        message_id=77,
+        text=text,
+        caption=None,
+        entities=[],
+        caption_entities=[],
+        message_thread_id=None,
+        is_topic_message=False,
+        chat=SimpleNamespace(
+            id=12345,
+            type="private",
+            title=None,
+            is_forum=False,
+        ),
+        from_user=SimpleNamespace(
+            id=12345,
+            full_name="Tester",
+            first_name="Tester",
+            username="tester",
+        ),
+        reply_to_message=None,
+        date=None,
+        location=None,
+        photo=None,
+        video=None,
+        audio=None,
+        voice=None,
+        document=None,
+        sticker=None,
+        media_group_id=None,
+    )
+    return SimpleNamespace(
+        update_id=88,
+        message=message,
+        effective_message=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_registered_plugin_callback_edits_message_with_returned_keyboard(monkeypatch):
     adapter = _make_adapter()
@@ -89,6 +130,53 @@ async def test_registered_plugin_callback_edits_message_with_returned_keyboard(m
     query.edit_message_text.assert_awaited_once_with(
         text="Page 2",
         reply_markup=keyboard,
+    )
+
+
+@pytest.mark.asyncio
+async def test_query_alias_and_klib_plugin_use_same_handler(monkeypatch):
+    adapter = _make_adapter()
+    adapter._bot.username = "test_bot"
+    adapter.send = AsyncMock()
+    calls = []
+
+    async def shared_handler(raw_args, chat_id=None):
+        calls.append((raw_args, chat_id))
+        return "shared klib reply"
+
+    monkeypatch.setattr(telegram_adapter_module, "_handle_klib", shared_handler)
+    monkeypatch.setattr(klib_plugin, "_handle_klib", shared_handler)
+
+    registered = {}
+
+    class Context:
+        def register_command(self, name, **kwargs):
+            registered[name] = kwargs["handler"]
+
+        def register_callback_handler(self, *_args):
+            pass
+
+    klib_plugin.register(Context())
+
+    await adapter._handle_command(
+        _make_command_update("/query cache invalidation"),
+        SimpleNamespace(),
+    )
+    plugin_result = registered["klib"]("cache invalidation")
+    if hasattr(plugin_result, "__await__"):
+        plugin_result = await plugin_result
+
+    assert plugin_result == "shared klib reply"
+    assert calls == [
+        ("cache invalidation", 12345),
+        ("cache invalidation", None),
+    ]
+    adapter.send.assert_awaited_once_with(
+        "12345",
+        "shared klib reply",
+        reply_to="77",
+        metadata=None,
+        reply_markup=None,
     )
 
 

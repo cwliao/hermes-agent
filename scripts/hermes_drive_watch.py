@@ -227,9 +227,10 @@ def main() -> int:
 
         result = ingest_document_to_docubot(
             source="drive-watch",
-            action="folder-watch",
+            action="document_review",
             local_path=str(downloaded),
             stable_key=file_id,
+            multipart=True,
             metadata={
                 "platform": "google-drive",
                 "folder_id": folder_id,

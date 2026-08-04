@@ -6872,6 +6872,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
                         },
                         local_path=cached_path,
                         stable_key=getattr(doc, "file_unique_id", None),
+                        multipart=True,
                     )
                     logger.info("[Telegram] DocuBot ingest response for document %s: %s", doc.file_unique_id, ingest_result)
                 except Exception as e:

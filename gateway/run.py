@@ -230,6 +230,41 @@ _GATEWAY_SELF_IMPERSONATION_RE = re.compile(
 )
 
 
+def _is_entirely_bracket_wrapped(text: str) -> bool:
+    """Return whether text is only balanced square-bracketed content.
+
+    A depth scan avoids treating an unbalanced leading/trailing pair as one
+    structural span.  Once the first span closes, only whitespace may occur
+    before another span; this deliberately treats ``[foo] [bar]`` as
+    suspicious too, since it has no substantial content outside brackets.
+    """
+    body = text.strip()
+    if len(body) < 2 or body[0] != "[" or body[-1] != "]":
+        return False
+
+    depth = 0
+    closed_top_level_span = False
+    for char in body:
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth < 0:
+                return False
+            if depth == 0:
+                closed_top_level_span = True
+        elif depth == 0 and not char.isspace():
+            # Non-whitespace text between top-level bracket spans is
+            # legitimate prose outside the bracket wrapper.
+            return False
+        elif depth == 0 and closed_top_level_span:
+            # Whitespace between adjacent bracket spans is allowed by the
+            # intentional suspicious-shape policy described above.
+            continue
+
+    return depth == 0
+
+
 def _gateway_surface_passes_raw_text(platform: Any) -> bool:
     """True only for programmatic/local surfaces that must keep raw text."""
     return _gateway_platform_value(platform) in _GATEWAY_RAW_TEXT_PLATFORMS
@@ -606,6 +641,15 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
 
     raw_text = str(text)
     if _GATEWAY_SELF_IMPERSONATION_RE.search(raw_text):
+        logger.warning(
+            "Blocked model self-impersonation attempt on %s; original content "
+            "was not delivered: %s",
+            platform,
+            raw_text,
+        )
+        return "⚠️ The model produced an invalid response and it was blocked for safety review."
+
+    if _is_entirely_bracket_wrapped(raw_text):
         logger.warning(
             "Blocked model self-impersonation attempt on %s; original content "
             "was not delivered: %s",

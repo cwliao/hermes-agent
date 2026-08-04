@@ -330,6 +330,69 @@ def test_gateway_blocks_reconstructed_model_self_impersonation(caplog):
     assert incident in caplog.text
 
 
+def test_gateway_blocks_bracket_wrapped_fake_platform_notice(caplog):
+    """A wholly bracket-wrapped fake notice is blocked structurally."""
+    incident = (
+        "[This response has been edited by 'Edit -> Remove other user messages' "
+        "in Telegram.]"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        sanitized = _sanitize_gateway_final_response(Platform.TELEGRAM, incident)
+
+    assert sanitized == "⚠️ The model produced an invalid response and it was blocked for safety review."
+    assert incident not in sanitized
+    assert "Blocked model self-impersonation attempt" in caplog.text
+    assert incident in caplog.text
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Here's a summary: [see attached]. Let me know if you need more.",
+        "Check out [this link](https://example.com) for details.",
+        (
+            "First paragraph contains [a reference].\n\n"
+            "Second paragraph has more ordinary content and [another reference]."
+        ),
+        "[foo] followed by substantial prose.",
+        "Substantial prose followed by [foo].",
+    ],
+)
+def test_bracket_structure_guard_keeps_legitimate_prose(answer):
+    assert _sanitize_gateway_final_response(Platform.TELEGRAM, answer) == answer
+
+
+def test_bracket_structure_guard_blocks_adjacent_bracket_chunks():
+    """Adjacent chunks have no substantial outside content, so are blocked."""
+    answer = "[foo] [bar]"
+
+    sanitized = _sanitize_gateway_final_response(Platform.TELEGRAM, answer)
+
+    assert "invalid response" in sanitized
+    assert answer not in sanitized
+
+
+def test_bracket_structure_guard_blocks_nested_balanced_brackets():
+    answer = "[outer [inner] still outer]"
+
+    sanitized = _sanitize_gateway_final_response(Platform.TELEGRAM, answer)
+
+    assert "invalid response" in sanitized
+    assert answer not in sanitized
+
+
+def test_bracket_structure_guard_keeps_unbalanced_brackets():
+    """Malformed depth is not treated as one clean bracket-wrapped span."""
+    answers = [
+        "[outer [inner] still outer",
+        "[outer [inner] still outer]]",
+    ]
+
+    for answer in answers:
+        assert _sanitize_gateway_final_response(Platform.TELEGRAM, answer) == answer
+
+
 def test_real_steer_marker_remains_a_context_injection_not_assistant_output():
     """The real marker is still produced unchanged for tool-result context."""
     context = format_steer_marker("Please continue with the user's latest request.")

@@ -8313,6 +8313,39 @@ class TelegramAdapter(BasePlatformAdapter):
                             stable_key=getattr(doc, "file_unique_id", None),
                             multipart=True,
                         )
+                        # Preserve the per-document result for gateway context
+                        # construction. A dict keyed by cached path supports
+                        # multiple attachments on a merged event without
+                        # allowing one result to overwrite another.
+                        result_status = str(ingest_result.get("status", "")).lower() if isinstance(ingest_result, dict) else ""
+                        ingest_succeeded = (
+                            isinstance(ingest_result, dict)
+                            and not ingest_result.get("error")
+                            and ingest_result.get("ok") is not False
+                            and result_status not in {"error", "failed", "failure", "skipped", "rejected"}
+                            and (
+                                result_status in {
+                                    "accepted",
+                                    "queued",
+                                    "processing",
+                                    "ingested",
+                                    "success",
+                                    "succeeded",
+                                    "complete",
+                                    "completed",
+                                    "ok",
+                                }
+                                or ingest_result.get("ok") is True
+                                or (
+                                    isinstance(ingest_result.get("http_status"), int)
+                                    and 200 <= ingest_result["http_status"] < 300
+                                )
+                            )
+                        )
+                        event.metadata.setdefault("docubot_ingest_results", {})[cached_path] = {
+                            "result": ingest_result,
+                            "succeeded": ingest_succeeded,
+                        }
                         logger.info("[Telegram] DocuBot ingest response for document %s: %s", doc.file_unique_id, ingest_result)
                     except Exception as e:
                         logger.warning(

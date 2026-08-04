@@ -207,6 +207,44 @@ class TestDocumentDownloadBlock:
         assert ingest_mock.call_args.kwargs["action"] == "document_review"
         assert ingest_mock.call_args.kwargs["multipart"] is True
 
+        event = adapter.handle_message.call_args[0][0]
+        record = event.metadata["docubot_ingest_results"][event.media_urls[0]]
+        assert record["result"] == {"status": "accepted"}
+        assert record["succeeded"] is True
+
+    @pytest.mark.asyncio
+    async def test_failed_docubot_ingest_does_not_set_success_signal(self, adapter):
+        file_obj = _make_file_obj(b"%PDF-1.4 fake")
+        doc = _make_document(file_name="report.pdf", file_size=1024, file_obj=file_obj)
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        with patch(
+            "plugins.platforms.telegram.adapter.ingest_document_to_docubot",
+            return_value={"status": "error", "error": "rejected"},
+        ):
+            await adapter._handle_media_message(update, MagicMock())
+
+        event = adapter.handle_message.call_args[0][0]
+        record = event.metadata["docubot_ingest_results"][event.media_urls[0]]
+        assert record["succeeded"] is False
+
+    @pytest.mark.asyncio
+    async def test_docubot_ingest_exception_does_not_set_signal(self, adapter):
+        file_obj = _make_file_obj(b"%PDF-1.4 fake")
+        doc = _make_document(file_name="report.pdf", file_size=1024, file_obj=file_obj)
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        with patch(
+            "plugins.platforms.telegram.adapter.ingest_document_to_docubot",
+            side_effect=RuntimeError("DocuBot unavailable"),
+        ):
+            await adapter._handle_media_message(update, MagicMock())
+
+        event = adapter.handle_message.call_args[0][0]
+        assert "docubot_ingest_results" not in event.metadata
+
     @pytest.mark.asyncio
     async def test_supported_pdf_is_cached(self, adapter):
         pdf_bytes = b"%PDF-1.4 fake"

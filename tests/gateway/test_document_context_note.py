@@ -11,8 +11,11 @@ is perfectly capable of reading. These tests pin the contract:
 """
 
 import importlib
+from types import SimpleNamespace
 
 import pytest
+
+from gateway.config import Platform
 
 gateway_run = importlib.import_module("gateway.run")
 _build_document_context_note = gateway_run._build_document_context_note
@@ -48,3 +51,68 @@ class TestBinaryDocumentNote:
         assert "ask the user" not in note.lower()
         assert "paste" in note.lower()
 
+    def test_binary_note_distinct_from_text_note(self):
+        text_note = _build_document_context_note("a.txt", "/c/a.txt", "text/plain")
+        pdf_note = _build_document_context_note("a.pdf", "/c/a.pdf", "application/pdf")
+        assert text_note != pdf_note
+        # The text path claims content is inlined; the binary path must not.
+        assert "included below" in text_note
+        assert "included below" not in pdf_note
+
+    def test_binary_note_without_ingestion_signal_is_byte_for_byte_unchanged(self):
+        note = _build_document_context_note("contract.pdf", "/cache/doc_contract.pdf", "application/pdf")
+        expected = (
+            "[The user sent a document: 'contract.pdf'. It is saved at: /cache/doc_contract.pdf. "
+            "Its text is not inlined here (it's a binary format such as PDF or DOCX). "
+            "To read it, extract the document's text yourself — for example with the "
+            "terminal tool or the ocr-and-documents skill — before answering, instead "
+            "of asking the user to paste the contents.]"
+        )
+
+        assert note == expected
+
+    def test_successful_docubot_ingestion_softens_binary_note(self):
+        note = _build_document_context_note(
+            "contract.pdf",
+            "/cache/doc_contract.pdf",
+            "application/pdf",
+            ingested=True,
+        )
+
+        assert "already been ingested and indexed by DocuBot" in note
+        assert "queried directly" in note
+        assert "terminal tool" not in note
+        assert "ocr-and-documents skill" not in note
+        assert "extract" not in note.lower()
+
+    def test_event_metadata_only_softens_matching_telegram_attachment(self):
+        event = SimpleNamespace(
+            source=SimpleNamespace(platform=Platform.TELEGRAM),
+            metadata={
+                "docubot_ingest_results": {
+                    "/cache/doc_contract.pdf": {
+                        "result": {"status": "accepted"},
+                        "succeeded": True,
+                    }
+                }
+            },
+        )
+
+        assert gateway_run._telegram_docubot_ingested_for_path(event, "/cache/doc_contract.pdf") is True
+        assert gateway_run._telegram_docubot_ingested_for_path(event, "/cache/other.pdf") is False
+        failed_event = SimpleNamespace(
+            source=event.source,
+            metadata={
+                "docubot_ingest_results": {
+                    "/cache/doc_contract.pdf": {
+                        "result": {"status": "error"},
+                        "succeeded": False,
+                    }
+                }
+            },
+        )
+        assert gateway_run._telegram_docubot_ingested_for_path(failed_event, "/cache/doc_contract.pdf") is False
+        assert gateway_run._telegram_docubot_ingested_for_path(
+            SimpleNamespace(source=SimpleNamespace(platform=Platform.DISCORD), metadata=event.metadata),
+            "/cache/doc_contract.pdf",
+        ) is False

@@ -8,6 +8,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 def _load_gateway_module():
     module_path = (
@@ -180,6 +182,7 @@ def test_drive_watch_requests_multipart_document_review(monkeypatch, tmp_path):
     captured = []
     saved_state = {}
 
+    monkeypatch.setattr(drive_watch, "STATE_DIR", tmp_path / "cron")
     monkeypatch.setattr(drive_watch, "_resolve_folder_id", lambda: "folder-1")
     monkeypatch.setattr(drive_watch, "build_service", lambda *_args: object())
     monkeypatch.setattr(
@@ -226,3 +229,48 @@ def test_drive_watch_requests_multipart_document_review(monkeypatch, tmp_path):
         "web_view_link": "https://drive.test/file-1",
     }
     assert saved_state["processed_file_ids"] == ["file-1"]
+    assert saved_state["last_seen_time"] == "2026-08-04T00:00:00Z"
+
+
+def test_drive_watch_dry_run_does_not_save_state(monkeypatch, tmp_path):
+    drive_watch = _load_drive_watch_module(monkeypatch)
+    downloaded = tmp_path / "from-drive.pdf"
+    downloaded.write_bytes(b"downloaded")
+    save_calls = []
+
+    monkeypatch.setattr(drive_watch, "STATE_DIR", tmp_path / "cron")
+    monkeypatch.setattr(drive_watch, "_resolve_folder_id", lambda: "folder-1")
+    monkeypatch.setattr(drive_watch, "build_service", lambda *_args: object())
+    monkeypatch.setattr(
+        drive_watch,
+        "_load_state",
+        lambda: {
+            "last_seen_time": "2026-08-03T00:00:00Z",
+            "processed_file_ids": [],
+            "folder_id": "folder-1",
+        },
+    )
+    monkeypatch.setattr(
+        drive_watch,
+        "_list_changed_files",
+        lambda *_args: [
+            {
+                "id": "file-1",
+                "name": "from-drive.pdf",
+                "mimeType": "application/pdf",
+                "modifiedTime": "2026-08-04T00:00:00Z",
+                "webViewLink": "https://drive.test/file-1",
+            }
+        ],
+    )
+    monkeypatch.setattr(drive_watch, "_download_file", lambda *_args: downloaded)
+    monkeypatch.setattr(drive_watch, "_save_state", lambda state: save_calls.append(state))
+    monkeypatch.setattr(drive_watch, "DRY_RUN", True)
+    monkeypatch.setattr(
+        drive_watch,
+        "ingest_document_to_docubot",
+        lambda **_kwargs: pytest.fail("dry-run must not ingest files"),
+    )
+
+    assert drive_watch.main() == 0
+    assert save_calls == []

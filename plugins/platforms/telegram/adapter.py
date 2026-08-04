@@ -6116,7 +6116,7 @@ class TelegramAdapter(BasePlatformAdapter):
             async def _ingest_cached_doc(cached_path: str, *, fallback_name: str) -> None:
                 try:
                     ingest_result = ingest_document_to_docubot(
-                        source="telegram", action="document-upload",
+                        source="telegram", action="document_review",
                         metadata={
                             "platform": "telegram",
                             "chat_id": str(getattr(getattr(msg, "chat", None), "id", "")),

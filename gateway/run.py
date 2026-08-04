@@ -356,6 +356,18 @@ def _gateway_compression_progress_notices_enabled() -> bool:
 # Surfaces consuming gateway text programmatically must keep RAW status/error text; unknown/empty -> chat.
 _GATEWAY_RAW_TEXT_PLATFORMS = frozenset({"local", "api_server", "webhook", "msgraph_webhook"})
 
+# A real out-of-band steer marker is injected by Hermes into tool-result
+# context, never generated as assistant content. Keep this detector narrow:
+# it only matches a bracket-delimited phrase containing both halves of that
+# marker concept, rather than looking for user/message words in general.
+_GATEWAY_SELF_IMPERSONATION_RE = re.compile(
+    r"\[\s*/?\s*"
+    r"(?=[^\]]*\bout[\s_\-\u2010-\u2015]*of[\s_\-\u2010-\u2015]*band\b)"
+    r"(?=[^\]]*\buser[\s_\-\u2010-\u2015]*message\b)"
+    r"[^\]]*\]",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _gateway_surface_passes_raw_text(platform: Any) -> bool:
     """True only for programmatic/local surfaces that must keep raw text."""
@@ -647,7 +659,19 @@ def _looks_like_gateway_provider_error(text: str) -> bool:
 def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     """Sanitize final gateway replies for chat surfaces: concise, secret-redacted provider failure
     categories instead of raw HTTP bodies, request IDs, leaked credentials, or policy text."""
-    if not text or _gateway_surface_passes_raw_text(platform):
+    if not text:
+        return text
+    raw_text = str(text)
+    if _GATEWAY_SELF_IMPERSONATION_RE.search(raw_text):
+        logger.warning(
+            "Blocked model self-impersonation attempt on %s; original content "
+            "was not delivered: %s",
+            platform,
+            raw_text,
+        )
+        return "⚠️ The model produced an invalid response and it was blocked for safety review."
+
+    if _gateway_surface_passes_raw_text(platform):
         return text
 
     # Lone UTF-16 surrogates make Telegram/Signal ``.encode()`` raise; last defense for legacy/plugin paths.
@@ -666,7 +690,7 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     if str(text).strip().startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX):
         return ""
 
-    redacted = _redact_gateway_user_facing_secrets(str(text))
+    redacted = _redact_gateway_user_facing_secrets(raw_text)
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
@@ -2400,7 +2424,9 @@ def _build_media_placeholder(event) -> str:
 
 
 def _build_document_context_note(
-    display_name: str, agent_path: str, mtype: str, *, content_inlined: bool = True) -> str:
+    display_name: str, agent_path: str, mtype: str, *,
+    content_inlined: bool = True, ingested: bool = False,
+) -> str:
     """Context note prepended to a user turn when they attach a document.
     ``content_inlined=False`` = cached without content, so tell the agent to read it. Binary docs must
     say *extract* the text; "ask the user" made it punt."""
@@ -2413,12 +2439,32 @@ def _build_document_context_note(
             f"[The user sent a text document: '{display_name}'. It is saved at: {agent_path}. "
             f"Its content is not inlined here. Read the cached file yourself before answering "
             f"when the user's request involves its contents.]")
+    if ingested:
+        return (
+            f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
+            f"Its text is not inlined here, but it has already been ingested and "
+            f"indexed by DocuBot and can be queried directly.]"
+        )
     return (
         f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
         f"Its text is not inlined here (it's a binary format such as PDF or DOCX). "
         f"To read it, extract the document's text yourself — for example with the "
         f"terminal tool or the ocr-and-documents skill — before answering, instead "
         f"of asking the user to paste the contents.]")
+
+
+def _telegram_docubot_ingested_for_path(event: Any, path: str) -> bool:
+    """Return whether Telegram's DocuBot pipeline accepted this attachment."""
+    source = getattr(event, "source", None)
+    if getattr(source, "platform", None) != Platform.TELEGRAM:
+        return False
+
+    metadata = getattr(event, "metadata", None) or {}
+    results = metadata.get("docubot_ingest_results")
+    if not isinstance(results, dict):
+        return False
+    record = results.get(path)
+    return isinstance(record, dict) and record.get("succeeded") is True
 
 
 def _format_duration(seconds: float) -> str:

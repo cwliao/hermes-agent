@@ -682,7 +682,11 @@ class AIAgent(
 
     def _has_content_after_think_block(self, content: str) -> bool:
         """True when text remains after stripping reasoning blocks (reasoning-only output is retried)."""
-        return bool(content) and bool(self._strip_think_blocks(content).strip())
+        if not content:
+            return False
+        cleaned = self._strip_think_blocks(content).strip()
+        # ``(empty)`` is Hermes' internal terminal/recovery sentinel, not a meaningful model answer.
+        return bool(cleaned) and cleaned != "(empty)"
 
     _strip_think_blocks = _forward("agent.agent_runtime_helpers", "strip_think_blocks")
 

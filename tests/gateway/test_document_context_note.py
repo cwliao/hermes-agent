@@ -71,6 +71,27 @@ class TestBinaryDocumentNote:
 
         assert note == expected
 
+    def test_pptx_note_directs_model_to_use_powerpoint_skill(self):
+        note = _build_document_context_note(
+            "presentation.pptx",
+            "/cache/doc_presentation.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
+
+        assert "powerpoint" in note
+        assert "Use the powerpoint skill to extract its text before answering." in note
+        assert "terminal tool" not in note
+
+    def test_binary_note_without_matching_skill_keeps_generic_fallback(self):
+        note = _build_document_context_note(
+            "contract.docx",
+            "/cache/doc_contract.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        assert "for example with the terminal tool or the ocr-and-documents skill" in note
+        assert "powerpoint" not in note
+
     def test_successful_docubot_ingestion_softens_binary_note(self):
         note = _build_document_context_note(
             "contract.pdf",

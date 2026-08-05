@@ -2164,6 +2164,11 @@ def _build_media_placeholder(event) -> str:
     return "\n".join(parts)
 
 
+_DOCUMENT_MTYPE_TO_SKILL = {
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "powerpoint",
+}
+
+
 def _build_document_context_note(
     display_name: str,
     agent_path: str,
@@ -2193,6 +2198,13 @@ def _build_document_context_note(
             f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
             f"Its text is not inlined here, but it has already been ingested and "
             f"indexed by DocuBot and can be queried directly.]"
+        )
+    skill = _DOCUMENT_MTYPE_TO_SKILL.get(mtype)
+    if skill:
+        return (
+            f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
+            f"Its text is not inlined here. Use the {skill} skill to extract its text "
+            f"before answering.]"
         )
     return (
         f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "

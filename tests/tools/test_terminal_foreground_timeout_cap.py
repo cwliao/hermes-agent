@@ -6,6 +6,8 @@ are rejected with an error suggesting background=true.
 import json
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Shared test config dict — mirrors _get_env_config() return shape.
@@ -29,6 +31,56 @@ def _make_env_config(**overrides):
 
 class TestForegroundTimeoutCap:
     """FOREGROUND_MAX_TIMEOUT rejects foreground commands that exceed it."""
+
+    @pytest.mark.parametrize("timeout", ["9999", "", "not-a-number", "60.5", "-1"])
+    def test_malformed_timeout_returns_structured_error(self, timeout):
+        """Malformed timeout values are rejected without reaching the cap comparison."""
+        from tools.terminal_tool import terminal_tool
+
+        result = json.loads(terminal_tool(command="echo hello", timeout=timeout))
+
+        assert result == {
+            "output": "",
+            "exit_code": -1,
+            "error": "Invalid timeout: expected integer or null, got str",
+            "status": "error",
+        }
+
+    def test_timeout_none_uses_config_default(self):
+        """An explicit None retains the existing configured-default behavior."""
+        from tools.terminal_tool import terminal_tool
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"):
+
+            mock_env = MagicMock()
+            mock_env.execute.return_value = {"output": "done", "returncode": 0}
+
+            with patch("tools.terminal_tool._active_environments", {"default": mock_env}), \
+                 patch("tools.terminal_tool._last_activity", {"default": 0}), \
+                 patch("tools.terminal_tool._check_all_guards", return_value={"approved": True}):
+                result = json.loads(terminal_tool(command="echo hello", timeout=None))
+
+        assert mock_env.execute.call_args[1]["timeout"] == 180
+        assert result["error"] is None
+
+    def test_handle_terminal_missing_timeout_uses_config_default(self):
+        """A missing timeout key still reaches terminal_tool as None."""
+        from tools.terminal_tool import _handle_terminal
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"):
+
+            mock_env = MagicMock()
+            mock_env.execute.return_value = {"output": "done", "returncode": 0}
+
+            with patch("tools.terminal_tool._active_environments", {"default": mock_env}), \
+                 patch("tools.terminal_tool._last_activity", {"default": 0}), \
+                 patch("tools.terminal_tool._check_all_guards", return_value={"approved": True}):
+                result = json.loads(_handle_terminal({"command": "echo hello"}))
+
+        assert mock_env.execute.call_args[1]["timeout"] == 180
+        assert result["error"] is None
 
     def test_foreground_timeout_rejected_above_max(self):
         """When model requests timeout > FOREGROUND_MAX_TIMEOUT, return error."""

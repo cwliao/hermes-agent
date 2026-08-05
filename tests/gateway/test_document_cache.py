@@ -81,6 +81,48 @@ class TestCleanupDocumentCache:
         assert removed == 1
         assert not old_file.exists()
 
+    def test_keeps_recent_files(self):
+        cache_dir = get_document_cache_dir()
+        recent = cache_dir / "recent.txt"
+        recent.write_text("fresh")
+
+        removed = cleanup_document_cache(max_age_hours=24)
+        assert removed == 0
+        assert recent.exists()
+
+    def test_time_window_protects_recent_ingestion_boundary(self):
+        cache_dir = get_document_cache_dir()
+        now = time.time()
+        in_flight = cache_dir / "in_flight.txt"
+        just_expired = cache_dir / "just_expired.txt"
+        in_flight.write_text("recent")
+        just_expired.write_text("expired")
+        os.utime(in_flight, (now - 23.9 * 3600, now - 23.9 * 3600))
+        os.utime(just_expired, (now - 24.1 * 3600, now - 24.1 * 3600))
+
+        # cache_document_from_bytes() writes the file before _ingest_cached_doc()
+        # starts its single bounded DocuBot HTTP/RPC call.  Therefore a normal
+        # in-flight ingestion is protected by this 24-hour window; reaching
+        # this boundary would require a stuck/leaked call, not normal latency.
+        removed = cleanup_document_cache(max_age_hours=24)
+
+        assert removed == 1
+        assert in_flight.exists()
+        assert not just_expired.exists()
+
+    def test_returns_removed_count(self):
+        cache_dir = get_document_cache_dir()
+        old_time = time.time() - 48 * 3600
+        for i in range(3):
+            f = cache_dir / f"old_{i}.txt"
+            f.write_text("x")
+            os.utime(f, (old_time, old_time))
+
+        assert cleanup_document_cache(max_age_hours=24) == 3
+
+    def test_empty_cache_dir(self):
+        assert cleanup_document_cache(max_age_hours=24) == 0
+
 
 # ---------------------------------------------------------------------------
 # TestSupportedDocumentTypes

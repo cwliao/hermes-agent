@@ -10,7 +10,9 @@ is perfectly capable of reading. These tests pin the contract:
   itself and never tells it to punt back to the user.
 """
 
+import asyncio
 import importlib
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +21,7 @@ from gateway.config import Platform
 
 gateway_run = importlib.import_module("gateway.run")
 _build_document_context_note = gateway_run._build_document_context_note
+_PPTX_MTYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
 class TestTextDocumentNote:
@@ -81,6 +84,103 @@ class TestBinaryDocumentNote:
         assert "powerpoint" in note
         assert "Use the powerpoint skill to extract its text before answering." in note
         assert "terminal tool" not in note
+
+    @pytest.mark.asyncio
+    async def test_pptx_extraction_inlines_markitdown_output(self, monkeypatch):
+        class _SuccessfulProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return b"# Quarterly Results\nRevenue grew 20%.", b""
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            assert args[:3] == (gateway_run.sys.executable, "-m", "markitdown")
+            assert args[3] == "/cache/presentation.pptx"
+            return _SuccessfulProcess()
+
+        monkeypatch.setattr(
+            gateway_run.asyncio,
+            "create_subprocess_exec",
+            fake_create_subprocess_exec,
+        )
+
+        extracted = await gateway_run._try_extract_pptx_text("/cache/presentation.pptx")
+        note = _build_document_context_note(
+            "presentation.pptx",
+            "/agent-cache/presentation.pptx",
+            _PPTX_MTYPE,
+            extracted_text=extracted,
+        )
+
+        assert extracted == "# Quarterly Results\nRevenue grew 20%."
+        assert "Revenue grew 20%." in note
+        assert "Use the powerpoint skill to extract its text before answering." not in note
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["timeout", "nonzero"])
+    async def test_pptx_extraction_failure_falls_back_to_powerpoint_skill(
+        self, monkeypatch, failure, caplog
+    ):
+        class _Process:
+            returncode = 1 if failure == "nonzero" else None
+
+            async def communicate(self):
+                if failure == "timeout" and not getattr(self, "killed", False):
+                    await asyncio.sleep(3600)
+                return b"ignored output", b""
+
+            def kill(self):
+                self.killed = True
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            return _Process()
+
+        monkeypatch.setattr(
+            gateway_run.asyncio,
+            "create_subprocess_exec",
+            fake_create_subprocess_exec,
+        )
+
+        extracted = await gateway_run._try_extract_pptx_text(
+            "/cache/presentation.pptx", timeout=0.01
+        )
+        note = _build_document_context_note(
+            "presentation.pptx",
+            "/agent-cache/presentation.pptx",
+            _PPTX_MTYPE,
+            extracted_text=extracted,
+        )
+
+        assert extracted is None
+        assert "Use the powerpoint skill to extract its text before answering." in note
+        assert "ignored output" not in note
+        assert [record.message for record in caplog.records].count(
+            "PPTX text extraction failed for presentation.pptx"
+        ) == 1
+
+    @pytest.mark.asyncio
+    async def test_pptx_extraction_enforces_timeout(self, monkeypatch):
+        class _HungProcess:
+            returncode = None
+
+            async def communicate(self):
+                await asyncio.sleep(3600)
+
+            def kill(self):
+                pass
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            return _HungProcess()
+
+        monkeypatch.setattr(
+            gateway_run.asyncio,
+            "create_subprocess_exec",
+            fake_create_subprocess_exec,
+        )
+
+        started = time.monotonic()
+        assert await gateway_run._try_extract_pptx_text("/cache/presentation.pptx", timeout=0.01) is None
+        assert time.monotonic() - started < 0.5
 
     def test_binary_note_without_matching_skill_keeps_generic_fallback(self):
         note = _build_document_context_note(

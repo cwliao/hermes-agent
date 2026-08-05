@@ -59,6 +59,7 @@ from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.i18n import t
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
+from plugins.klib import _truncate_display
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -2167,6 +2168,41 @@ def _build_media_placeholder(event) -> str:
 _DOCUMENT_MTYPE_TO_SKILL = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "powerpoint",
 }
+_PPTX_MTYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_PPTX_INLINE_TEXT_MAX_LENGTH = 20_000
+
+
+async def _try_extract_pptx_text(path: str, timeout: int = 20) -> str | None:
+    """Best-effort server-side extraction of a PPTX's text via markitdown."""
+    proc = None
+    filename = os.path.basename(path)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "markitdown",
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode != 0:
+            raise RuntimeError("markitdown returned a non-zero exit code")
+        extracted = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
+        if not extracted:
+            raise RuntimeError("markitdown returned empty output")
+        return extracted
+    except asyncio.TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    logger.warning("PPTX text extraction failed for %s", filename)
+    return None
 
 
 def _build_document_context_note(
@@ -2175,6 +2211,7 @@ def _build_document_context_note(
     mtype: str,
     *,
     ingested: bool = False,
+    extracted_text: str | None = None,
 ) -> str:
     """Context note prepended to a user turn when they attach a document.
 
@@ -2201,6 +2238,15 @@ def _build_document_context_note(
         )
     skill = _DOCUMENT_MTYPE_TO_SKILL.get(mtype)
     if skill:
+        if extracted_text:
+            extracted = _truncate_display(extracted_text, _PPTX_INLINE_TEXT_MAX_LENGTH)
+            if extracted:
+                return (
+                    f"[The user sent a document: '{display_name}'. "
+                    f"Its content has been included below:\n\n"
+                    f"{extracted}\n\n"
+                    f"The file is also saved at: {agent_path}]"
+                )
         return (
             f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
             f"Its text is not inlined here. Use the {skill} skill to extract its text "
@@ -10893,12 +10939,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # This ensures the agent receives a path it can open inside its sandbox, as the
                 # cache directories are auto-mounted at /root/.hermes/cache/* by get_cache_directory_mounts().
                 agent_path = to_agent_visible_cache_path(path)
+                extracted_text = None
+                if mtype == _PPTX_MTYPE:
+                    extracted_text = await _try_extract_pptx_text(path)
 
                 context_note = _build_document_context_note(
                     display_name,
                     agent_path,
                     mtype,
                     ingested=_telegram_docubot_ingested_for_path(event, path),
+                    extracted_text=extracted_text,
                 )
                 message_text = f"{context_note}\n\n{message_text}"
 

@@ -738,6 +738,106 @@ class TestToolHandler:
         finally:
             _servers.pop("test_srv", None)
 
+    def test_klib_search_result_is_formatted(self):
+        from plugins.klib import _format_result_lines
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        results = [
+            {
+                "file": "wiki/energy.md",
+                "line": 12,
+                "text": "Carbon capture is discussed here.",
+                "status": None,
+            },
+            {
+                "file": "wiki/policy.md",
+                "line": 8,
+                "text": "Policy context appears here.",
+                "status": "draft",
+            },
+        ]
+        raw_json = json.dumps(results)
+
+        formatted = _format_klib_mcp_result("search", {"query": "carbon"}, raw_json)
+
+        assert formatted == "\n".join(
+            _format_result_lines("carbon", results, start_index=1)
+        )
+        assert "1. **wiki/energy.md** — Carbon capture is discussed here." in formatted
+        assert raw_json not in formatted
+
+    @pytest.mark.parametrize(
+        "raw_json",
+        [
+            "not JSON",
+            '{"error": "search failed"}',
+            json.dumps(["unexpected item"]),
+        ],
+    )
+    def test_klib_result_formatting_falls_back_for_unexpected_shapes(self, raw_json):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        assert _format_klib_mcp_result("search", {"query": "carbon"}, raw_json) == raw_json
+
+    @pytest.mark.parametrize(
+        "server_name, tool_name", [("klib", "read_page"), ("other", "search")]
+    )
+    def test_klib_formatting_guard_does_not_over_fire(self, server_name, tool_name):
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        results = [
+            {
+                "file": "wiki/energy.md",
+                "line": 12,
+                "text": "Carbon capture is discussed here.",
+                "status": None,
+            }
+        ]
+        raw_json = json.dumps(results)
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result(raw_json, is_error=False)
+        )
+        server = _make_mock_server(server_name, session=mock_session)
+        _servers[server_name] = server
+
+        try:
+            handler = _make_tool_handler(server_name, tool_name, 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({"query": "carbon"}))
+            assert result["result"] == raw_json
+        finally:
+            _servers.pop(server_name, None)
+
+    def test_klib_search_handler_formats_result(self):
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        raw_json = json.dumps([
+            {
+                "file": "wiki/energy.md",
+                "line": 12,
+                "text": "Carbon capture is discussed here.",
+                "status": None,
+            }
+        ])
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result(raw_json, is_error=False)
+        )
+        server = _make_mock_server("klib", session=mock_session)
+        _servers["klib"] = server
+
+        try:
+            handler = _make_tool_handler("klib", "search", 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({"query": "carbon"}))
+            assert result["result"] == (
+                "klib results for 'carbon':\n"
+                "1. **wiki/energy.md** — Carbon capture is discussed here."
+            )
+        finally:
+            _servers.pop("klib", None)
+
     def test_mcp_error_result(self):
         from tools.mcp_tool import _make_tool_handler, _servers
 

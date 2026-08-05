@@ -4020,6 +4020,33 @@ def _mark_server_call_started(server: Any) -> None:
         mark_tool_call()
 
 
+def _format_klib_mcp_result(tool_name: str, args: dict, raw_json: str) -> str:
+    """Format a klib MCP search result using the slash-command formatter.
+
+    Formatting is best-effort so an unexpected MCP response can never block
+    or otherwise alter the underlying tool call.
+    """
+    try:
+        results = json.loads(raw_json)
+    except Exception:
+        return raw_json
+
+    if not isinstance(results, list):
+        return raw_json
+
+    try:
+        if not all(isinstance(item, dict) for item in results):
+            return raw_json
+        query = args.get("query", "") if isinstance(args, dict) else ""
+        if not isinstance(query, str):
+            query = ""
+        from plugins.klib import _format_result_lines
+
+        return "\n".join(_format_result_lines(query, results, start_index=1))
+    except Exception:
+        return raw_json
+
+
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -4174,6 +4201,8 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                         server_name, block_type,
                     )
             text_result = "\n".join(parts) if parts else ""
+            if server_name == "klib" and tool_name in ("search", "semantic_search"):
+                text_result = _format_klib_mcp_result(tool_name, args, text_result)
 
             # Combine content + structuredContent when both are present.
             # MCP spec: content is model-oriented (text), structuredContent

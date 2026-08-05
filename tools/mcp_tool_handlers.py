@@ -334,7 +334,18 @@ def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float,
         server.mark_tool_call()
 
     def call_once():
-        return _loop._run_on_mcp_loop(call, timeout=tool_timeout)
+        # Keep the legacy public patch seam while the implementation lives in the split loop module.
+        try:
+            from tools import mcp_tool as _public
+            public_runner = getattr(_public, "_run_on_mcp_loop", None)
+            public_original = getattr(_public, "_ORIGINAL_RUN_ON_MCP_LOOP", None)
+            run_on_loop = (
+                public_runner if public_runner is not None and public_runner is not public_original
+                else _loop._run_on_mcp_loop
+            )
+        except Exception:
+            run_on_loop = _loop._run_on_mcp_loop
+        return run_on_loop(call, timeout=tool_timeout)
 
     try:
         result = call_once()
@@ -522,7 +533,31 @@ def _content_dual_emits_structured(result, structured) -> bool:
     return False
 
 
-def _render_call_tool_result(result, server_name: str, image_paths: Optional[list[str]] = None) -> str:
+def _format_klib_mcp_result(tool_name: str, args: dict, raw_json: str) -> str:
+    """Best-effort formatting for direct klib MCP search calls."""
+    try:
+        results = json.loads(raw_json)
+    except Exception:
+        return raw_json
+    if not isinstance(results, list) or not all(isinstance(item, dict) for item in results):
+        return raw_json
+    try:
+        query = args.get("query", "") if isinstance(args, dict) else ""
+        if not isinstance(query, str):
+            query = ""
+        from plugins.klib import _format_result_lines
+        return "\n".join(_format_result_lines(query, results, start_index=1))
+    except Exception:
+        return raw_json
+
+
+def _render_call_tool_result(
+    result,
+    server_name: str,
+    tool_name: str = "",
+    args: Optional[dict] = None,
+    image_paths: Optional[list[str]] = None,
+) -> str:
     """Pure: ``CallToolResult`` -> handler JSON (``image_paths``, when given, receives the files this
     call's image blocks were cached to). ``content`` and ``structuredContent`` are both
     forwarded, except that a ``structuredContent`` whose JSON also sits verbatim in a text block
@@ -539,6 +574,8 @@ def _render_call_tool_result(result, server_name: str, image_paths: Optional[lis
     text_result, usable_parts, cached_images = _render_content_blocks(result, server_name)
     if image_paths is not None:
         image_paths.extend(cached_images)
+    if server_name == "klib" and tool_name in ("search", "semantic_search"):
+        text_result = _format_klib_mcp_result(tool_name, args or {}, text_result)
     structured = _capped_structured_content(result)
     meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))
     # A str here is the over-cap truncation stand-in (wire structuredContent is always an object): next to
@@ -593,7 +630,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float, *,
             if getattr(server, "_mark_session_proven", None) is not None:  # round-trip done: transport healthy
                 server._mark_session_proven()
             image_paths.clear()
-            return _render_call_tool_result(result, server_name, image_paths)
+            return _render_call_tool_result(result, server_name, tool_name, args, image_paths)
 
         def _on_failure(exc):
             _core._bump_server_error(server_name)

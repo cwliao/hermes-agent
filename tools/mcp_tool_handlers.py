@@ -236,7 +236,18 @@ def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float,
         server.mark_tool_call()
 
     def call_once():
-        return _loop._run_on_mcp_loop(call, timeout=tool_timeout)
+        # Keep the legacy public patch seam while the implementation lives in the split loop module.
+        try:
+            from tools import mcp_tool as _public
+            public_runner = getattr(_public, "_run_on_mcp_loop", None)
+            public_original = getattr(_public, "_ORIGINAL_RUN_ON_MCP_LOOP", None)
+            run_on_loop = (
+                public_runner if public_runner is not None and public_runner is not public_original
+                else _loop._run_on_mcp_loop
+            )
+        except Exception:
+            run_on_loop = _loop._run_on_mcp_loop
+        return run_on_loop(call, timeout=tool_timeout)
 
     try:
         result = call_once()
@@ -384,7 +395,25 @@ def _capped_structured_content(result):
     return _truncate_mcp_text_result(as_json) if len(as_json) > _MCP_HARD_RESULT_CAP_CHARS else structured
 
 
-def _render_call_tool_result(result, server_name: str) -> str:
+def _format_klib_mcp_result(tool_name: str, args: dict, raw_json: str) -> str:
+    """Best-effort formatting for direct klib MCP search calls."""
+    try:
+        results = json.loads(raw_json)
+    except Exception:
+        return raw_json
+    if not isinstance(results, list) or not all(isinstance(item, dict) for item in results):
+        return raw_json
+    try:
+        query = args.get("query", "") if isinstance(args, dict) else ""
+        if not isinstance(query, str):
+            query = ""
+        from plugins.klib import _format_result_lines
+        return "\n".join(_format_result_lines(query, results, start_index=1))
+    except Exception:
+        return raw_json
+
+
+def _render_call_tool_result(result, server_name: str, tool_name: str = "", args: Optional[dict] = None) -> str:
     """Pure: ``CallToolResult`` -> handler JSON. ``content`` and ``structuredContent`` are
     ALTERNATIVES, never both forwarded (kimi-code#3234): spec-following servers already render
     their data into content, so forwarding both sent it twice. content wins whenever it rendered
@@ -394,6 +423,8 @@ def _render_call_tool_result(result, server_name: str) -> str:
     if mcp_field(result, "is_error", "isError", False):
         return tool_error(_sanitize_error(_truncate_mcp_text_result(_error_result_text(result) or "MCP tool returned an error")))
     text_result, usable_parts = _render_content_blocks(result, server_name)
+    if server_name == "klib" and tool_name in ("search", "semantic_search"):
+        text_result = _format_klib_mcp_result(tool_name, args or {}, text_result)
     structured = _capped_structured_content(result)
     meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))
     if structured is not None and usable_parts > 0:
@@ -438,7 +469,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     server._pending_call_context = None
             if getattr(server, "_mark_session_proven", None) is not None:  # round-trip done: transport healthy
                 server._mark_session_proven()
-            return _render_call_tool_result(result, server_name)
+            return _render_call_tool_result(result, server_name, tool_name, args)
 
         def _on_failure(exc):
             _core._bump_server_error(server_name)

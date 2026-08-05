@@ -612,6 +612,22 @@ def _server_registry_scope(name: str) -> Optional[str]:
     return _mcp_registry_scope()
 
 
+def _format_klib_mcp_result(tool_name: str, args: dict, raw_json: str) -> str:
+    """Compatibility entry point for the split MCP handler implementation."""
+    from tools.mcp_tool_handlers import _format_klib_mcp_result as _format
+    return _format(tool_name, args, raw_json)
+
+
+# Compatibility seams retained for plugins and older tests after the MCP implementation split.
+from tools.mcp_tool_loop import _run_on_mcp_loop  # noqa: E402,F401
+_ORIGINAL_RUN_ON_MCP_LOOP = _run_on_mcp_loop
+
+
+def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
+    from tools.mcp_tool_handlers import _make_tool_handler as _make
+    return _make(server_name, tool_name, tool_timeout)
+
+
 # Cross-process discovery guard: advisory file lock so gateway + CLI + TUI don't all discover.
 # See issue #62771.
 _LOCK_UNAVAILABLE: Any = object()  # sentinel: locking broken/unavailable

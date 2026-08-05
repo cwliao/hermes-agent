@@ -155,6 +155,8 @@ dependencies = [
   # Ships prebuilt wheels bundling libheif for the common platforms (no system
   # libs needed), so it's safe in the base install alongside Pillow.
   "pillow-heif>=1.4.0,<2",
+  # Server-side PPTX text extraction for inbound document context notes.
+  "markitdown[pptx]==0.1.7",
   # Windows log rotation. Stdlib ``RotatingFileHandler.doRollover()`` uses
   # ``os.rename()`` which fails with ``PermissionError [WinError 32]`` on
   # Windows whenever any other process holds an append-mode handle on

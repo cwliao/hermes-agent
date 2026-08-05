@@ -2233,8 +2233,12 @@ def _build_document_context_note(
     if ingested:
         return (
             f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
-            f"Its text is not inlined here, but it has already been ingested and "
-            f"indexed by DocuBot and can be queried directly.]"
+            f"Its text is not inlined here, but DocuBot has processed and stored the file. "
+            f"Its content is not guaranteed to be available through klib's search tools "
+            f"(mcp__klib__search, mcp__klib__semantic_search, or "
+            f"mcp__klib__list_resources). If those queries return no results, tell the "
+            f"user honestly that you can't find it right now; do not use the terminal tool "
+            f"or write a script to parse the file yourself.]"
         )
     skill = _DOCUMENT_MTYPE_TO_SKILL.get(mtype)
     if skill:

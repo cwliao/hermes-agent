@@ -200,9 +200,17 @@ class TestBinaryDocumentNote:
             ingested=True,
         )
 
-        assert "already been ingested and indexed by DocuBot" in note
-        assert "queried directly" in note
-        assert "terminal tool" not in note
+        assert "DocuBot has processed and stored the file" in note
+        assert "Its content is not guaranteed to be available through klib's search tools" in note
+        for tool_name in (
+            "mcp__klib__search",
+            "mcp__klib__semantic_search",
+            "mcp__klib__list_resources",
+        ):
+            assert tool_name in note
+        assert "can be queried directly" not in note
+        assert "tell the user honestly that you can't find it right now" in note
+        assert "do not use the terminal tool or write a script to parse the file yourself" in note
         assert "ocr-and-documents skill" not in note
         assert "extract" not in note.lower()
 

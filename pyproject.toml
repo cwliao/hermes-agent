@@ -180,6 +180,8 @@ dependencies = [
   # preparing a separate environment at launch. abi3 wheels for every
   # shipped platform, including Windows ARM64 and Android.
   "resvg-py==0.4.0; python_version >= '3.14'",
+  # Server-side PPTX text extraction for inbound document context notes.
+  "markitdown[pptx]==0.1.7",
   # Windows log rotation. Stdlib ``RotatingFileHandler.doRollover()`` uses
   # ``os.rename()`` which fails with ``PermissionError [WinError 32]`` on
   # Windows whenever any other process holds an append-mode handle on

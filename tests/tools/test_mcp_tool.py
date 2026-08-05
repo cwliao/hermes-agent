@@ -5,6 +5,7 @@ All tests use mocks -- no real MCP servers or subprocesses are started.
 
 import asyncio
 import json
+import subprocess
 import threading
 import time
 from types import SimpleNamespace
@@ -758,7 +759,10 @@ class TestToolHandler:
         ]
         raw_json = json.dumps(results)
 
-        formatted = _format_klib_mcp_result("search", {"query": "carbon"}, raw_json)
+        with patch("tools.mcp_tool._drive_link_for_path", return_value=None):
+            formatted = _format_klib_mcp_result(
+                "search", {"query": "carbon"}, raw_json
+            )
 
         assert formatted == "\n".join(
             _format_result_lines("carbon", results, start_index=1)
@@ -780,7 +784,7 @@ class TestToolHandler:
         assert _format_klib_mcp_result("search", {"query": "carbon"}, raw_json) == raw_json
 
     @pytest.mark.parametrize(
-        "server_name, tool_name", [("klib", "read_page"), ("other", "search")]
+        "server_name, tool_name", [("other", "search")]
     )
     def test_klib_formatting_guard_does_not_over_fire(self, server_name, tool_name):
         from tools.mcp_tool import _make_tool_handler, _servers
@@ -829,14 +833,216 @@ class TestToolHandler:
 
         try:
             handler = _make_tool_handler("klib", "search", 120)
-            with self._patch_mcp_loop():
-                result = json.loads(handler({"query": "carbon"}))
+            with patch("tools.mcp_tool._drive_link_for_path", return_value=None):
+                with self._patch_mcp_loop():
+                    result = json.loads(handler({"query": "carbon"}))
             assert result["result"] == (
                 "klib results for 'carbon':\n"
                 "1. **wiki/energy.md** — Carbon capture is discussed here."
             )
         finally:
             _servers.pop("klib", None)
+
+    def test_klib_read_page_handler_formats_result(self):
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        raw_json = json.dumps({"raw": "Carbon capture page.", "status": None})
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result(raw_json, is_error=False)
+        )
+        server = _make_mock_server("klib", session=mock_session)
+        _servers["klib"] = server
+
+        try:
+            handler = _make_tool_handler("klib", "read_page", 120)
+            with patch("tools.mcp_tool._drive_link_for_path", return_value=None):
+                with self._patch_mcp_loop():
+                    result = json.loads(handler({"path": "energy/foo.md"}))
+            assert result["result"] == "klib: energy/foo.md\nCarbon capture page."
+            assert "{\"raw\"" not in result["result"]
+        finally:
+            _servers.pop("klib", None)
+
+    def test_klib_list_index_handler_formats_result(self):
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        raw_json = json.dumps({"raw": "# Klib index", "status": "metadata"})
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result(raw_json, is_error=False)
+        )
+        server = _make_mock_server("klib", session=mock_session)
+        _servers["klib"] = server
+
+        try:
+            handler = _make_tool_handler("klib", "list_index", 120)
+            with patch("tools.mcp_tool._drive_link_for_path", return_value=None):
+                with self._patch_mcp_loop():
+                    result = json.loads(handler({}))
+            assert result["result"] == "klib: index.md\n# Klib index"
+            assert "{\"raw\"" not in result["result"]
+        finally:
+            _servers.pop("klib", None)
+
+    def test_klib_read_page_path_comes_from_args(self):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        payload = {"raw": "Page body", "status": None}
+        with patch("tools.mcp_tool._drive_link_for_path", return_value=None):
+            formatted = _format_klib_mcp_result(
+                "read_page", {"path": "energy/foo.md"}, json.dumps(payload)
+            )
+
+        assert "energy/foo.md" in formatted
+        assert "path" not in payload
+
+    @pytest.mark.parametrize(
+        "payload",
+        [[], {"status": None}, "not an object"],
+    )
+    def test_klib_page_malformed_payload_is_short_failure(self, payload):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        raw_json = json.dumps(payload)
+        formatted = _format_klib_mcp_result(
+            "read_page", {"path": "energy/foo.md"}, raw_json
+        )
+
+        assert formatted == "klib: unexpected response for 'energy/foo.md'."
+        assert raw_json not in formatted
+
+    def test_klib_page_empty_raw_is_no_content(self):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        formatted = _format_klib_mcp_result(
+            "read_page",
+            {"path": "energy/foo.md"},
+            json.dumps({"raw": "", "status": "arbitrary"}),
+        )
+
+        assert formatted == "klib: 'energy/foo.md' has no content."
+
+    def test_klib_page_status_does_not_gate_content(self):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        with patch("tools.mcp_tool._drive_link_for_path", return_value=None):
+            formatted = _format_klib_mcp_result(
+                "read_page",
+                {"path": "energy/foo.md"},
+                json.dumps({"raw": "Page body", "status": None}),
+            )
+
+        assert formatted == "klib: energy/foo.md\nPage body"
+
+    def test_klib_page_appends_drive_link(self):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        with patch(
+            "tools.mcp_tool._drive_link_for_path",
+            return_value="https://drive.example/foo",
+        ):
+            formatted = _format_klib_mcp_result(
+                "read_page",
+                {"path": "energy/foo.md"},
+                json.dumps({"raw": "Page body", "status": None}),
+            )
+
+        assert "Page body" in formatted
+        assert "🔗 https://drive.example/foo" in formatted
+
+    @pytest.mark.parametrize(
+        "run_config",
+        [
+            {"return_value": SimpleNamespace(returncode=1, stdout="")},
+            {"side_effect": subprocess.TimeoutExpired(["rclone"], 3)},
+            {"side_effect": FileNotFoundError("rclone")},
+        ],
+    )
+    def test_klib_drive_link_failures_do_not_block_page_reply(self, run_config):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        with patch("tools.mcp_tool.subprocess.run", **run_config):
+            formatted = _format_klib_mcp_result(
+                "read_page",
+                {"path": "energy/foo.md"},
+                json.dumps({"raw": "Page body", "status": None}),
+            )
+
+        assert formatted == "klib: energy/foo.md\nPage body"
+
+    @pytest.mark.parametrize("tool_name", ["search", "semantic_search"])
+    def test_klib_drive_links_are_capped_at_five_displayed_results(self, tool_name):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        results = [
+            {
+                "file": (
+                    f"wiki/file-{index}.md"
+                    if tool_name == "search"
+                    else f"file-{index}.md"
+                ),
+                "text": f"Snippet {index}",
+            }
+            for index in range(7)
+        ]
+        with patch(
+            "tools.mcp_tool._drive_link_for_path",
+            side_effect=lambda path: f"https://drive.example/{path}",
+        ) as drive_link:
+            formatted = _format_klib_mcp_result(
+                tool_name, {"query": "carbon"}, json.dumps(results)
+            )
+
+        assert drive_link.call_count == 5
+        result_lines = tuple(f"{n}." for n in range(1, 8))
+        assert sum(line.startswith(result_lines) for line in formatted.splitlines()) == 5
+        assert "6. **" not in formatted
+        assert "7. **" not in formatted
+
+    def test_klib_search_and_semantic_drive_paths_are_normalized(self):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        run_mock = MagicMock(
+            return_value=SimpleNamespace(returncode=0, stdout="https://drive.example/link\n")
+        )
+        with patch("tools.mcp_tool.subprocess.run", run_mock):
+            _format_klib_mcp_result(
+                "search",
+                {"query": "carbon"},
+                json.dumps([{"file": "wiki/energy/foo.md", "text": "x"}]),
+            )
+            _format_klib_mcp_result(
+                "semantic_search",
+                {"query": "carbon"},
+                json.dumps([{"file": "energy/foo.md", "snippet": "x"}]),
+            )
+
+        assert run_mock.call_count == 2
+        assert [call.args[0][2] for call in run_mock.call_args_list] == [
+            "gdrive:klib-wiki/energy/foo.md",
+            "gdrive:klib-wiki/energy/foo.md",
+        ]
+
+    def test_klib_mcp_search_line_format_regression(self):
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        results = [{"file": "wiki/energy.md", "text": "Carbon capture."}]
+        with patch("tools.mcp_tool._drive_link_for_path", return_value=None):
+            formatted = _format_klib_mcp_result(
+                "search", {"query": "carbon"}, json.dumps(results)
+            )
+
+        assert formatted == (
+            "klib results for 'carbon':\n"
+            "1. **wiki/energy.md** — Carbon capture."
+        )
+
+    def test_klib_drive_link_helper_stays_out_of_slash_plugin(self):
+        from pathlib import Path
+
+        plugin_source = Path(__file__).parents[2] / "plugins" / "klib" / "__init__.py"
+        assert "_drive_link_for_path" not in plugin_source.read_text()
 
     def test_mcp_error_result(self):
         from tools.mcp_tool import _make_tool_handler, _servers

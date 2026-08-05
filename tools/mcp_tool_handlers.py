@@ -534,21 +534,9 @@ def _content_dual_emits_structured(result, structured) -> bool:
 
 
 def _format_klib_mcp_result(tool_name: str, args: dict, raw_json: str) -> str:
-    """Best-effort formatting for direct klib MCP search calls."""
-    try:
-        results = json.loads(raw_json)
-    except Exception:
-        return raw_json
-    if not isinstance(results, list) or not all(isinstance(item, dict) for item in results):
-        return raw_json
-    try:
-        query = args.get("query", "") if isinstance(args, dict) else ""
-        if not isinstance(query, str):
-            query = ""
-        from plugins.klib import _format_result_lines
-        return "\n".join(_format_result_lines(query, results, start_index=1))
-    except Exception:
-        return raw_json
+    """Compatibility wrapper for the public split MCP formatter."""
+    from tools import mcp_tool as _public
+    return _public._format_klib_mcp_result(tool_name, args, raw_json)
 
 
 def _render_call_tool_result(
@@ -574,7 +562,7 @@ def _render_call_tool_result(
     text_result, usable_parts, cached_images = _render_content_blocks(result, server_name)
     if image_paths is not None:
         image_paths.extend(cached_images)
-    if server_name == "klib" and tool_name in ("search", "semantic_search"):
+    if server_name == "klib" and tool_name in ("search", "semantic_search", "read_page", "list_index"):
         text_result = _format_klib_mcp_result(tool_name, args or {}, text_result)
     structured = _capped_structured_content(result)
     meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))

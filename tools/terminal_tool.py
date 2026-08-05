@@ -1134,6 +1134,20 @@ def terminal_tool(
     children (kept in a separate env cache from the configured backend).
     """
     try:
+        # JSON Schema validation is not guaranteed for every caller. Reject malformed timeout
+        # values instead of coercing ambiguous inputs such as "60.5".
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int)):
+            logger.warning("Rejected invalid terminal timeout value: %s", type(timeout).__name__)
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": (
+                    "Invalid timeout: expected integer or null, got "
+                    f"{type(timeout).__name__}"
+                ),
+                "status": "error",
+            }, ensure_ascii=False)
+
         plan = _plan_execution(
             command, task_id=task_id, timeout=timeout, background=background, _host_local=_host_local,
         )

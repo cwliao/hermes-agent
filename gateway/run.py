@@ -40,6 +40,7 @@ from agent.interrupt_compat import request_hard_interrupt
 from agent.turn_context import compression_made_progress
 from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
+from plugins.klib import _truncate_display
 
 # Per-session AIAgent cache bounds (agents are heavy); see _enforce_agent_cache_cap/_session_expiry_watcher.
 _AGENT_CACHE_MAX_SIZE = 128
@@ -2470,11 +2471,48 @@ def _build_media_placeholder(event) -> str:
 _DOCUMENT_MTYPE_TO_SKILL = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "powerpoint",
 }
+_PPTX_MTYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_PPTX_INLINE_TEXT_MAX_LENGTH = 20_000
+
+
+async def _try_extract_pptx_text(path: str, timeout: int = 20) -> str | None:
+    """Best-effort server-side extraction of a PPTX's text via markitdown."""
+    proc = None
+    filename = os.path.basename(path)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "markitdown",
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode != 0:
+            raise RuntimeError("markitdown returned a non-zero exit code")
+        extracted = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
+        if not extracted:
+            raise RuntimeError("markitdown returned empty output")
+        return extracted
+    except asyncio.TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    logger.warning("PPTX text extraction failed for %s", filename)
+    return None
 
 
 def _build_document_context_note(
     display_name: str, agent_path: str, mtype: str, *,
-    content_inlined: bool = True, ingested: bool = False,
+    extracted_text: str | None = None,
+    content_inlined: bool = True,
+    ingested: bool = False,
 ) -> str:
     """Context note prepended to a user turn when they attach a document.
     ``content_inlined=False`` = cached without content, so tell the agent to read it. Binary docs must
@@ -2496,6 +2534,15 @@ def _build_document_context_note(
         )
     skill = _DOCUMENT_MTYPE_TO_SKILL.get(mtype)
     if skill:
+        if extracted_text:
+            extracted = _truncate_display(extracted_text, _PPTX_INLINE_TEXT_MAX_LENGTH)
+            if extracted:
+                return (
+                    f"[The user sent a document: '{display_name}'. "
+                    f"Its content has been included below:\n\n"
+                    f"{extracted}\n\n"
+                    f"The file is also saved at: {agent_path}]"
+                )
         return (
             f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
             f"Its text is not inlined here. Use the {skill} skill to extract its text "

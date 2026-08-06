@@ -22,6 +22,13 @@ def _normalize_token(value: str, *, max_len: int = 32) -> str:
     return text[:max_len] if text else "event"
 
 
+def build_telegram_document_stable_key(
+    chat_id: object, message_id: object, file_unique_id: object
+) -> str:
+    """Build a retry-stable key scoped to the originating Telegram chat."""
+    return f"{chat_id}-{message_id}-{file_unique_id}"
+
+
 def build_idempotency_key(
     source: str,
     action: str,

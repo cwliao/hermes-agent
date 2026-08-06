@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Set, Any
 
 from plugins.klib import _handle_klib
 from plugins.platforms.telegram.docubot_mcp_gateway import (
+    build_telegram_document_stable_key,
     ingest_document_to_docubot,
 )
 
@@ -9280,7 +9281,11 @@ class TelegramAdapter(BasePlatformAdapter):
                                 "mime_type": doc_mime or "",
                             },
                             local_path=cached_path,
-                            stable_key=getattr(doc, "file_unique_id", None),
+                            stable_key=build_telegram_document_stable_key(
+                                getattr(getattr(msg, "chat", None), "id", ""),
+                                getattr(msg, "message_id", ""),
+                                getattr(doc, "file_unique_id", ""),
+                            ),
                             multipart=True,
                         )
                         # Preserve the per-document result for gateway context

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_state import SessionDB, _backup_db_file
 
 
 @pytest.fixture()
@@ -73,11 +73,10 @@ class TestTryWalCheckpointPassive:
         db._try_wal_checkpoint()
 
 
-class TestCloseUsesTruncate:
-    """close() should still use TRUNCATE to shrink WAL on shutdown."""
+class TestCloseCheckpoint:
+    """close() folds safely and only resets a small WAL."""
 
-    def test_close_uses_truncate_mode(self, db):
-        """TRUNCATE at close is safe — no concurrent writers during shutdown."""
+    def _mock_connection(self, db):
         real_conn = db._conn
         execute_calls = []
 
@@ -88,16 +87,29 @@ class TestCloseUsesTruncate:
         mock_conn = MagicMock()
         mock_conn.execute.side_effect = tracking_execute
         db._conn = mock_conn
+        return execute_calls
 
-        db.close()
+    def test_close_uses_passive_and_small_truncate(self, db):
+        execute_calls = self._mock_connection(db)
 
+        with patch.object(db, "_wal_reset_is_cheap", return_value=True):
+            db.close()
+
+        passive_calls = [c for c in execute_calls if "wal_checkpoint(PASSIVE)" in c]
         truncate_calls = [c for c in execute_calls if "wal_checkpoint(TRUNCATE)" in c]
-        assert len(truncate_calls) == 1, (
-            f"Expected 1 TRUNCATE checkpoint at close, got {len(truncate_calls)}"
-        )
+        assert len(passive_calls) == 1
+        assert len(truncate_calls) == 1
 
-    def test_close_logs_debug_on_failure(self, db, caplog):
-        """Failed TRUNCATE at close logs debug (not warning — close is best-effort)."""
+    def test_close_skips_truncate_for_large_wal(self, db):
+        execute_calls = self._mock_connection(db)
+
+        with patch.object(db, "_wal_reset_is_cheap", return_value=False):
+            db.close()
+
+        assert any("wal_checkpoint(PASSIVE)" in c for c in execute_calls)
+        assert not any("wal_checkpoint(TRUNCATE)" in c for c in execute_calls)
+
+    def test_close_skips_truncate_when_passive_fails(self, db, caplog):
         mock_conn = MagicMock()
         mock_conn.execute.side_effect = sqlite3.OperationalError("database is locked")
         db._conn = mock_conn
@@ -105,9 +117,33 @@ class TestCloseUsesTruncate:
         with caplog.at_level(logging.DEBUG):
             db.close()
 
-        assert any("WAL checkpoint (TRUNCATE) at close failed" in r.message for r in caplog.records), (
-            f"Expected debug log about TRUNCATE failure at close, got: {caplog.text}"
+        assert any("WAL checkpoint (PASSIVE) at close failed" in r.message for r in caplog.records)
+        assert not any(
+            call.args and "wal_checkpoint(TRUNCATE)" in str(call.args[0])
+            for call in mock_conn.execute.call_args_list
         )
+
+    def test_wal_reset_cheap_uses_size_threshold(self, db):
+        wal_path = db.db_path.with_name(db.db_path.name + "-wal")
+        assert db._wal_reset_is_cheap() is True
+        wal_path.write_bytes(b"x" * (db._WAL_RESET_MAX_BYTES + 1))
+        assert db._wal_reset_is_cheap() is False
+
+
+def test_backup_sidecars_use_non_sqlite_names(tmp_path):
+    db_path = tmp_path / "state.db"
+    db_path.write_bytes(b"db")
+    (tmp_path / "state.db-wal").write_bytes(b"wal")
+    (tmp_path / "state.db-shm").write_bytes(b"shm")
+
+    backup_path = _backup_db_file(db_path)
+
+    assert backup_path is not None
+    assert backup_path.read_bytes() == b"db"
+    assert backup_path.with_name(backup_path.name + ".wal-copy").read_bytes() == b"wal"
+    assert backup_path.with_name(backup_path.name + ".shm-copy").read_bytes() == b"shm"
+    assert not backup_path.with_name(backup_path.name + "-wal").exists()
+    assert not backup_path.with_name(backup_path.name + "-shm").exists()
 
 
 class TestCheckpointFrequency:

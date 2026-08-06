@@ -1013,7 +1013,9 @@ def _backup_db_file(db_path: Path) -> Optional[Path]:
 
     Raw file copy on purpose: the DB won't open cleanly, so we preserve the
     bytes exactly for forensics / manual restore. WAL and SHM sidecars are
-    copied too when present. Returns the backup path, or None on failure.
+    copied too when present, using names that SQLite will not auto-attach if
+    the backup is opened for inspection. Returns the backup path, or None on
+    failure.
 
     Refuses when a connection to this database is still live in the process:
     reading the file would ``close()`` a descriptor for it and cancel that
@@ -1042,10 +1044,13 @@ def _backup_db_file(db_path: Path) -> Optional[Path]:
     backup_path = db_path.with_name(f"{db_path.name}.malformed-backup-{stamp}")
     try:
         shutil.copy2(db_path, backup_path)
-        for suffix in ("-wal", "-shm"):
+        for suffix, copy_suffix in (("-wal", ".wal-copy"), ("-shm", ".shm-copy")):
             sidecar = db_path.with_name(db_path.name + suffix)
             if sidecar.exists():
-                shutil.copy2(sidecar, backup_path.with_name(backup_path.name + suffix))
+                shutil.copy2(
+                    sidecar,
+                    backup_path.with_name(backup_path.name + copy_suffix),
+                )
         return backup_path
     except Exception as exc:  # pragma: no cover - best effort
         logger.warning("Could not back up malformed DB %s: %s", db_path, exc)
@@ -2692,9 +2697,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         cannot corrupt B-tree pages under I/O pressure.
 
         PASSIVE does not truncate the WAL file — it stays at its
-        high-water mark.  WAL truncation happens in :meth:`close`
-        (TRUNCATE) and pre-VACUUM checkpoints, which run infrequently
-        under controlled conditions.
+        high-water mark. Close uses the same safe PASSIVE fold and only
+        truncates a small WAL; pre-VACUUM checkpoints remain explicitly
+        controlled maintenance operations.
 
         Previous TRUNCATE strategy caused B-tree corruption on large
         databases (65K+ pages) due to the exclusive-lock I/O pressure
@@ -2713,13 +2718,27 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         except Exception as exc:
             logger.warning("WAL checkpoint (PASSIVE) failed: %s", exc)
 
+    _WAL_RESET_MAX_BYTES = 4 * 1024 * 1024
+
+    def _wal_reset_is_cheap(self) -> bool:
+        """Return whether resetting the WAL is a small metadata operation."""
+        wal_path = self.db_path.with_name(self.db_path.name + "-wal")
+        try:
+            return (
+                not wal_path.exists()
+                or wal_path.stat().st_size <= self._WAL_RESET_MAX_BYTES
+            )
+        except OSError:
+            return False
+
     def close(self):
         """Close the database connection.
 
         Drains queued token deltas first (the background writer needs the
-        connection). Writable connections then attempt a TRUNCATE WAL
-        checkpoint so exiting writer processes help shrink the WAL file.
-        Read-only connections never request a checkpoint.
+        connection). Writable connections first use a PASSIVE WAL checkpoint.
+        A TRUNCATE reset is attempted only when the remaining WAL is small
+        enough to be a cheap metadata operation. Read-only connections never
+        request a checkpoint.
         """
         self._stop_token_writer()
         # The atexit hook holds a strong reference to this instance (bound
@@ -2748,13 +2767,23 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         with self._lock:
             if self._conn:
                 if not self.read_only:
+                    passive_succeeded = False
                     try:
-                        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                        passive_succeeded = True
                     except Exception as exc:
                         logger.debug(
-                            "WAL checkpoint (TRUNCATE) at close failed: %s",
+                            "WAL checkpoint (PASSIVE) at close failed: %s",
                             exc,
                         )
+                    if passive_succeeded and self._wal_reset_is_cheap():
+                        try:
+                            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        except Exception as exc:
+                            logger.debug(
+                                "WAL checkpoint (TRUNCATE) at close failed: %s",
+                                exc,
+                            )
                 self._conn.close()
                 self._conn = None
 

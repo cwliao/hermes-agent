@@ -8310,7 +8310,20 @@ class TelegramAdapter(BasePlatformAdapter):
                                 "mime_type": doc_mime or "",
                             },
                             local_path=cached_path,
-                            stable_key=getattr(doc, "file_unique_id", None),
+                            # T0123: file_unique_id alone is not a safe dedup key --
+                            # a real production incident showed a genuinely new
+                            # upload silently matching an unrelated earlier job's
+                            # idempotency key, serving the wrong document's content
+                            # with zero indication anything was wrong. message_id is
+                            # unique per Telegram message within a chat, so prefixing
+                            # it here means only retries of the *same* message (e.g.
+                            # a timed-out ingest call retried for the same upload)
+                            # still dedupe -- two distinct upload events can never
+                            # collide even if file_unique_id repeats. message_id goes
+                            # first because build_idempotency_key() truncates the
+                            # normalized stable_key to 32 chars; message_id is short
+                            # and must never be the part that gets truncated away.
+                            stable_key=f"{getattr(msg, 'message_id', '')}-{getattr(doc, 'file_unique_id', '')}",
                             multipart=True,
                         )
                         # Preserve the per-document result for gateway context

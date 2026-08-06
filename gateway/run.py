@@ -21137,6 +21137,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if target in skipped or target in delivered:
                 continue
 
+            adapter = transport.adapter
             wait_until_ready = getattr(type(adapter), "wait_until_send_path_ready", None)
             if callable(wait_until_ready):
                 ready = await adapter.wait_until_send_path_ready(timeout=60.0)

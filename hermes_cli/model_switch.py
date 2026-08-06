@@ -1264,6 +1264,16 @@ def switch_model(
     new_model = raw_input.strip()
     target_provider = current_provider
     resolved_moa_preset = False
+    if new_model:
+        forbidden_error = _forbidden_model_message(new_model)
+        if forbidden_error:
+            return ModelSwitchResult(
+                success=False,
+                new_model=new_model,
+                target_provider=target_provider,
+                is_global=is_global,
+                error_message=forbidden_error,
+            )
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -1687,6 +1697,16 @@ def switch_model(
     )
     new_model = normalize_model_for_provider(new_model, target_provider)
 
+    forbidden_error = _forbidden_model_message(new_model)
+    if forbidden_error:
+        return ModelSwitchResult(
+            success=False,
+            new_model=new_model,
+            target_provider=target_provider,
+            provider_label=provider_label,
+            is_global=is_global,
+            error_message=forbidden_error,
+        )
     # --- Validate ---
     try:
         validation = validate_requested_model(

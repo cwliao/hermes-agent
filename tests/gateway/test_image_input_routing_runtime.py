@@ -200,9 +200,7 @@ async def test_telegram_image_ocr_translate_preempts_native_routing(monkeypatch)
         assert user_text == "翻譯這張圖"
         assert image_paths == ["/tmp/cashback.png"]
         assert ocr_translate is True
-        return "[ocr translated]
-
-翻譯這張圖"
+        return "[ocr translated]\n\n翻譯這張圖"
 
     monkeypatch.setattr(runner, "_enrich_message_with_vision", fake_enrich)
 
@@ -213,9 +211,7 @@ async def test_telegram_image_ocr_translate_preempts_native_routing(monkeypatch)
     )
 
     session_key = runner._session_key_for_source(source)
-    assert result == "[ocr translated]
-
-翻譯這張圖"
+    assert result == "[ocr translated]\n\n翻譯這張圖"
     assert runner._pending_native_image_paths_by_session.get(session_key) is None
 
 @pytest.mark.asyncio

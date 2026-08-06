@@ -378,7 +378,10 @@ def _auto_preprocess_decision(img_rgb):
     arr = np.array(block_stds, dtype=np.float64)
     contrast_cv = arr.std() / (arr.mean() + 1e-6)
 
-    binarize = extremal_ratio < 0.95 or contrast_cv > 0.4
+    # A near-extremal image is already effectively binary.  Treat that
+    # signal as decisive: a small isolated dark patch can inflate local
+    # contrast CV without making thresholding useful.
+    binarize = extremal_ratio < 0.95
     # Returns (deskew, binarize, denoise, contrast_cv, extremal_ratio)
     # deskew always on; denoise matches binarize
     return True, binarize, binarize, round(contrast_cv, 4), round(extremal_ratio, 4)
@@ -617,6 +620,14 @@ def detect_columns_image(img_rgb: np.ndarray) -> list[tuple[int, int]]:
                 in_gap = False
     if in_gap:
         valleys.append((start, w - margin))
+
+    # Valleys that touch the effective page boundary are outer whitespace,
+    # not separators between text columns.  Ignore them before gap merging.
+    valleys = [
+        (start, end)
+        for start, end in valleys
+        if start > margin and end < w - margin
+    ]
 
     if _DEBUG:
         print(f"[detect_columns] sigma={sigma:.1f}, ksize={ksize}, font_h={font_h},"

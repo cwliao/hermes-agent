@@ -21755,11 +21755,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from tools.vision_tools import vision_analyze_tool
         from agent.memory_manager import sanitize_context
 
-        analysis_prompt = (
-            "Describe everything visible in this image in thorough detail. "
-            "Include any text, code, data, objects, people, layout, colors, "
-            "and any other notable visual information."
-        )
+        analysis_prompt = self._image_analysis_prompt(ocr_translate=ocr_translate)
 
         enriched_parts = []
         for path in image_paths:

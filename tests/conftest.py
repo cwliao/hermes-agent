@@ -440,6 +440,21 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_hermes_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_hermes_home))
 
+    # 3a. Tear down any logging FileHandler already bound to the REAL
+    #     ~/.hermes/logs/* (e.g. opened during pytest collection, when
+    #     top-level "import cli" in ~70 test modules triggers
+    #     setup_logging() before HERMES_HOME is patched above).
+    #     Without this, handlers are deduped by resolved path, so the
+    #     next setup_logging() call adds a SECOND handler for the tmp
+    #     path alongside the never-removed real one, and the shared
+    #     QueueListener writes every subsequent record to both files —
+    #     leaking mock-test log lines into the live production log.
+    try:
+        from hermes_logging import _reset_queued_handlers
+        _reset_queued_handlers()
+    except Exception:
+        pass
+
     # 3b. hermes_state computes ``DEFAULT_DB_PATH = get_hermes_home() / "state.db"``
     #     at import time. When the module is first imported at collection (any
     #     test file with a top-level ``from hermes_state import ...``) that

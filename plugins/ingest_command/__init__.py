@@ -8,14 +8,17 @@ unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
+import time
 from typing import Any
 
 from gateway.session_context import get_session_env
 from plugins.platforms.telegram.docubot_mcp_gateway import (
     build_telegram_document_stable_key,
+    get_docubot_job_status,
     ingest_document_to_docubot,
 )
 
@@ -34,6 +37,13 @@ _USAGE_REPLY = (
 
 _FAILURE_STATUSES = {"error", "failed", "failure", "skipped", "rejected"}
 
+# In-memory polling parameters for completion notice: 2s interval, 45s total timeout
+POLL_INTERVAL_SEC = 2.0
+POLL_TIMEOUT_SEC = 45.0
+
+# Module-level PluginContext handle captured during register(ctx)
+_ctx: Any | None = None
+
 
 def _ingest_result_reply(result: Any) -> str:
     """Turn the existing ingestion result into a useful user-facing reply."""
@@ -50,6 +60,95 @@ def _ingest_result_reply(result: Any) -> str:
     # The existing helper returns a dict, but keep an acknowledgement for a
     # compatible/mock implementation that returns no structured status.
     return "/ingest received and queued for DocuBot ingestion."
+
+
+async def _poll_ingest_completion(chat_id: str, message_id: str, job_id: str) -> None:
+    """Background task polling DocuBot job completion and sending proactive notice.
+
+    Note: This is an in-memory task. If the gateway process restarts during the
+    45-second polling window, this task will be lost and the second completion notice
+    will not be delivered. This is an intentional design choice (no persistent queue).
+    """
+    start_time = time.monotonic()
+
+    while True:
+        elapsed = time.monotonic() - start_time
+        if elapsed >= POLL_TIMEOUT_SEC:
+            timeout_msg = (
+                f"/ingest timed out: DocuBot did not finish within {int(POLL_TIMEOUT_SEC)} seconds. "
+                f"You can track this request using Job ID: {job_id}."
+            )
+            await _send_completion_notice(chat_id, message_id, timeout_msg)
+            return
+
+        status_res = await asyncio.to_thread(get_docubot_job_status, job_id)
+
+        if isinstance(status_res, dict):
+            raw_status = str(status_res.get("status", "")).strip().lower()
+
+            if raw_status in {
+                "completed",
+                "complete",
+                "passed",
+                "pass",
+                "done",
+                "success",
+                "confirmed",
+                "auto_confirmed",
+                "auto-confirmed",
+            }:
+                success_msg = (
+                    f"/ingest completed! Content has been successfully indexed into "
+                    f"the knowledge base. (Job ID: {job_id})"
+                )
+                await _send_completion_notice(chat_id, message_id, success_msg)
+                return
+
+            if raw_status in {"failed", "error", "rejected", "skipped"} or (
+                status_res.get("error")
+                and raw_status not in {"pending", "processing", "accepted", "queued", "running", ""}
+            ):
+                reason = (
+                    status_res.get("error")
+                    or status_res.get("reason")
+                    or raw_status
+                    or "unknown error"
+                )
+                failure_msg = f"/ingest failed during processing: {reason}. (Job ID: {job_id})"
+                await _send_completion_notice(chat_id, message_id, failure_msg)
+                return
+
+        await asyncio.sleep(POLL_INTERVAL_SEC)
+
+
+async def _send_completion_notice(chat_id: str, message_id: str, text: str) -> bool:
+    """Deliver the second notice via PluginContext or platform adapter fallback."""
+    if _ctx is not None and hasattr(_ctx, "send_to_chat"):
+        try:
+            sent = await _ctx.send_to_chat(
+                chat_id=chat_id,
+                reply_to=message_id,
+                text=text,
+                platform="telegram",
+            )
+            if sent:
+                return True
+        except Exception as exc:
+            logger.warning("/ingest second notice via ctx.send_to_chat failed: %s", exc)
+
+    try:
+        from gateway.run import _gateway_runner_ref
+        runner = _gateway_runner_ref()
+        if runner and hasattr(runner, "adapters"):
+            for p, adapter in runner.adapters.items():
+                if getattr(p, "value", str(p)).lower() == "telegram":
+                    res = await adapter.send(chat_id, text, reply_to=message_id)
+                    return bool(getattr(res, "ok", res))
+    except Exception as exc:
+        logger.warning("/ingest fallback notice failed: %s", exc)
+
+    logger.warning("Could not deliver /ingest completion notice to chat %s", chat_id)
+    return False
 
 
 async def _handle_ingest(raw_args: str) -> str:
@@ -77,6 +176,11 @@ async def _handle_ingest(raw_args: str) -> str:
                 "identifier is unavailable. Please try again from Telegram."
             )
 
+        # Capture variables in closure so background polling task does not rely
+        # on session contextvars after handler returns.
+        captured_chat_id = chat_id
+        captured_message_id = message_id
+
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -97,16 +201,25 @@ async def _handle_ingest(raw_args: str) -> str:
                 "mime_type": "text/markdown",
             },
             local_path=temp_path,
-            # Reuse the same chat-scoped stable-key builder the file-upload
-            # path uses (see adapter.py's _ingest_cached_doc) so retries of
-            # the same pasted text within the same chat/message share one
-            # idempotency key. "inline-text" stands in for file_unique_id,
-            # which doesn't exist for pasted content.
             stable_key=build_telegram_document_stable_key(
                 chat_id, message_id, "inline-text"
             ),
             multipart=True,
         )
+
+        job_id = None
+        is_error = False
+        if isinstance(result, dict):
+            job_id = result.get("job_id") or result.get("id") or result.get("job")
+            status = str(result.get("status", "")).strip().lower()
+            if result.get("error") or result.get("ok") is False or status in _FAILURE_STATUSES:
+                is_error = True
+
+        if job_id and not is_error:
+            asyncio.create_task(
+                _poll_ingest_completion(captured_chat_id, captured_message_id, str(job_id))
+            )
+
         return _ingest_result_reply(result)
     except Exception as exc:
         logger.warning("/ingest command failed: %s", exc, exc_info=True)
@@ -122,6 +235,8 @@ async def _handle_ingest(raw_args: str) -> str:
 
 
 def register(ctx) -> None:
+    global _ctx
+    _ctx = ctx
     ctx.register_command(
         "ingest",
         handler=_handle_ingest,

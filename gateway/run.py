@@ -15433,9 +15433,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
                 if plugin_handler:
                     user_args = event.get_command_args().strip()
-                    result = plugin_handler(user_args)
-                    if asyncio.iscoroutine(result):
-                        result = await result
+                    # Plugin commands dispatch (and return) before this
+                    # handler ever reaches _set_session_env() further down,
+                    # so HERMES_SESSION_CHAT_ID/MESSAGE_ID would otherwise
+                    # stay _UNSET for the whole call. Bind the identity
+                    # fields already available on source/event so plugin
+                    # handlers that call get_session_env() (e.g. idempotency
+                    # keys scoped to chat+message) see real values. See T0127.
+                    from gateway.session_context import (
+                        set_session_vars,
+                        clear_session_vars,
+                    )
+                    _plugin_cmd_tokens = set_session_vars(
+                        platform=source.platform.value if source and source.platform else "",
+                        chat_id=str(source.chat_id) if source and source.chat_id else "",
+                        user_id=str(source.user_id) if source and source.user_id else "",
+                        message_id=(
+                            str(source.message_id)
+                            if source and source.message_id
+                            else (str(event.message_id) if event.message_id else "")
+                        ),
+                    )
+                    try:
+                        result = plugin_handler(user_args)
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                    finally:
+                        clear_session_vars(_plugin_cmd_tokens)
 
                     if (
                         isinstance(result, tuple)

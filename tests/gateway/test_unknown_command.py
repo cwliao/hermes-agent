@@ -295,3 +295,35 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     # First emit_collect fires on the original command; after rewrite the
     # dispatcher does NOT re-fire for the new command (one decision per turn).
     assert call_log == ["command:status"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_command_sees_bound_session_chat_and_message_id(monkeypatch):
+    """Plugin slash commands must see real chat/message identity (T0127).
+
+    Regression test: plugin commands dispatch and return before
+    _handle_message ever reaches _set_session_env(), so
+    HERMES_SESSION_CHAT_ID/MESSAGE_ID previously stayed unbound
+    (get_session_env returned "") for the entire duration of any plugin
+    command's handler, breaking commands that need to scope an idempotency
+    key or similar by real chat/message identity.
+    """
+    from gateway.session_context import get_session_env
+
+    observed = {}
+
+    async def plugin_handler(_args):
+        observed["chat_id"] = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        observed["message_id"] = get_session_env("HERMES_SESSION_MESSAGE_ID", "")
+        return "ok"
+
+    _patch_plugin_command(monkeypatch, "ctxprobe", plugin_handler)
+    runner = _make_runner()
+
+    result = await runner._handle_message(_make_event("/ctxprobe"))
+
+    assert result == "ok"
+    assert observed == {"chat_id": "c1", "message_id": "m1"}
+    # Cleared afterward so it doesn't leak into whatever runs next in this task.
+    assert get_session_env("HERMES_SESSION_CHAT_ID", "") == ""
+    assert get_session_env("HERMES_SESSION_MESSAGE_ID", "") == ""

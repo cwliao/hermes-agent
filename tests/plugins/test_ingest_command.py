@@ -231,7 +231,15 @@ class TestIngestCommand:
 
         monkeypatch.setattr(module, "ingest_document_to_docubot", lambda **kw: {"job_id": "job-fail-1", "status": "accepted"})
         monkeypatch.setattr(module, "POLL_INTERVAL_SEC", 0.01)
-        monkeypatch.setattr(module, "get_docubot_job_status", lambda job_id: {"status": "failed", "error": "OCR quality check failed"})
+        monkeypatch.setattr(
+            module,
+            "get_docubot_job_status",
+            lambda job_id: {
+                "status": "failed",
+                "error_code": "processing_failed",
+                "error_message": "OCR quality check failed",
+            },
+        )
 
         async def run_test():
             first_reply = await module._handle_ingest("Content for fail test")

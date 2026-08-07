@@ -109,7 +109,8 @@ async def _poll_ingest_completion(chat_id: str, message_id: str, job_id: str) ->
                 and raw_status not in {"pending", "processing", "accepted", "queued", "running", ""}
             ):
                 reason = (
-                    status_res.get("error")
+                    status_res.get("error_message")
+                    or status_res.get("error")
                     or status_res.get("reason")
                     or raw_status
                     or "unknown error"

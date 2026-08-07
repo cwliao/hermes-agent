@@ -200,6 +200,88 @@ class MemoryStore:
             ),
         }
 
+    def _consolidation_failure_over_budget(self, target: str, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Like _consolidation_failure, but for the specific case where the
+        failure is a char-limit overflow (not a no-match/multiple-match/
+        malformed-operations failure -- those stay on the plain give-up
+        behavior; conflating them would mask a different bug).
+
+        Once the per-turn retry cap is exceeded AND the target is still over
+        its char limit, deterministically trim the oldest entries instead of
+        leaving the file stuck over budget forever -- the plain give-up
+        response only defers to a later turn, but if the model can never
+        produce small-enough replacement content, every later turn hits the
+        same wall and the file never recovers on its own.
+
+        Scoped to target == "user" for this first pass (issue: USER.md
+        observed stuck this way in production; MEMORY.md has not exhibited
+        this failure and stays on the original behavior for now).
+        """
+        self._consolidation_failures += 1
+        if self._consolidation_failures <= self._MAX_CONSOLIDATION_FAILURES_PER_TURN:
+            return response
+        if target == "user" and self._char_count(target) > self._char_limit(target):
+            return self._auto_trim_over_budget(target)
+        return {
+            "success": False,
+            "done": True,
+            "error": (
+                f"Memory consolidation failed {self._consolidation_failures} times "
+                "this turn. Stop retrying memory calls — leave memory unchanged for "
+                "now and continue with your reply to the user. The fact can be saved "
+                "in a later turn."
+            ),
+        }
+
+    def _auto_trim_over_budget(self, target: str) -> Dict[str, Any]:
+        """Drop the oldest entries (by original position) from *target*
+        until back under its char limit -- no model involvement, so a file
+        that's stuck over budget self-heals deterministically instead of
+        staying stuck forever. Dropped entries are archived to a sibling
+        <name>.trimmed file, never deleted outright (mirrors the .bak
+        drift-snapshot precedent elsewhere in this module -- silent,
+        unrecoverable loss of a user's stored memories is not acceptable).
+
+        Must be called from within a block that already holds _file_lock
+        for *target* -- does not acquire the lock itself.
+        """
+        entries = self._entries_for(target)
+        limit = self._char_limit(target)
+        dropped: List[str] = []
+        while entries and len(ENTRY_DELIMITER.join(entries)) > limit:
+            dropped.append(entries.pop(0))
+        self._set_entries(target, entries)
+
+        archive_path = self._path_for(target).parent / f"{self._path_for(target).name}.trimmed"
+        if dropped:
+            try:
+                with open(archive_path, "a", encoding="utf-8") as f:
+                    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    for entry in dropped:
+                        f.write(f"[{ts}] {entry}\n{ENTRY_DELIMITER}\n")
+            except OSError:
+                logger.warning(
+                    "Failed to archive %d auto-trimmed %s entries to %s",
+                    len(dropped), target, archive_path,
+                )
+            logger.warning(
+                "Auto-trimmed %d oldest %s entries to fit the %d-char limit "
+                "after repeated consolidation failures; archived to %s",
+                len(dropped), target, limit, archive_path,
+            )
+
+        self.save_to_disk(target)
+        if dropped:
+            plural = "y" if len(dropped) == 1 else "ies"
+            message = (
+                f"Consolidation kept failing, so the {len(dropped)} oldest entr{plural} "
+                f"were automatically archived to {archive_path.name} to make room. "
+                "Memory is back under budget."
+            )
+        else:
+            message = "Already under budget."
+        return self._success_response(target, message)
+
     def load_from_disk(self):
         """Load entries from MEMORY.md and USER.md, capture system prompt snapshot.
 
@@ -427,7 +509,7 @@ class MemoryStore:
 
             if new_total > limit:
                 current = self._char_count(target)
-                return self._consolidation_failure({
+                return self._consolidation_failure_over_budget(target, {
                     "success": False,
                     "error": (
                         f"Memory at {current:,}/{limit:,} chars. "
@@ -499,7 +581,7 @@ class MemoryStore:
 
             if new_total > limit:
                 current = self._char_count(target)
-                return self._consolidation_failure({
+                return self._consolidation_failure_over_budget(target, {
                     "success": False,
                     "error": (
                         f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
@@ -651,7 +733,7 @@ class MemoryStore:
             new_total = len(ENTRY_DELIMITER.join(working)) if working else 0
             if new_total > limit:
                 current = self._char_count(target)
-                return self._consolidation_failure({
+                return self._consolidation_failure_over_budget(target, {
                     "success": False,
                     "error": (
                         f"After applying all {len(operations)} operations, memory would be at "

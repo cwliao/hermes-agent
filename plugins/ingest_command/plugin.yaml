@@ -1,0 +1,5 @@
+name: ingest_command
+version: 1.0.0
+description: "Ingest pasted Telegram text or Markdown into the DocuBot knowledge pipeline via /ingest."
+author: "cwliao"
+hooks: []

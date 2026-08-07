@@ -207,6 +207,62 @@ def ingest_document_to_docubot(
     return parsed
 
 
+def get_docubot_job_status(
+    job_id: str,
+    *,
+    timeout_sec: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Poll DocuBot ``GET /jobs/{job_id}`` status."""
+    clean_job_id = str(job_id or "").strip()
+    if not clean_job_id:
+        return {"status": "error", "error": "job_id is empty"}
+
+    url = _docubot_url()
+    if not url:
+        logger.warning("DOCUBOT_INGEST_URL is not configured; skipping job status check")
+        return {
+            "status": "error",
+            "error": "DOCUBOT_INGEST_URL not configured",
+        }
+
+    if url.endswith("/upload"):
+        job_url = f"{url[:-7]}/{clean_job_id}"
+    elif url.endswith("/jobs") or url.endswith("/jobs/"):
+        job_url = f"{url.rstrip('/')}/{clean_job_id}"
+    else:
+        job_url = f"{url.rsplit('/', 1)[0]}/{clean_job_id}"
+
+    headers = _docubot_headers()
+    timeout = timeout_sec or _docubot_timeout()
+
+    try:
+        with Session() as session:
+            response: Response = session.get(
+                job_url,
+                headers=headers,
+                timeout=timeout,
+            )
+            response_text = (response.text or "").strip()
+            try:
+                parsed = response.json() if response_text else {"ok": response.ok}
+            except Exception:
+                parsed = {"raw": response_text}
+                if isinstance(parsed.get("raw"), str):
+                    parsed["raw"] = parsed["raw"][:4096]
+
+            if not isinstance(parsed, dict):
+                parsed = {"result": parsed}
+
+            parsed["http_status"] = response.status_code
+            if not (200 <= response.status_code < 300):
+                parsed.setdefault("error", response_text or f"DocuBot status request failed ({response.status_code})")
+                parsed["status"] = "error"
+            return parsed
+    except Exception as exc:
+        logger.error("DocuBot job status request failed before HTTP response: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
 def _tool_arg_candidates(schema: Dict[str, Any], query: str) -> Dict[str, Any]:
     wrapped = schema.get("function", {}) if isinstance(schema, dict) else {}
     params = wrapped.get("parameters") if isinstance(wrapped, dict) else None

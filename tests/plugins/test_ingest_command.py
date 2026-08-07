@@ -159,3 +159,138 @@ class TestIngestCommand:
                 "args_hint": "<content>",
             },
         )
+
+    def test_background_polling_success_sends_second_notice(self, monkeypatch):
+        module = _load_plugin_init()
+        _set_session(monkeypatch, module, chat_id="chat-99", message_id="msg-99")
+
+        sent_notices = []
+
+        class MockCtx:
+            def register_command(self, name, **kwargs):
+                pass
+
+            async def send_to_chat(self, chat_id, reply_to, text, platform="telegram"):
+                sent_notices.append({
+                    "chat_id": chat_id,
+                    "reply_to": reply_to,
+                    "text": text,
+                    "platform": platform,
+                })
+                return True
+
+        ctx = MockCtx()
+        module.register(ctx)
+
+        monkeypatch.setattr(module, "ingest_document_to_docubot", lambda **kw: {"job_id": "job-success-1", "status": "accepted"})
+        monkeypatch.setattr(module, "POLL_INTERVAL_SEC", 0.01)
+
+        poll_calls = []
+
+        def fake_status(job_id):
+            poll_calls.append(job_id)
+            if len(poll_calls) == 1:
+                return {"status": "processing"}
+            return {"status": "completed"}
+
+        monkeypatch.setattr(module, "get_docubot_job_status", fake_status)
+
+        async def run_test():
+            first_reply = await module._handle_ingest("Content for success test")
+            assert "accepted" in first_reply
+            await asyncio.sleep(0.05)
+
+        _run(run_test())
+
+        assert poll_calls == ["job-success-1", "job-success-1"]
+        assert len(sent_notices) == 1
+        assert sent_notices[0]["chat_id"] == "chat-99"
+        assert sent_notices[0]["reply_to"] == "msg-99"
+        assert "completed" in sent_notices[0]["text"].lower()
+        assert "job-success-1" in sent_notices[0]["text"]
+
+    def test_background_polling_failure_sends_second_notice(self, monkeypatch):
+        module = _load_plugin_init()
+        _set_session(monkeypatch, module, chat_id="chat-88", message_id="msg-88")
+
+        sent_notices = []
+
+        class MockCtx:
+            def register_command(self, name, **kwargs):
+                pass
+
+            async def send_to_chat(self, chat_id, reply_to, text, platform="telegram"):
+                sent_notices.append({
+                    "chat_id": chat_id,
+                    "reply_to": reply_to,
+                    "text": text,
+                })
+                return True
+
+        module.register(MockCtx())
+
+        monkeypatch.setattr(module, "ingest_document_to_docubot", lambda **kw: {"job_id": "job-fail-1", "status": "accepted"})
+        monkeypatch.setattr(module, "POLL_INTERVAL_SEC", 0.01)
+        monkeypatch.setattr(
+            module,
+            "get_docubot_job_status",
+            lambda job_id: {
+                "status": "failed",
+                "error_code": "processing_failed",
+                "error_message": "OCR quality check failed",
+            },
+        )
+
+        async def run_test():
+            first_reply = await module._handle_ingest("Content for fail test")
+            assert "accepted" in first_reply
+            await asyncio.sleep(0.05)
+
+        _run(run_test())
+
+        assert len(sent_notices) == 1
+        assert sent_notices[0]["chat_id"] == "chat-88"
+        assert sent_notices[0]["reply_to"] == "msg-88"
+        assert "failed" in sent_notices[0]["text"].lower()
+        assert "OCR quality check failed" in sent_notices[0]["text"]
+        assert "job-fail-1" in sent_notices[0]["text"]
+
+    def test_background_polling_timeout_sends_second_notice(self, monkeypatch):
+        module = _load_plugin_init()
+        _set_session(monkeypatch, module, chat_id="chat-77", message_id="msg-77")
+
+        sent_notices = []
+
+        class MockCtx:
+            def register_command(self, name, **kwargs):
+                pass
+
+            async def send_to_chat(self, chat_id, reply_to, text, platform="telegram"):
+                sent_notices.append({
+                    "chat_id": chat_id,
+                    "reply_to": reply_to,
+                    "text": text,
+                })
+                return True
+
+        module.register(MockCtx())
+
+        monkeypatch.setattr(module, "ingest_document_to_docubot", lambda **kw: {"job_id": "job-timeout-1", "status": "accepted"})
+        monkeypatch.setattr(module, "POLL_INTERVAL_SEC", 0.001)
+        monkeypatch.setattr(module, "POLL_TIMEOUT_SEC", 0.01)
+        monkeypatch.setattr(module, "get_docubot_job_status", lambda job_id: {"status": "processing"})
+
+        async def run_test():
+            first_reply = await module._handle_ingest("Content for timeout test")
+            assert "accepted" in first_reply
+            await asyncio.sleep(0.05)
+
+        _run(run_test())
+
+        assert len(sent_notices) == 1
+        assert sent_notices[0]["chat_id"] == "chat-77"
+        assert sent_notices[0]["reply_to"] == "msg-77"
+        assert "timed out" in sent_notices[0]["text"].lower()
+        assert "job-timeout-1" in sent_notices[0]["text"]
+
+

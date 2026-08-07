@@ -534,6 +534,100 @@ class PluginContext:
             cli._pending_input.put(msg)
         return True
 
+    async def send_to_chat(
+        self,
+        chat_id: str,
+        arg2: str | None = None,
+        arg3: str | None = None,
+        *,
+        message_id: str | None = None,
+        reply_to: str | None = None,
+        text: str | None = None,
+        content: str | None = None,
+        platform: str = "telegram",
+        metadata: dict | None = None,
+    ) -> bool:
+        """Send a message proactively to a specific chat in gateway mode.
+
+        Supports flexible signatures:
+        - ``ctx.send_to_chat(chat_id, message_id, text)``
+        - ``ctx.send_to_chat(chat_id, text, reply_to=message_id)``
+        - ``ctx.send_to_chat(chat_id, text)``
+        - ``ctx.send_to_chat(chat_id=..., message_id=..., text=...)``
+
+        Returns True if the message was successfully sent to the platform adapter.
+        """
+        import inspect
+
+        target_reply_to: str | None = message_id or reply_to
+        target_content: str | None = content or text
+
+        if arg3 is not None:
+            target_reply_to = arg2
+            target_content = arg3
+        elif arg2 is not None:
+            if target_content is not None:
+                target_reply_to = arg2
+            else:
+                target_content = arg2
+
+        if not target_content:
+            logger.warning("send_to_chat: message content is empty")
+            return False
+
+        if not chat_id:
+            logger.warning("send_to_chat: chat_id is empty")
+            return False
+
+        handler = getattr(self._manager, "_send_to_chat_handler", None)
+        if handler is not None:
+            res = handler(
+                chat_id=str(chat_id),
+                content=str(target_content),
+                reply_to=str(target_reply_to) if target_reply_to else None,
+                platform=platform,
+                metadata=metadata,
+            )
+            if inspect.isawaitable(res):
+                res = await res
+            return bool(res)
+
+        try:
+            from gateway.run import _gateway_runner_ref
+            runner = _gateway_runner_ref()
+        except Exception:
+            runner = None
+
+        if runner is None or not getattr(runner, "adapters", None):
+            logger.warning("send_to_chat: no active gateway runner or adapters available")
+            return False
+
+        platform_clean = str(platform).strip().lower()
+        target_adapter = None
+        for p, adapter in runner.adapters.items():
+            p_name = getattr(p, "value", str(p)).lower()
+            if p_name == platform_clean:
+                target_adapter = adapter
+                break
+
+        if target_adapter is None:
+            logger.warning("send_to_chat: no active adapter for platform %r", platform)
+            return False
+
+        try:
+            send_res = await target_adapter.send(
+                chat_id=str(chat_id),
+                content=str(target_content),
+                reply_to=str(target_reply_to) if target_reply_to else None,
+                metadata=metadata,
+            )
+            if hasattr(send_res, "ok"):
+                return bool(send_res.ok)
+            return bool(send_res)
+        except Exception as exc:
+            logger.warning("send_to_chat failed to send message: %s", exc, exc_info=True)
+            return False
+
     # -- CLI command registration --------------------------------------------
 
     def register_cli_command(

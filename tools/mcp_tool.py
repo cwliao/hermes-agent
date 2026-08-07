@@ -4942,7 +4942,29 @@ def _format_klib_mcp_result(tool_name: str, args: dict, raw_json: str) -> str:
     try:
         results = json.loads(raw_json)
     except Exception:
-        return raw_json
+        # FastMCP serializes a list[dict] tool return as one content block
+        # per list element (concatenated by the caller), not a single JSON
+        # array -- and each block may itself be pretty-printed across
+        # multiple lines, so a naive line-by-line JSONL split breaks on
+        # real production data. Walk the text as a stream of concatenated
+        # JSON documents instead, each parsed independently of newlines.
+        try:
+            decoder = json.JSONDecoder()
+            parsed = []
+            index = 0
+            length = len(raw_json)
+            while index < length:
+                while index < length and raw_json[index].isspace():
+                    index += 1
+                if index >= length:
+                    break
+                value, index = decoder.raw_decode(raw_json, index)
+                parsed.append(value)
+            if not parsed:
+                return raw_json
+            results = parsed
+        except Exception:
+            return raw_json
 
     if tool_name in ("read_page", "list_index"):
         if tool_name == "read_page":

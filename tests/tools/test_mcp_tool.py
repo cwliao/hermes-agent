@@ -559,6 +559,75 @@ class TestToolHandler:
         assert "1. **wiki/energy.md** — Carbon capture is discussed here." in formatted
         assert raw_json not in formatted
 
+    def test_klib_search_result_jsonl_is_formatted(self):
+        from plugins.klib import _format_result_lines
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        results = [
+            {
+                "file": "wiki/energy.md",
+                "line": 12,
+                "text": "Carbon capture is discussed here.",
+                "status": None,
+            },
+            {
+                "file": "wiki/policy.md",
+                "line": 8,
+                "text": "Policy context appears here.",
+                "status": "draft",
+            },
+        ]
+        # Simulate FastMCP serializing each dict as a separate block,
+        # which get concatenated with newlines (non-valid single JSON document, but valid JSONL)
+        raw_json = "\n".join(json.dumps(item) for item in results)
+
+        with patch("tools.mcp_tool._drive_link_for_path", return_value=None):
+            formatted = _format_klib_mcp_result(
+                "search", {"query": "carbon"}, raw_json
+            )
+
+        assert formatted == "\n".join(
+            _format_result_lines("carbon", results, start_index=1)
+        )
+        assert "1. **wiki/energy.md** — Carbon capture is discussed here." in formatted
+        assert raw_json not in formatted
+
+
+    def test_klib_search_result_pretty_printed_multiline_blocks_is_formatted(self):
+        """Real production shape: each block is pretty-printed across multiple
+        lines (FastMCP list[dict] serialization), not compact single-line JSON.
+        A naive line-by-line JSONL split breaks on this -- this is the actual
+        shape observed against the live klib MCP server in T0133/T0136."""
+        from plugins.klib import _format_result_lines
+        from tools.mcp_tool import _format_klib_mcp_result
+
+        results = [
+            {
+                "file": "wiki/energy.md",
+                "line": 12,
+                "text": "Carbon capture is discussed here.",
+                "status": None,
+            },
+            {
+                "file": "wiki/policy.md",
+                "line": 8,
+                "text": "Policy context appears here.",
+                "status": "draft",
+            },
+        ]
+        raw_json = "\n".join(json.dumps(item, indent=2) for item in results)
+
+        with patch("tools.mcp_tool._drive_link_for_path", return_value=None):
+            formatted = _format_klib_mcp_result(
+                "search", {"query": "carbon"}, raw_json
+            )
+
+        assert formatted == "\n".join(
+            _format_result_lines("carbon", results, start_index=1)
+        )
+        assert "1. **wiki/energy.md** \u2014 Carbon capture is discussed here." in formatted
+        assert raw_json not in formatted
+
     @pytest.mark.parametrize(
         "raw_json",
         [

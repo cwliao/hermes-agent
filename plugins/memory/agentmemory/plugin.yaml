@@ -1,0 +1,5 @@
+name: agentmemory
+version: 1.0.0
+description: "agentmemory -- self-hosted persistent memory server (REST API), external provider."
+hooks:
+  - on_memory_write

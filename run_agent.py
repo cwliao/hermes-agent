@@ -1663,7 +1663,12 @@ class AIAgent:
         cleaned = self._strip_think_blocks(content)
 
         # Check if there's any non-whitespace content remaining
-        return bool(cleaned.strip())
+        cleaned = cleaned.strip()
+        # ``(empty)`` is Hermes' internal terminal/recovery sentinel, not a
+        # meaningful model answer.  A weak model can emit the literal token
+        # after a tool turn; treating it as content skips the post-tool nudge
+        # and sends the sentinel straight to gateway normalization.
+        return bool(cleaned) and cleaned != "(empty)"
 
     def _strip_think_blocks(self, content: str) -> str:
         """Forwarder — see ``agent.agent_runtime_helpers.strip_think_blocks``."""

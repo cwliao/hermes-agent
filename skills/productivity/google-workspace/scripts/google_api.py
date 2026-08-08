@@ -41,6 +41,7 @@ from _hermes_home import get_hermes_home
 HERMES_HOME = get_hermes_home()
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
+DEFAULT_CALENDAR_ID = "primary"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -77,6 +78,55 @@ def _stored_token_scopes() -> list[str]:
     if isinstance(scopes, list) and scopes:
         return scopes
     return list(SCOPES)
+
+
+def _google_workspace_config() -> dict:
+    config_path = HERMES_HOME / "config.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text()) or {}
+    except Exception:
+        return {}
+    cfg = data.get("google_workspace")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _default_calendar_id() -> str:
+    value = str(_google_workspace_config().get("default_calendar", "")).strip()
+    return value or DEFAULT_CALENDAR_ID
+
+
+def _allowed_calendar_ids() -> set[str]:
+    cfg = _google_workspace_config()
+    raw = cfg.get("allowed_calendars")
+    if isinstance(raw, str):
+        allowed = {raw.strip()} if raw.strip() else set()
+    elif isinstance(raw, list):
+        allowed = {str(item).strip() for item in raw if str(item).strip()}
+    else:
+        allowed = set()
+
+    default = _default_calendar_id()
+    if allowed:
+        return allowed
+    return {default} if default else {DEFAULT_CALENDAR_ID}
+
+
+def _validate_calendar_id(calendar_id: str) -> str:
+    calendar_id = str(calendar_id or "").strip() or _default_calendar_id()
+    allowed = _allowed_calendar_ids()
+    if calendar_id not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        print(
+            f"CALENDAR_NOT_ALLOWED: {calendar_id!r} is not allowed. "
+            f"Configured google_workspace.allowed_calendars: {allowed_text}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return calendar_id
 
 
 def _gws_binary() -> str | None:
@@ -462,6 +512,7 @@ def gmail_modify(args):
 
 
 def calendar_list(args):
+    args.calendar = _validate_calendar_id(args.calendar)
     now = datetime.now(timezone.utc)
     time_min = _datetime_with_timezone(args.start or now.isoformat())
     time_max = _datetime_with_timezone(args.end or (now + timedelta(days=7)).isoformat())
@@ -516,6 +567,7 @@ def calendar_list(args):
 
 
 def calendar_create(args):
+    args.calendar = _validate_calendar_id(args.calendar)
     event = {
         "summary": args.summary,
         "start": {"dateTime": args.start},
@@ -554,6 +606,7 @@ def calendar_create(args):
 
 
 def calendar_delete(args):
+    args.calendar = _validate_calendar_id(args.calendar)
     if _gws_binary():
         _run_gws(["calendar", "events", "delete"], params={"calendarId": args.calendar, "eventId": args.event_id})
         print(json.dumps({"status": "deleted", "eventId": args.event_id}))
@@ -1101,7 +1154,7 @@ def main():
     p.add_argument("--start", default="", help="Start time (ISO 8601)")
     p.add_argument("--end", default="", help="End time (ISO 8601)")
     p.add_argument("--max", type=int, default=25)
-    p.add_argument("--calendar", default="primary")
+    p.add_argument("--calendar", default=_default_calendar_id())
     p.set_defaults(func=calendar_list)
 
     p = cal_sub.add_parser("create")
@@ -1111,12 +1164,12 @@ def main():
     p.add_argument("--location", default="")
     p.add_argument("--description", default="")
     p.add_argument("--attendees", default="", help="Comma-separated email addresses")
-    p.add_argument("--calendar", default="primary")
+    p.add_argument("--calendar", default=_default_calendar_id())
     p.set_defaults(func=calendar_create)
 
     p = cal_sub.add_parser("delete")
     p.add_argument("event_id")
-    p.add_argument("--calendar", default="primary")
+    p.add_argument("--calendar", default=_default_calendar_id())
     p.set_defaults(func=calendar_delete)
 
     # --- Drive ---

@@ -43,6 +43,16 @@ class TestDetectCodeSkew:
 
         assert (tmp_path / "gateway_boot_fingerprint").read_text() == "git:refs/heads/main:abc1234567890\n"
 
+    def test_record_writes_boot_fingerprint_file(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(code_skew, "_fingerprint", lambda: "git:refs/heads/main:abc1234567890")
+
+        import hermes_constants
+
+        monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
+        code_skew.record_boot_fingerprint()
+
+        assert (tmp_path / "gateway_boot_fingerprint").read_text() == "git:refs/heads/main:abc1234567890\n"
+
 
 class TestShort:
     def test_shortens_long_sha(self):

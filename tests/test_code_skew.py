@@ -84,6 +84,45 @@ class TestDetectCodeSkew:
         assert not (tmp_path / "gateway_boot_fingerprint").exists()
 
 
+class TestReleaseMarkerFingerprint:
+    """T0140: release-dir snapshots have no .git, so the bake-time
+    RELEASE_COMMIT marker file is the fingerprint source there."""
+
+    def test_reads_marker_file_when_present(self, tmp_path):
+        (tmp_path / code_skew.RELEASE_MARKER_FILENAME).write_text("5863e9d5e8a1\n")
+        assert code_skew._release_marker_fingerprint(tmp_path) == "release:5863e9d5e8a1"
+
+    def test_missing_marker_file_is_none(self, tmp_path):
+        assert code_skew._release_marker_fingerprint(tmp_path) is None
+
+    def test_empty_marker_file_is_none(self, tmp_path):
+        (tmp_path / code_skew.RELEASE_MARKER_FILENAME).write_text("   \n")
+        assert code_skew._release_marker_fingerprint(tmp_path) is None
+
+    def test_fingerprint_prefers_marker_over_git(self, tmp_path, monkeypatch):
+        (tmp_path / code_skew.RELEASE_MARKER_FILENAME).write_text("abc123\n")
+        monkeypatch.setattr(code_skew, "_PROJECT_ROOT", tmp_path)
+
+        def _fail_if_called(_root):
+            raise AssertionError("git reader should not be reached when marker exists")
+
+        monkeypatch.setattr(
+            "hermes_cli.main._read_git_revision_fingerprint", _fail_if_called
+        )
+        assert code_skew._fingerprint() == "release:abc123"
+
+    def test_fingerprint_falls_back_to_git_when_no_marker(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(code_skew, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(
+            "hermes_cli.main._read_git_revision_fingerprint",
+            lambda root: "git:refs/heads/main:def456",
+        )
+        assert code_skew._fingerprint() == "git:refs/heads/main:def456"
+
+    def test_short_renders_release_marker_like_git_fingerprint(self):
+        assert code_skew._short("release:5863e9d5e8a123456") == "5863e9d5e8"
+
+
 class TestShort:
     def test_shortens_long_sha(self):
         assert code_skew._short("git:refs/heads/main:abcdef0123456789") == "abcdef0123"

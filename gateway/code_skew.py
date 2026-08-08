@@ -13,6 +13,22 @@ gateway" message instead of crashing on a cryptic import error.
 
 If the revision can't be read (non-git install, IO error), the boot snapshot
 stays ``None`` and skew detection no-ops — it never produces a false positive.
+
+Production (DGX) does not run out of a git checkout at all: the systemd
+drop-in points ``WorkingDirectory``/``PYTHONPATH`` at
+``~/.hermes/releases/<version>-<label>-<hash>/``, a plain ``rsync
+--exclude=.git`` snapshot of a worktree with no ``.git`` directory (see
+``.ai/tickets/T0129.md`` in the klib repo for how this snapshot is produced —
+it's a manual step, not tooling this repo owns). Against a snapshot dir,
+``_read_git_revision_fingerprint()`` always returns ``None``, which silently
+disabled this entire module for every release-dir deploy (T0140). To keep
+working there, ``_fingerprint()`` first looks for a ``RELEASE_COMMIT``
+marker file at the project root — a plain-text file containing the commit
+hash the release was baked from, written by hand as the last step of the
+manual bake (see ``docs/`` for the exact command). When present, its content
+*is* the fingerprint, independent of directory naming. When absent (dev
+checkouts, or a release baked before this marker existed), we fall back to
+the git-based reader unchanged.
 """
 
 from __future__ import annotations
@@ -28,9 +44,40 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _boot_fingerprint: str | None = None
 _log = logging.getLogger(__name__)
 
+RELEASE_MARKER_FILENAME = "RELEASE_COMMIT"
+
+
+def _release_marker_fingerprint(project_root: Path) -> str | None:
+    """Read the bake-time version marker, if this checkout has one.
+
+    The marker is a single line of plain text (the commit hash the release
+    directory was rsynced from) written by hand at the end of the manual
+    release-bake SOP. Missing/empty/unreadable -> ``None`` (fail-soft, same
+    contract as the git-based reader below), e.g. while a release directory
+    is still mid-rsync and the marker hasn't been written yet.
+    """
+    try:
+        content = (project_root / RELEASE_MARKER_FILENAME).read_text(
+            encoding="utf-8", errors="replace"
+        ).strip()
+    except OSError:
+        return None
+    if not content:
+        return None
+    return f"release:{content}"
+
 
 def _fingerprint() -> str | None:
-    """Return the identity of the code tree containing this module."""
+    """Return the identity of the code tree containing this module.
+
+    Prefers the bake-time ``RELEASE_COMMIT`` marker, so release-dir snapshot
+    deploys report the commit they were baked from rather than falling through
+    to a git read that the snapshot has no repository for. Falls back to the
+    CLI's worktree-aware git-rev reader for ordinary checkouts.
+    """
+    marker = _release_marker_fingerprint(_PROJECT_ROOT)
+    if marker is not None:
+        return marker
     try:
         from hermes_cli.gateway_identity import identity_from_project
 

@@ -25,7 +25,10 @@ Design:
 
 import json
 import logging
+import os
 import time
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from hermes_constants import get_hermes_home
@@ -233,14 +236,52 @@ class MemoryStore:
             ),
         }
 
+    def _push_to_agentmemory(self, content: str, target: str) -> bool:
+        """Best-effort push of one trimmed entry to agentmemory's REST API.
+
+        Returns True on success, False on ANY failure (missing secret,
+        network error, timeout, non-2xx response) -- never raises. Callers
+        must archive locally whenever this returns False, since agentmemory
+        is a shared, occasionally-unreachable service (confirmed hung once
+        already this session) and this call sits inline on the tool-response
+        path, not backgrounded -- kept to a short timeout deliberately, since
+        success here is a nice-to-have durability improvement, not a
+        correctness requirement (the local .trimmed archive is always the
+        fallback of record).
+        """
+        secret = os.environ.get("AGENTMEMORY_SECRET", "")
+        if not secret:
+            return False
+        base_url = os.environ.get("AGENTMEMORY_URL", "http://127.0.0.1:3111")
+        body = json.dumps({
+            "content": content,
+            "concepts": ["hermes-trimmed-overflow", target],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/agentmemory/remember",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {secret}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return 200 <= resp.status < 300
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+            return False
+
     def _auto_trim_over_budget(self, target: str) -> Dict[str, Any]:
         """Drop the oldest entries (by original position) from *target*
         until back under its char limit -- no model involvement, so a file
         that's stuck over budget self-heals deterministically instead of
-        staying stuck forever. Dropped entries are archived to a sibling
-        <name>.trimmed file, never deleted outright (mirrors the .bak
-        drift-snapshot precedent elsewhere in this module -- silent,
-        unrecoverable loss of a user's stored memories is not acceptable).
+        staying stuck forever. Each dropped entry is first pushed to
+        agentmemory (best-effort, see _push_to_agentmemory); only entries
+        where that push fails are archived to a sibling <name>.trimmed
+        file, never deleted outright (mirrors the .bak drift-snapshot
+        precedent elsewhere in this module -- silent, unrecoverable loss
+        of a user's stored memories is not acceptable).
 
         Must be called from within a block that already holds _file_lock
         for *target* -- does not acquire the lock itself.
@@ -252,22 +293,34 @@ class MemoryStore:
             dropped.append(entries.pop(0))
         self._set_entries(target, entries)
 
+        pushed_count = 0
+        still_needs_local_archive: List[str] = []
+        for entry in dropped:
+            if self._push_to_agentmemory(entry, target):
+                pushed_count += 1
+            else:
+                still_needs_local_archive.append(entry)
+
         archive_path = self._path_for(target).parent / f"{self._path_for(target).name}.trimmed"
-        if dropped:
+        if still_needs_local_archive:
             try:
                 with open(archive_path, "a", encoding="utf-8") as f:
                     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-                    for entry in dropped:
+                    for entry in still_needs_local_archive:
                         f.write(f"[{ts}] {entry}\n{ENTRY_DELIMITER}\n")
             except OSError:
                 logger.warning(
                     "Failed to archive %d auto-trimmed %s entries to %s",
-                    len(dropped), target, archive_path,
+                    len(still_needs_local_archive), target, archive_path,
                 )
+
+        if dropped:
             logger.warning(
                 "Auto-trimmed %d oldest %s entries to fit the %d-char limit "
-                "after repeated consolidation failures; archived to %s",
-                len(dropped), target, limit, archive_path,
+                "after repeated consolidation failures; %d pushed to "
+                "agentmemory, %d archived locally to %s",
+                len(dropped), target, limit, pushed_count,
+                len(still_needs_local_archive), archive_path,
             )
 
         self.save_to_disk(target)

@@ -510,8 +510,9 @@ class MemoryStore:
                     "current_entries": entries,
                     "usage": f"{current:,}/{limit:,}",
                 })
-
-            entries[idx] = new_content
+            entries.pop(idx)
+            entries.append(new_content)
+            
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
@@ -626,7 +627,8 @@ class MemoryStore:
                             target,
                             f"{pos}: '{old_text}' matched multiple distinct entries -- be more specific.",
                         )
-                    working[matches[0]] = content
+                    working.pop(matches[0])
+                    working.append(content)
 
                 elif act == "remove":
                     if not old_text:

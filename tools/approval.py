@@ -2294,12 +2294,14 @@ def _denial_breaker_addendum(session_key: str) -> str:
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result", "reason")
+    __slots__ = ("event", "data", "result", "reason", "runtime_profile", "runtime_lease")
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, runtime_profile=None, runtime_lease=None):
         self.event = threading.Event()
         self.data = data          # command, description, pattern_keys, …
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
+        self.runtime_profile = runtime_profile
+        self.runtime_lease = runtime_lease
         # Optional free-text reason supplied with an explicit deny
         # (``/deny <reason>``) so the agent can adapt instead of only
         # hearing "denied". Ported from qwibitai/nanoclaw#2832.
@@ -3434,7 +3436,26 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     primary_key = approval_data.get("pattern_key", "")
     all_keys = approval_data.get("pattern_keys", [primary_key])
 
-    entry = _ApprovalEntry(approval_data)
+    runtime_profile = None
+    runtime_lease = None
+    try:
+        from gateway.runtime_state import get_runtime_state_context
+
+        runtime_context = get_runtime_state_context()
+        if runtime_context is not None:
+            runtime_profile = runtime_context.profile
+            runtime_lease = runtime_profile.begin_approval(
+                runtime_context.session_id,
+                runtime_context.task_id,
+            )
+    except Exception:
+        logger.error(
+            "ARCH-001 approval-state creation failed; refusing approval request",
+            exc_info=True,
+        )
+        return {"resolved": False, "choice": "deny", "runtime_failed": True}
+
+    entry = _ApprovalEntry(approval_data, runtime_profile, runtime_lease)
     with _lock:
         _gateway_queues.setdefault(session_key, []).append(entry)
 
@@ -3464,6 +3485,16 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     except Exception as exc:
         logger.warning("Gateway approval notify failed: %s", exc)
         _drop_entry()
+        if entry.runtime_profile is not None and entry.runtime_lease is not None:
+            try:
+                entry.runtime_profile.finish_approval(
+                    entry.runtime_lease, "denied"
+                )
+            except Exception:
+                logger.error(
+                    "ARCH-001 approval-state cleanup failed after notify error",
+                    exc_info=True,
+                )
         return {"resolved": False, "choice": None, "notify_failed": True}
 
     # Block until the user responds or the canonical approval timeout elapses
@@ -3512,6 +3543,23 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     _drop_entry()
 
     choice = entry.result
+    if entry.runtime_profile is not None and entry.runtime_lease is not None:
+        approval_status = (
+            "expired"
+            if not resolved
+            else "approved"
+            if choice in {"once", "session", "always"}
+            else "denied"
+        )
+        try:
+            entry.runtime_profile.finish_approval(
+                entry.runtime_lease, approval_status
+            )
+        except Exception:
+            logger.error(
+                "ARCH-001 approval-state completion failed",
+                exc_info=True,
+            )
     # Normalize outcome for the post hook. Unresolved (timeout) and None both
     # mean the user never responded; report that explicitly so plugins can
     # distinguish timeout from explicit deny.

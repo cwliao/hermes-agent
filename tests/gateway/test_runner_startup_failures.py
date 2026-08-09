@@ -413,3 +413,45 @@ async def test_start_gateway_propagates_fatal_config_exit_code(monkeypatch, tmp_
     assert exc_info.value.code == GATEWAY_FATAL_CONFIG_EXIT_CODE
 
 
+@pytest.mark.asyncio
+async def test_start_gateway_runtime_preflight_runs_before_runner(monkeypatch, tmp_path):
+    """ARCH-001 must reject startup before GatewayRunner or adapters exist."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    events = []
+
+    class _FailingRuntimeStateManager:
+        def __init__(self, config):
+            events.append("runtime_manager_init")
+
+        def preflight(self):
+            events.append("runtime_preflight")
+            raise RuntimeError("invalid runtime state path")
+
+        def close(self):
+            events.append("runtime_manager_close")
+
+    class _RunnerMustNotConstruct:
+        def __init__(self, config):
+            raise AssertionError("GatewayRunner must not construct before preflight")
+
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
+    monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
+    monkeypatch.setattr(
+        "gateway.runtime_state.RuntimeStateManager",
+        _FailingRuntimeStateManager,
+    )
+    monkeypatch.setattr("gateway.run.GatewayRunner", _RunnerMustNotConstruct)
+
+    from gateway.run import start_gateway
+
+    ok = await start_gateway(config=GatewayConfig(), replace=False, verbosity=None)
+
+    assert ok is False
+    assert events == [
+        "runtime_manager_init",
+        "runtime_preflight",
+        "runtime_manager_close",
+    ]
+
+

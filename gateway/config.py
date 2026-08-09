@@ -892,6 +892,8 @@ class GatewayConfig:
     
     # Storage paths
     sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
+    # ARCH-001 runtime state is separate from the legacy gateway/session DB.
+    runtime_state_db_path: Optional[Path] = None
 
     # Whether to keep writing the legacy sessions.json mirror of the gateway
     # routing index. The primary copy lives in state.db (gateway_routing
@@ -1061,6 +1063,11 @@ class GatewayConfig:
             "reset_triggers": self.reset_triggers,
             "quick_commands": self.quick_commands,
             "sessions_dir": str(self.sessions_dir),
+            "runtime_state_db_path": (
+                str(self.runtime_state_db_path)
+                if self.runtime_state_db_path is not None
+                else None
+            ),
             "write_sessions_json": self.write_sessions_json,
             "always_log_local": self.always_log_local,
             "filter_silence_narration": self.filter_silence_narration,
@@ -1114,6 +1121,17 @@ class GatewayConfig:
         sessions_dir = get_hermes_home() / "sessions"
         if "sessions_dir" in data:
             sessions_dir = Path(data["sessions_dir"])
+
+        runtime_state_db_path = data.get("runtime_state_db_path")
+        if runtime_state_db_path is None and isinstance(data.get("runtime_state"), dict):
+            runtime_state_db_path = data["runtime_state"].get("db_path")
+        nested_runtime_gateway = data.get("gateway")
+        if runtime_state_db_path is None and isinstance(nested_runtime_gateway, dict):
+            nested_runtime_state = nested_runtime_gateway.get("runtime_state")
+            if isinstance(nested_runtime_state, dict):
+                runtime_state_db_path = nested_runtime_state.get("db_path")
+        if runtime_state_db_path is not None:
+            runtime_state_db_path = Path(str(runtime_state_db_path))
         
         quick_commands = data.get("quick_commands", {})
         if not isinstance(quick_commands, dict):
@@ -1197,6 +1215,7 @@ class GatewayConfig:
             reset_triggers=data.get("reset_triggers", ["/new", "/reset"]),
             quick_commands=quick_commands,
             sessions_dir=sessions_dir,
+            runtime_state_db_path=runtime_state_db_path,
             write_sessions_json=_coerce_bool(data.get("write_sessions_json"), True),
             always_log_local=_coerce_bool(data.get("always_log_local"), True),
             filter_silence_narration=_coerce_bool(
@@ -1296,6 +1315,15 @@ def load_gateway_config() -> GatewayConfig:
             # already established for gateway.multiplex_profiles/streaming/
             # write_sessions_json: top-level wins, nested gateway.* falls back.
             gateway_section = yaml_cfg.get("gateway")
+
+            if "runtime_state_db_path" in yaml_cfg:
+                gw_data["runtime_state_db_path"] = yaml_cfg["runtime_state_db_path"]
+            elif isinstance(yaml_cfg.get("runtime_state"), dict):
+                gw_data["runtime_state"] = yaml_cfg["runtime_state"]
+            elif isinstance(gateway_section, dict) and isinstance(
+                gateway_section.get("runtime_state"), dict
+            ):
+                gw_data["runtime_state"] = gateway_section["runtime_state"]
 
             # Map config.yaml keys → GatewayConfig.from_dict() schema.
             # Each key overwrites whatever gateway.json may have set.

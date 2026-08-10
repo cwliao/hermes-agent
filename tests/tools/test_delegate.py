@@ -495,6 +495,128 @@ class TestToolNamePreservation(unittest.TestCase):
 
         self.assertEqual(model_tools._last_resolved_tool_names, original_tools)
 
+    def test_global_tool_names_restored_after_child_failure(self):
+        """Even when the child agent raises, the global must be restored."""
+        import model_tools
+
+        parent = _make_mock_parent(depth=0)
+        original_tools = ["terminal", "read_file", "web_search"]
+        model_tools._last_resolved_tool_names = list(original_tools)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.side_effect = RuntimeError("boom")
+            MockAgent.return_value = mock_child
+
+            result = json.loads(delegate_task(goal="Crash test", parent_agent=parent))
+            self.assertEqual(result["results"][0]["status"], "error")
+
+        self.assertEqual(model_tools._last_resolved_tool_names, original_tools)
+
+    def test_build_child_agent_does_not_raise_name_error(self):
+        """Regression: _build_child_agent must not reference _saved_tool_names.
+
+        The bug introduced by the e7844e9c merge conflict: line 235 inside
+        _build_child_agent read `list(_saved_tool_names)` where that variable
+        is only defined later in _run_single_child.  Calling _build_child_agent
+        standalone (without _run_single_child's scope) must never raise NameError.
+        """
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent"):
+            try:
+                _build_child_agent(
+                    task_index=0,
+                    goal="regression check",
+                    context=None,
+                    toolsets=None,
+                    model=None,
+                    max_iterations=10,
+                    parent_agent=parent,
+                    task_count=1,
+                )
+            except NameError as exc:
+                self.fail(
+                    f"_build_child_agent raised NameError — "
+                    f"_saved_tool_names leaked back into wrong scope: {exc}"
+                )
+
+    def test_build_child_agent_raises_when_pinned_acp_binary_missing(self):
+        """A pinned delegation.command that isn't on PATH must fail loudly
+        (#80450), not silently fall back to the default transport — normally
+        unreachable via delegate_task (which pre-validates in
+        _resolve_delegation_credentials), but _build_child_agent itself must
+        not paper over a stale/misconfigured override."""
+        parent = _make_mock_parent(depth=0)
+        parent.acp_command = None
+        parent.acp_args = []
+
+        with patch("run_agent.AIAgent"), \
+             patch("shutil.which", return_value=None) as mock_which:
+            with self.assertRaises(ValueError):
+                _build_child_agent(
+                    task_index=0,
+                    goal="search X for crypto twitter",
+                    context=None,
+                    toolsets=None,
+                    model=None,
+                    max_iterations=10,
+                    parent_agent=parent,
+                    task_count=1,
+                    override_acp_command="copilot",
+                    override_acp_args=["--foo"],
+                )
+
+        mock_which.assert_any_call("copilot")
+
+    def test_build_child_agent_honors_acp_command_when_binary_present(self):
+        """When the acp_command binary exists on PATH, behavior is unchanged:
+        provider is forced to copilot-acp and command/args propagate to the
+        child agent. Guards against the missing-binary check accidentally
+        breaking working ACP delegation setups.
+        """
+        parent = _make_mock_parent(depth=0)
+        captured = {}
+
+        with patch("run_agent.AIAgent") as MockAgent, \
+             patch("shutil.which", return_value="/usr/local/bin/copilot"):
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="copilot path",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+                override_acp_command="copilot",
+                override_acp_args=["--foo"],
+            )
+
+            _, kwargs = MockAgent.call_args
+            captured["provider"] = kwargs.get("provider")
+            captured["acp_command"] = kwargs.get("acp_command")
+
+        self.assertEqual(captured["provider"], "copilot-acp")
+        self.assertEqual(captured["acp_command"], "copilot")
+
+    def test_schema_never_exposes_acp_transport_fields(self):
+        """delegate_task must never make ACP transport model-facing."""
+        from tools.delegate_tool import _build_dynamic_schema_overrides
+
+        with patch("shutil.which", return_value="/usr/local/bin/copilot"):
+            overrides = _build_dynamic_schema_overrides()
+
+        props = overrides["parameters"]["properties"]
+        self.assertNotIn("acp_command", props)
+        self.assertNotIn("acp_args", props)
+
+        task_item_props = props["tasks"]["items"]["properties"]
+        self.assertNotIn("acp_command", task_item_props)
+        self.assertNotIn("acp_args", task_item_props)
 
     def test_saved_tool_names_set_on_child_before_run(self):
         """_run_single_child must set _delegate_saved_tool_names on the child

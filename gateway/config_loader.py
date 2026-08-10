@@ -101,6 +101,8 @@ _TOPLEVEL_BRIDGE: tuple = (
     ),
     ("unauthorized_dm_behavior", "unauthorized_dm_behavior", "presence", None, _dm_behavior_choice),
     *_presence("unauthorized_dm_decline_message"),
+    ("runtime_state_db_path", "runtime_state_db_path", "presence", None, None),
+    ("runtime_state", "runtime_state", "presence", lambda v: isinstance(v, dict), None),
 )
 
 

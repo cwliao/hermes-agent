@@ -24,9 +24,12 @@ logger = logging.getLogger("tools.approval")
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result", "reason", "acknowledged", "settle")
+    __slots__ = (
+        "event", "data", "result", "reason", "acknowledged", "settle",
+        "runtime_profile", "runtime_lease",
+    )
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, runtime_profile=None, runtime_lease=None):
         self.event = threading.Event()
         self.data = dict(data)
         self.data.setdefault("request_id", uuid.uuid4().hex)
@@ -37,6 +40,8 @@ class _ApprovalEntry:
         self.result: str | None = None  # "once"|"session"|"always"|"deny"
         # Free-text reason from ``/deny <reason>`` so the agent can adapt, not just hear "denied".
         self.reason: str | None = None
+        self.runtime_profile = runtime_profile
+        self.runtime_lease = runtime_lease
 
 
 def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str) -> str:
@@ -138,7 +143,25 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
         if adopted is not None:
             return adopted
 
-    entry = _ApprovalEntry(approval_data)
+    runtime_profile = None
+    runtime_lease = None
+    try:
+        from gateway.runtime_state import get_runtime_state_context
+
+        runtime_context = get_runtime_state_context()
+        if runtime_context is not None:
+            runtime_profile = runtime_context.profile
+            runtime_lease = runtime_profile.begin_approval(
+                runtime_context.session_id, runtime_context.task_id
+            )
+    except Exception:
+        logger.error(
+            "ARCH-001 approval-state creation failed; refusing approval request",
+            exc_info=True,
+        )
+        return {"resolved": False, "choice": "deny", "runtime_failed": True}
+
+    entry = _ApprovalEntry(approval_data, runtime_profile, runtime_lease)
     with _approval._lock:
         _approval._gateway_queues.setdefault(session_key, []).append(entry)
 
@@ -155,6 +178,21 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
                 settle(reason)
             except Exception:
                 logger.debug("approval settle hook failed", exc_info=True)
+        # ARCH-001: close the runtime-state lease exactly once, on whichever exit
+        # path drops this entry (notify-failed, timeout, or answered) — folded
+        # into the single _drop_entry funnel instead of duplicated at each call
+        # site, now that every exit path already routes through here for `settle`.
+        if entry.runtime_profile is not None and entry.runtime_lease is not None:
+            if reason == "timeout":
+                status = "expired"
+            elif entry.result in {"once", "session", "always"}:
+                status = "approved"
+            else:
+                status = "denied"
+            try:
+                entry.runtime_profile.finish_approval(entry.runtime_lease, status)
+            except Exception:
+                logger.error("ARCH-001 approval-state completion failed", exc_info=True)
 
     # Plugins hear about the request before the gateway does (real-time observers).
     _ctx._fire_approval_hook("pre_approval_request", **payload)

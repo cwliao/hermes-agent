@@ -87,7 +87,7 @@ def _distinct_results(count):
 
 
 class TestBrainBoundary:
-    def test_brain_requires_private_allowlisted_pair(self, monkeypatch):
+    def test_brain_requires_exact_typed_allowlisted_pair(self, monkeypatch):
         mod = _load_plugin_init()
         _mock_config(
             monkeypatch,
@@ -96,14 +96,28 @@ class TestBrainBoundary:
                 "brain": {
                     "enabled": True,
                     "socket_path": "/run/user/1000/klib-brain-query.sock",
-                    "allowed_identities": [{"user_id": "101", "chat_id": "101"}],
+                    "allowed_identities": [
+                        {"user_id": "101", "chat_id": "-1001", "chat_type": "group"},
+                        {"user_id": "-1002", "chat_id": "-1002", "chat_type": "channel"},
+                    ],
                 }
             },
         )
-        denied = _run(mod._handle_brain("hello", user_id="101", chat_id="101", chat_type="group"))
-        mismatch = _run(mod._handle_brain("hello", user_id="102", chat_id="101", chat_type="private"))
-        assert denied["code"] == "unauthorized"
+        monkeypatch.setattr(mod, "_brain_socket_request", lambda *_: _async_value({"status": "empty", "results": []}))
+        allowed_group = _run(mod._handle_brain("hello", user_id="101", chat_id="-1001", chat_type="group"))
+        allowed_channel = _run(mod._handle_brain("hello", user_id="-1002", chat_id="-1002", chat_type="channel"))
+        mismatch = _run(mod._handle_brain("hello", user_id="101", chat_id="-1001", chat_type="channel"))
+        unknown = _run(mod._handle_brain("hello", user_id="102", chat_id="-1001", chat_type="group"))
+        assert allowed_group["status"] == "empty"
+        assert allowed_channel["status"] == "empty"
         assert mismatch["code"] == "unauthorized"
+        assert unknown["code"] == "unauthorized"
+
+    def test_legacy_untyped_identity_remains_private_only(self, monkeypatch):
+        mod = _load_plugin_init()
+        cfg = {"brain": {"allowed_identities": [{"user_id": "101", "chat_id": "-1001"}]}}
+        assert mod._brain_identity_allowed(cfg["brain"], "101", "-1001", "private") is True
+        assert mod._brain_identity_allowed(cfg["brain"], "101", "-1001", "group") is False
 
     def test_brain_ok_response_becomes_untrusted_prompt(self, monkeypatch):
         mod = _load_plugin_init()

@@ -485,7 +485,8 @@ def _numeric_id(value: Any) -> str:
 
 
 def _brain_identity_allowed(cfg: dict[str, Any], user_id: Any, chat_id: Any, chat_type: str) -> bool:
-    if str(chat_type).lower() not in {"private", "dm"}:
+    normalized_chat_type = str(chat_type).strip().lower()
+    if normalized_chat_type not in {"private", "dm", "group", "forum", "channel"}:
         return False
     user = _numeric_id(user_id)
     chat = _numeric_id(chat_id)
@@ -496,6 +497,14 @@ def _brain_identity_allowed(cfg: dict[str, Any], user_id: Any, chat_id: Any, cha
         return False
     for item in identities:
         if not isinstance(item, dict):
+            continue
+        expected_chat_type = str(item.get("chat_type", "")).strip().lower()
+        if expected_chat_type:
+            if expected_chat_type != normalized_chat_type:
+                continue
+        elif normalized_chat_type not in {"private", "dm"}:
+            # Keep legacy untyped identities private-only. Group/channel access
+            # must opt in with both the exact pair and its exact chat type.
             continue
         if _numeric_id(item.get("user_id")) == user and _numeric_id(item.get("chat_id")) == chat:
             return True

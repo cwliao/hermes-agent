@@ -1019,3 +1019,57 @@ def test_converter_role_items_are_typed_and_survive_preflight(issuer):
     assert role_items and all(i["type"] == "message" for i in role_items)
     assert {"type": "input_image", "image_url": "data:image/png;base64,AAAA"} in role_items[0]["content"]
     assert normalized == items
+
+
+def test_normalize_codex_response_salvages_xai_reasoning_channel_answer():
+    response = _xai_reasoning_only_response(
+        "The process is still running.\n<response>\nAll good, process running."
+    )
+
+    assistant_message, finish_reason = _normalize_codex_response(
+        response, issuer_kind="xai_responses"
+    )
+
+    assert finish_reason == "stop"
+    assert assistant_message.content == "All good, process running."
+    assert assistant_message.reasoning == "The process is still running."
+
+
+def test_normalize_codex_response_salvage_strips_closing_tag():
+    response = _xai_reasoning_only_response(
+        "Thinking.\n<response>The answer.</response>"
+    )
+
+    assistant_message, finish_reason = _normalize_codex_response(
+        response, issuer_kind="xai_responses"
+    )
+
+    assert finish_reason == "stop"
+    assert assistant_message.content == "The answer."
+
+
+def test_normalize_codex_response_salvage_is_xai_scoped():
+    """Non-xAI issuers keep the reasoning-only → incomplete classification;
+    the Codex backend replays encrypted reasoning, so its continuation
+    genuinely progresses and must not be short-circuited."""
+    response = _xai_reasoning_only_response(
+        "Thinking.\n<response>The answer.</response>"
+    )
+
+    assistant_message, finish_reason = _normalize_codex_response(
+        response, issuer_kind="codex_backend"
+    )
+
+    assert finish_reason == "incomplete"
+    assert assistant_message.content == ""
+
+
+def test_normalize_codex_response_xai_reasoning_without_marker_stays_incomplete():
+    response = _xai_reasoning_only_response("Still thinking, no answer yet.")
+
+    assistant_message, finish_reason = _normalize_codex_response(
+        response, issuer_kind="xai_responses"
+    )
+
+    assert finish_reason == "incomplete"
+    assert assistant_message.content == ""

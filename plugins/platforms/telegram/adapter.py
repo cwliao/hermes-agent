@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set
 from hermes_cli import setup_platforms
-from plugins.klib import _handle_klib
+from plugins.klib import _handle_brain, _handle_klib
 from plugins.platforms.telegram.docubot_mcp_gateway import (
     ingest_document_to_docubot,
 )
@@ -5884,7 +5884,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         if not self._should_process_message(msg, is_command=True):
             return
-        if not self._is_user_authorized_from_message(msg):
+        raw_command = (str(getattr(msg, "text", "")).strip().split(None, 1)[0].lower() if msg.text else "")
+        raw_command = raw_command.split("@", 1)[0].lstrip("/")
+        if not self._is_user_authorized_from_message(msg) and raw_command != "brain":
             self._log_blocked_user(msg)
             return
         await self._ensure_forum_commands(msg)
@@ -5892,7 +5894,26 @@ class TelegramAdapter(BasePlatformAdapter):
         clean_text = (event.text or "").strip()
         if clean_text.startswith("/"):
             parts = clean_text.split(None, 1)
-            command = parts[0].lstrip("/").lower()
+            command = parts[0].lstrip("/").split("@", 1)[0].lower()
+            if command == "brain":
+                brain_result = await _handle_brain(
+                    parts[1] if len(parts) > 1 else "",
+                    user_id=getattr(getattr(msg, "from_user", None), "id", None),
+                    chat_id=getattr(getattr(msg, "chat", None), "id", None),
+                    chat_type=getattr(getattr(msg, "chat", None), "type", ""),
+                )
+                if brain_result.get("status") != "ok":
+                    await self.send(
+                        str(msg.chat.id),
+                        str(brain_result.get("message", "KLIB Brain access is unavailable.")),
+                        reply_to=str(msg.message_id),
+                    )
+                    return
+                event.text = str(brain_result["query"])
+                event.message_type = MessageType.TEXT
+                event.channel_prompt = str(brain_result["channel_prompt"])
+                await self.handle_message(event)
+                return
             if command.startswith("query"):
                 query_text = parts[1] if len(parts) > 1 else ""
                 result = await _handle_klib(

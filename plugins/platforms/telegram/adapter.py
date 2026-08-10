@@ -8879,11 +8879,12 @@ class TelegramAdapter(BasePlatformAdapter):
             parts = clean_text.split(None, 1)
             command = parts[0].lstrip("/").split("@", 1)[0].lower()
             if command == "brain":
+                brain_source = self._source_from_message_for_auth(msg)
                 brain_result = await _handle_brain(
                     parts[1] if len(parts) > 1 else "",
-                    user_id=getattr(getattr(msg, "from_user", None), "id", None),
-                    chat_id=getattr(getattr(msg, "chat", None), "id", None),
-                    chat_type=getattr(getattr(msg, "chat", None), "type", ""),
+                    user_id=brain_source.user_id,
+                    chat_id=brain_source.chat_id,
+                    chat_type=brain_source.chat_type,
                 )
                 if brain_result.get("status") != "ok":
                     await self.send(

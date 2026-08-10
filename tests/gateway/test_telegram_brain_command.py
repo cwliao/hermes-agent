@@ -64,7 +64,7 @@ async def test_brain_success_dispatches_untrusted_prompt_to_handler(monkeypatch)
     )
 
     assert called["query"] == "what is the release path?"
-    assert called["kwargs"] == {"user_id": 101, "chat_id": 101, "chat_type": "private"}
+    assert called["kwargs"] == {"user_id": "101", "chat_id": "101", "chat_type": "dm"}
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
     assert event.text == "what is the release path?"
@@ -106,7 +106,7 @@ async def test_brain_command_reaches_plugin_for_unauthorized_user(monkeypatch):
         None,
     )
 
-    assert called == {"user_id": 101, "chat_id": 101, "chat_type": "private"}
+    assert called == {"user_id": "101", "chat_id": "101", "chat_type": "dm"}
     adapter.send.assert_awaited_once_with("101", "KLIB Brain access denied.", reply_to="7")
     adapter.handle_message.assert_not_awaited()
 
@@ -132,3 +132,23 @@ async def test_brain_command_accepts_telegram_botname_suffix(monkeypatch):
 
     assert called["query"] == "hello"
     adapter.send.assert_awaited_once_with("101", "KLIB Brain query is invalid.", reply_to="7")
+
+
+@pytest.mark.asyncio
+async def test_brain_channel_post_uses_sender_chat_identity(monkeypatch):
+    adapter = _make_adapter(monkeypatch)
+    called = {}
+
+    async def fake_brain(query, **kwargs):
+        called.update(kwargs)
+        return {"status": "error", "code": "unauthorized", "message": "KLIB Brain access denied."}
+
+    monkeypatch.setattr("plugins.platforms.telegram.adapter._handle_brain", fake_brain)
+    message = _make_message()
+    message.chat = SimpleNamespace(id=-1002, type="channel", is_forum=False)
+    message.from_user = None
+    message.sender_chat = SimpleNamespace(id=-1002, title="source")
+    await adapter._handle_command(SimpleNamespace(update_id=16, message=message), None)
+
+    assert called == {"user_id": "-1002", "chat_id": "-1002", "chat_type": "channel"}
+    adapter.send.assert_awaited_once_with("-1002", "KLIB Brain access denied.", reply_to="7")

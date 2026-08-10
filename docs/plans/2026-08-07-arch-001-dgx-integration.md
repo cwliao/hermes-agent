@@ -1,8 +1,9 @@
 # HERMES-ARCH-001-INTEGRATION: Wire runtime state into DGX Hermes
 
 **Status:** Implemented at `f0dd130c8`, pushed, baked, and deployed from an
-isolated staging worktree. Claude remains unavailable and the latest AGY packet
-was path-invalid, so no independent review consensus is claimed.
+isolated staging worktree. It is not mainline-complete: Hermes `main` merge,
+path-correct independent review, and mainline re-bake remain pending. Claude
+remains unavailable and the latest AGY packet was path-invalid.
 
 Canonical roadmap: `docs/ROADMAP-HERMES-DGX.md`.
 
@@ -228,3 +229,13 @@ as `/home/cwliao/.hermes/releases/v2026.8.3-arch-001-f0dd130c8`.
   fingerprints present. It also emitted the pre-existing unregistered-ticket
   warning for `T0038`, `T0053`, `T0066`, `T0067`, and `T0132`; this remains a
   separate security-registry follow-up, not an ARCH-001 deployment failure.
+
+## Mainline integration gate
+
+- Hermes `main` is the canonical ARCH mainline. The DGX release branch
+  `ticket/T0127-v2026.8.3-merged` is a deployment staging source only.
+- ARCH-001 must receive a path-correct independent review, merge to Hermes
+  `main`, and pass the post-merge regression suite before the ticket is closed.
+- The DGX release must then be re-baked from the merged mainline commit and
+  re-verified. The current `v2026.8.3-arch-001-f0dd130c8` release remains the
+  rollback candidate until that cutover is complete.

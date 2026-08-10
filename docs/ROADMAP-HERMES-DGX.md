@@ -149,7 +149,7 @@ T01–T08 must consume the ARCH/SEC/RES/OPS contracts above; they are not a repl
 | Ticket | Current state | Required next gate |
 |---|---|---|
 | ARCH-001 | Commit `f0dd130c835fcd5f2ca94e0f091305ded51d07c9`; 29 focused tests passed on Windows and DGX staging; Ruff/compileall/diff-check passed. AC1 checksum bake and AC2 origin provenance passed. Live release: `v2026.8.3-arch-001-f0dd130c8`; fingerprint, process cwd, health guard, and AC3 audit verified. | Execute `ARCH-001-MAINLINE-001`: reconcile refs, isolate a clean main-based diff, complete review, merge to Hermes `main`, then re-bake/redeploy from mainline. |
-| ARCH-001-MAINLINE-001 | Reconcile release branch drift and isolate ARCH-001 for canonical Hermes `main` integration. | `NEEDS_RECONCILIATION`; current ARCH branch is ~5,143 commits ahead of main and contains a later unrelated merge. Create a clean main-based worktree before any merge. |
+| ARCH-001-MAINLINE-001 | Reconcile release branch drift and isolate ARCH-001 for canonical Hermes `main` integration. | `NEEDS_RECONCILIATION`; Codex and AGY agree that the current ARCH branch is ~5,143 commits ahead of main and contains a later unrelated merge. Create a clean main-based worktree before any merge. External Windows planning paths are context only, not repo evidence. |
 
 ### Architecture-series status and proposed work
 

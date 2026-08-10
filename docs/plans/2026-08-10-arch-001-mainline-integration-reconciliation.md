@@ -89,5 +89,26 @@ release-history inclusion, the later unrelated merge, and DGX release-ref
 drift. The next review must inspect the clean main-based change set rather
 than the current branch summary.
 
-Claude/AGY review: not dispatched. Dispatch requires the user's explicit
-approval with the objective, scope, environment, and expected review output.
+Claude review: not dispatched because the user identified Claude as
+unavailable. AGY was dispatched after the user's explicit approval with the
+objective, scope, environment, and expected review output.
+
+## AGY independent review checkpoint - 2026-08-10
+
+- AGY reviewed this ticket in the exact worktree and returned
+  `NEEDS_RECONCILIATION`.
+- AGY confirmed that the internal ticket and roadmap paths exist and agreed
+  that the mainline itself is not the problem; the high-severity blockers are
+  release-branch drift, ARCH branch history contamination, the unrelated
+  `cf7252a52` merge, and the missing clean main-based worktree.
+- AGY required full-SHA provenance, an isolated ARCH-001 diff, complete tests,
+  file-by-file classification, and post-merge re-bake/rollback evidence before
+  `READY`.
+- AGY correctly marked repo-external Windows paths such as
+  `D:\AI\project\HERMES_V020_TICKETS_V2.md` as evidence-invalid for this
+  repository. Those references remain planning context only and are not
+  accepted as merge proof.
+- Claude was not dispatched because the user identified Claude as unavailable.
+
+Consensus status: `NEEDS_RECONCILIATION`; Codex and AGY agree that the current
+branch must not be merged directly into Hermes `main`.

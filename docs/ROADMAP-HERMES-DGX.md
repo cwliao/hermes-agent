@@ -1,6 +1,6 @@
 # Hermes DGX Roadmap
 
-> Snapshot: 2026-08-09 (Asia/Taipei). This is the planning source of truth for the Hermes DGX integration effort.
+> Snapshot: 2026-08-10 (Asia/Taipei). This is the planning source of truth for the Hermes DGX integration effort.
 > Re-verify branch heads, live release marker, service status, and ticket refs before every deployment decision.
 
 ## 1. Source and status rules
@@ -21,7 +21,7 @@
 | `origin/ticket/T0127-v2026.8.3-merged` | `8ef05d5a3` (2026-08-08) | Current DGX release source branch used for the rebuild baseline. |
 | `origin/feature/klib-orchestration-integration` | `5863e9d5e` (2026-08-08) | Integration branch; includes T0108/T0138 work but diverges from the release source. |
 | live checkout | `main`, `7fa1865f7` at last read-only check | Claude-owned checkout; do not edit, reset, pull, or restart it from this workflow. |
-| ARCH-001 rebuild | `agent/arch-001-dgx-release-rebuild` | Isolated Windows worktree based on `8ef05d5a3`; uncommitted and not deployed. |
+| ARCH-001 rebuild | `agent/arch-001-dgx-release-rebuild` at `f0dd130c8` | Committed and pushed; baked and live on DGX as `v2026.8.3-arch-001-f0dd130c8`. |
 
 This clone currently has only the `origin` remote; no separate `upstream` remote is configured.
 
@@ -47,7 +47,7 @@ The parent tickets and detailed implementation tickets are aliases, not duplicat
 
 | Ticket | Capability and dependencies | Current evidence/status |
 |---|---|---|
-| `ARCH-001` | Versioned shared runtime state schema; no dependencies. | Rebuilt in the isolated worktree from `8ef05d5a3`; review loop still open. |
+| `ARCH-001` | Versioned shared runtime state schema; no dependencies. | Implemented at `f0dd130c8`; 29 focused tests passed; pushed and deployed with runtime fingerprint and health evidence. Claude unavailable; latest AGY output cited incorrect paths and is not accepted as consensus. |
 | `ARCH-002` | Append-only audit event store and read-only replay; depends on `ARCH-001`. | Not implemented or merged in current local refs. |
 | `ARCH-003` | Central recursive secret redaction and safe serialization; depends on `ARCH-001`. | Handover records a delegated reference branch/commit (`dbd53d329e`) with a foundation-only implementation; consumer wiring is absent and it is not accepted as final. The reference branch is not present in current local refs. |
 | `ARCH-004` | SQLite/WAL contention, corruption, disk-full classification, bounded retry, and fail-closed safeguards; depends on `ARCH-001` + `ARCH-002`. | Not implemented or merged in current local refs. |
@@ -92,7 +92,7 @@ T01–T08 must consume the ARCH/SEC/RES/OPS contracts above; they are not a repl
 | G0 Release and health correctness gate | Prove source -> baked release -> running process, detect stale/degraded services, and preserve rollback evidence. | P0 | Foundation exists but is manual; must gate all deployments. | T0135, T0138, T0140, T0142, ARCH-001 |
 | G1 Private Telegram and job health | One allowlisted user, `/status`, restart recovery, terminal job states, and failure/recovery alerts. | P1 | `/kmdaily` exists; health/waiter contract still needs consolidation. | T0051, T0127, T0131; KMDaily health follow-up |
 | G2 Knowledge and briefing workflow | Reliable `/klib`, `/ingest`, KMDaily trigger, background completion, and readable MCP results. | P1 | Most command features are merged on the release branch; E2E acceptance remains. | T0079, T0081, T0084, T0085, T0086, T0088, T0127, T0131, T0133, T0136; T0152 proposed |
-| G3 Safe remote coding-agent workflow on Spark | Isolated worktrees, TaskRouter leases, supervised Claude/Codex/AGY runners, and explicit HITL. | P1 | ARCH-001 rebuilt; review and deployment are pending. | web_gate/CLI bridge, ARCH-001 |
+| G3 Safe remote coding-agent workflow on Spark | Isolated worktrees, TaskRouter leases, supervised Claude/Codex/AGY runners, and explicit HITL. | P1 | ARCH-001 is deployed; independent consensus remains unresolved because Claude was unavailable and the latest AGY packet was path-invalid. | web_gate/CLI bridge, ARCH-001 |
 | G4 Mobile HITL for destructive operations | Durable approval state, expiry, denial, and recovery across restarts. | P2 | Approval hooks exist; durable runtime-state wiring is in ARCH-001 rebuild. | ARCH-001; approval lifecycle tests |
 | G5 Voice/file handoff | Real deployment voice/file transfer with observable completion and rollback. | P3 | No current release ticket verified. | Proposed |
 | G6 Team Telegram bot | Pairing, per-user sessions, groups, and isolation. | P3 | Deferred; no current release ticket verified. | Proposed |
@@ -138,7 +138,7 @@ T01–T08 must consume the ARCH/SEC/RES/OPS contracts above; they are not a repl
 
 | Ticket | Current state | Required next gate |
 |---|---|---|
-| ARCH-001 | Rebuilt in `D:\AI\project\hermes-agent-dgx-release-rebuild` from release HEAD `8ef05d5a3`; 29 focused tests passed after adding failure-path coverage and empty-profile fail-closed handling. Ruff/compileall/diff-check passed. Claude unavailable; latest AGY output cited incorrect paths and is not accepted as evidence. | Validate the review packet against the exact worktree, obtain a path-correct AGY re-review, then reconcile. No commit/push or DGX deployment yet. |
+| ARCH-001 | Commit `f0dd130c835fcd5f2ca94e0f091305ded51d07c9`; 29 focused tests passed on Windows and DGX staging; Ruff/compileall/diff-check passed. AC1 checksum bake and AC2 origin provenance passed. Live release: `v2026.8.3-arch-001-f0dd130c8`; fingerprint, process cwd, health guard, and AC3 audit verified. | Obtain a path-correct independent review when AGY/Claude is available and reconcile the unresolved consensus record; preserve the current release and rollback backup. |
 
 ### Architecture-series status and proposed work
 
@@ -180,18 +180,18 @@ The v0.20 dependency order is: `ARCH-001` -> `ARCH-002` -> `ARCH-004`; `ARCH-003
 
 ## 8. Immediate execution queue
 
-1. Close the ARCH-001 review/consensus loop on the rebuilt release target.
+1. Close the ARCH-001 review/consensus loop against the already-deployed release target.
 2. Independently inspect the ARCH-003 reference design and reconstruct its authoritative acceptance criteria; do not import the delegated branch blindly.
 3. Implement/review ARCH-002, then ARCH-004; keep the audit and storage contracts ahead of security/resilience consumers.
 4. Implement/review SEC-001 and SEC-002, followed by RES-001 and RES-002 in parallel where dependencies permit.
 5. Implement/review OPS-001 and connect the generic runner waiter terminal-state contract exposed by the KMDaily incident.
-6. Verify T0138 health-guard units and T0142 release-bake evidence on DGX without enabling or restarting anything yet.
+6. Maintain T0138/T0142 release-bake and health evidence, including the ARCH-001 rollback backup.
 7. Decide whether branch-only T0108 and memory branches should be promoted into the release source, then define/confirm T0152 acceptance criteria.
 8. Run KMDaily/KLIB E2E and defer INT-005/A2A-006 until the P0 architecture loop is accepted.
 
 ## 9. Explicit non-claims
 
-- ARCH-001 is not committed, pushed, or deployed by this roadmap update.
+- ARCH-001 is committed at `f0dd130c8`, pushed to `origin/agent/arch-001-dgx-release-rebuild`, and deployed as `v2026.8.3-arch-001-f0dd130c8` with runtime evidence.
 - A ticket being present in a release branch does not prove it is running on DGX.
 - A successful one-shot KMDaily cycle does not prove the full job-monitoring contract.
 - Synthetic tests and local pytest results do not replace DGX smoke, health, or rollback evidence.

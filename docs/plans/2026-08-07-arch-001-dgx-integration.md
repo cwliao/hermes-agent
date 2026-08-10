@@ -1,8 +1,8 @@
 # HERMES-ARCH-001-INTEGRATION: Wire runtime state into DGX Hermes
 
-**Status:** Rebuilt on the current DGX release target in an isolated worktree;
-independent review, commit/push, and live deployment remain pending explicit
-checkpoints.
+**Status:** Implemented at `f0dd130c8`, pushed, baked, and deployed from an
+isolated staging worktree. Claude remains unavailable and the latest AGY packet
+was path-invalid, so no independent review consensus is claimed.
 
 Canonical roadmap: `docs/ROADMAP-HERMES-DGX.md`.
 
@@ -17,18 +17,19 @@ gateway's current `state.db`, conversation history, or other service state.
 
 - Host: DGX Spark `55-0940189-03`.
 - Live checkout: `/home/cwliao/.hermes/hermes-agent`.
-+- Observed live checkout branch: `main`, HEAD `7fa1865f7`.
-+- DGX release source branch: `ticket/T0127-v2026.8.3-merged`, HEAD
-+  `8ef05d5a3`; this is the rebuild baseline because production uses a baked
-+  release snapshot rather than the live checkout directly.
+- Observed live checkout branch: `main`, HEAD `7fa1865f7`.
+- DGX release source branch: `ticket/T0127-v2026.8.3-merged`, HEAD
+  `8ef05d5a3`; this is the rebuild baseline because production uses a baked
+  release snapshot rather than the live checkout directly.
 - Service: user systemd unit `hermes-gateway.service`, currently active.
 - Service entry point: `/home/cwliao/.hermes/hermes-agent/venv/bin/python
   -m hermes_cli.main gateway run`.
 - The live checkout is owned by Claude's ongoing work and currently contains
   an untracked documentation file. No direct edits, reset, pull, or restart
   are allowed against that checkout during implementation.
-- ARCH-001 implementation source: commit `d773f283f` on
-  `agent/arch-001-implementation`.
+- ARCH-001 implementation source: commit
+  `f0dd130c835fcd5f2ca94e0f091305ded51d07c9` on
+  `agent/arch-001-dgx-release-rebuild`.
 
 ## Scope
 
@@ -208,4 +209,22 @@ installed in the test environment. No ARCH-001 code changes that path.
   exist in this worktree (for example `.plans` and generated
   `.pytest-arch001-rebuild` tests). That output is evidence-invalid and is not
   treated as a valid re-review or consensus. Claude remains unavailable.
-The rebuild is not committed, pushed, or deployed.
+The rebuild is committed and pushed. It was staged on DGX at
+`/home/cwliao/.hermes/worktrees/arch-001-dgx-release-rebuild` and deployed
+as `/home/cwliao/.hermes/releases/v2026.8.3-arch-001-f0dd130c8`.
+
+## Deployment checkpoint - 2026-08-10
+
+- AC1 checksum bake passed; manifest source commit is
+  `f0dd130c835fcd5f2ca94e0f091305ded51d07c9`.
+- AC2 origin provenance passed on
+  `origin/agent/arch-001-dgx-release-rebuild`.
+- `RELEASE_COMMIT` was atomically written with the full commit SHA.
+- The prior drop-in was backed up at
+  `/home/cwliao/.hermes/backups/deploy-v2026.8.3-arch-001-20260810075725`.
+- `hermes-gateway.service` is active; its process cwd and boot fingerprint
+  both identify the ARCH-001 release. The health guard was silent/healthy.
+- AC3 reported `systemd_process_mismatch: false` and all registered security
+  fingerprints present. It also emitted the pre-existing unregistered-ticket
+  warning for `T0038`, `T0053`, `T0066`, `T0067`, and `T0132`; this remains a
+  separate security-registry follow-up, not an ARCH-001 deployment failure.

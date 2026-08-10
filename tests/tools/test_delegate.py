@@ -531,6 +531,31 @@ class TestToolNamePreservation(unittest.TestCase):
         self.assertNotIn("acp_command", task_item_props)
         self.assertNotIn("acp_args", task_item_props)
 
+    def test_saved_tool_names_set_on_child_before_run(self):
+        """_run_single_child must set _delegate_saved_tool_names on the child
+        from model_tools._last_resolved_tool_names before run_conversation."""
+        import model_tools
+
+        parent = _make_mock_parent(depth=0)
+        expected_tools = ["read_file", "web_search", "execute_code"]
+        model_tools._last_resolved_tool_names = list(expected_tools)
+
+        captured = {}
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+
+            def capture_and_return(user_message, task_id=None, stream_callback=None):
+                captured["saved"] = list(mock_child._delegate_saved_tool_names)
+                return {"final_response": "ok", "completed": True, "api_calls": 1}
+
+            mock_child.run_conversation.side_effect = capture_and_return
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="capture test", parent_agent=parent)
+
+        self.assertEqual(captured["saved"], expected_tools)
+
 
 
 class TestDelegateObservability(unittest.TestCase):

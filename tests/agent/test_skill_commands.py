@@ -10,6 +10,7 @@ import tools.skills_tool as skills_tool_module
 from agent.skill_commands import (
     build_preloaded_skills_prompt,
     build_skill_invocation_message,
+    match_natural_language_skills,
     resolve_skill_command_key,
     scan_skill_commands,
 )
@@ -314,6 +315,35 @@ class TestResolveSkillCommandKey:
             scan_skill_commands()
             assert resolve_skill_command_key("does_not_exist") is None
             assert resolve_skill_command_key("does-not-exist") is None
+
+
+class TestNaturalLanguageSkillTriggers:
+    def test_matches_explicit_literal_phrases_case_insensitively(self, tmp_path):
+        frontmatter = """metadata:
+  hermes:
+    natural_language_triggers: [diagram, flowchart, Mermaid]
+"""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "diagram-maker", frontmatter_extra=frontmatter)
+            scan_skill_commands()
+
+            matches = match_natural_language_skills(
+                "Please make a MERMAID flowchart for login."
+            )
+
+        assert [item["name"] for item in matches] == ["diagram-maker"]
+
+    def test_does_not_match_substrings_inside_words_or_slugs(self, tmp_path):
+        frontmatter = """metadata:
+  hermes:
+    natural_language_triggers: [diagram]
+"""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "diagram-maker", frontmatter_extra=frontmatter)
+            scan_skill_commands()
+
+            assert match_natural_language_skills("diagram-maker settings") == []
+            assert match_natural_language_skills("I need a diagram")
 
 
 

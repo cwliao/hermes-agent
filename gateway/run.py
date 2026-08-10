@@ -16714,6 +16714,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception as e:
                 logger.warning("[Gateway] Failed to auto-load skill(s) %s: %s", _skill_names, e)
 
+        # Auto-load skills that explicitly opt into natural-language phrases.
+        # This runs after slash/topic loading and before history/agent startup,
+        # so the model receives the same full skill payload as an explicit
+        # slash invocation.  Never inspect ordinary skill descriptions here:
+        # only ``metadata.hermes.natural_language_triggers`` may activate it.
+        _natural_text = event.text if isinstance(event.text, str) else ""
+        if _natural_text and not _natural_text.lstrip().startswith("/"):
+            try:
+                from agent.skill_commands import (
+                    _build_skill_message,
+                    _load_skill_payload,
+                    match_natural_language_skills,
+                )
+
+                _natural_matches = match_natural_language_skills(_natural_text)
+                _natural_parts: list[str] = []
+                _natural_loaded: list[str] = []
+                for _skill_info in _natural_matches:
+                    _loaded = _load_skill_payload(
+                        _skill_info["skill_dir"], task_id=_quick_key
+                    )
+                    if not _loaded:
+                        continue
+                    _loaded_skill, _skill_dir, _display_name = _loaded
+                    _note = (
+                        f'[IMPORTANT: The natural-language request matched the '
+                        f'"{_display_name}" skill. The full skill content is '
+                        "loaded below. Treat it as active guidance for this turn.]"
+                    )
+                    _part = _build_skill_message(
+                        _loaded_skill, _skill_dir, _note, session_id=_quick_key
+                    )
+                    if _part:
+                        _natural_parts.append(_part)
+                        _natural_loaded.append(_display_name)
+                if _natural_parts:
+                    _natural_parts.append(_natural_text)
+                    event.text = "\n\n".join(_natural_parts)
+                    logger.info(
+                        "[Gateway] Natural-language trigger loaded skill(s) %s for session %s",
+                        _natural_loaded,
+                        session_key,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "[Gateway] Failed to load natural-language skill trigger: %s", e
+                )
+
         # ── Turn lease (#64934) ────────────────────────────────────────
         # Session resolution is FINAL here (get_or_create → async-delegation
         # pinning → topic tip-walk switch_session are all above). Serialize

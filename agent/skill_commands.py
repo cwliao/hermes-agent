@@ -382,7 +382,11 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     _skill_commands = {}
     try:
         from tools.skills_tool import SKILLS_DIR, _parse_frontmatter, skill_matches_platform, skill_matches_environment, _get_disabled_skill_names
-        from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
+        from agent.skill_utils import (
+            extract_skill_natural_language_triggers,
+            get_external_skills_dirs,
+            iter_skill_index_files,
+        )
         from hermes_cli.commands import resolve_command
         disabled = _get_disabled_skill_names()
         seen_names: set = set()
@@ -459,12 +463,37 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                         "description": description or f"Invoke the {name} skill",
                         "skill_md_path": str(skill_md),
                         "skill_dir": str(skill_md.parent),
+                        "natural_language_triggers": extract_skill_natural_language_triggers(frontmatter),
                     }
                 except Exception:
                     continue
     except Exception:
         pass
     return _skill_commands
+
+
+def match_natural_language_skills(text: str) -> list[Dict[str, Any]]:
+    """Return skills explicitly opted into by literal trigger phrases.
+
+    Triggers are word/phrase-boundary matches, not regexes.  This keeps the
+    activation surface auditable in SKILL.md frontmatter and prevents a skill
+    from smuggling executable matching logic into metadata.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return []
+
+    matches: list[Dict[str, Any]] = []
+    for info in get_skill_commands().values():
+        triggers = info.get("natural_language_triggers") or []
+        for trigger in triggers:
+            phrase = str(trigger).strip()
+            if not phrase:
+                continue
+            pattern = rf"(?<![\w-]){re.escape(phrase)}(?![\w-])"
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                matches.append(info)
+                break
+    return matches
 
 
 def get_skill_commands() -> Dict[str, Dict[str, Any]]:

@@ -679,6 +679,36 @@ def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
     }
 
 
+def extract_skill_natural_language_triggers(frontmatter: Dict[str, Any]) -> List[str]:
+    """Extract literal natural-language activation phrases from frontmatter.
+
+    This is intentionally a small, explicit surface: skill authors opt in with
+    ``metadata.hermes.natural_language_triggers`` and each entry is matched as
+    a case-insensitive word/phrase boundary, never as executable regex.
+    """
+    metadata = frontmatter.get("metadata")
+    if not isinstance(metadata, dict):
+        return []
+    hermes = metadata.get("hermes") or {}
+    if not isinstance(hermes, dict):
+        return []
+    raw = hermes.get("natural_language_triggers", [])
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+
+    triggers: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        trigger = str(item or "").strip()
+        key = trigger.casefold()
+        if trigger and key not in seen:
+            seen.add(key)
+            triggers.append(trigger)
+    return triggers
+
+
 # ── Skill config extraction ───────────────────────────────────────────────
 
 

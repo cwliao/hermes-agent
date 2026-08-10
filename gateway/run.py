@@ -3341,12 +3341,15 @@ class GatewayRunner(
     _platform_lock_takeover_on_start: bool = False
     _reconnect_watcher_task: Optional["asyncio.Task"] = None
 
-    def __init__(self, config: Optional[GatewayConfig] = None):
+    def __init__(self, config: Optional[GatewayConfig] = None, runtime_state=None):
         global _gateway_runner_ref
         # With multiplex_profiles on, load under the default profile secret scope so bot tokens in its
         # .env resolve as secondary profiles' do; explicit config= injection (tests) is left untouched.
         # See #64674.
         self.config = config if config is not None else load_gateway_config_for_runner()
+        # ARCH-001 is injected by start_gateway after profile-scoped preflight.
+        # Keep it optional for direct construction in tests and embedders.
+        self._runtime_state = runtime_state
         # Multiplexer flag flips agent.secret_scope.get_secret() to fail-closed on unscoped credential
         # reads, so a missed migration crashes loudly instead of leaking a cross-profile value.
         try:
@@ -3929,6 +3932,14 @@ class GatewayRunner(
             return get_active_profile_name() or "default"
         except Exception:
             return "default"
+
+    def _runtime_state_profile_for_source(self, source):
+        """Resolve the profile-scoped ARCH-001 repository for one turn."""
+        manager = getattr(self, "_runtime_state", None)
+        if manager is None:
+            return None
+        profile_name = getattr(source, "profile", None) or self._active_profile_name()
+        return manager.profile(profile_name)
 
     def _is_user_authorized_for_source(
         self, source: SessionSource, *, allow_adapter_delegation: bool = True) -> bool:
@@ -5199,7 +5210,29 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     _start_gateway_configure_logging(verbosity)
 
-    runner = GatewayRunner(config)
+    # ARCH-001 startup preflight must complete before GatewayRunner constructs
+    # adapters or opens any external connector. It uses a separate,
+    # profile-scoped runtime_state.db and never replaces legacy state.db.
+    from gateway.runtime_state import RuntimeStateManager
+
+    effective_config = config or load_gateway_config()
+    runtime_state = RuntimeStateManager(effective_config)
+    try:
+        runtime_state.preflight()
+    except Exception:
+        runtime_state.close()
+        logger.error(
+            "ARCH-001 runtime-state preflight failed; refusing to start gateway",
+            exc_info=True,
+        )
+        return False
+
+    try:
+        runner = GatewayRunner(effective_config)
+    except Exception:
+        runtime_state.close()
+        raise
+    runner._runtime_state = runtime_state
     # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
     # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.
     # See #82936.
@@ -5258,7 +5291,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     # PID file BEFORE adapters: of two concurrent `run --replace`, only the O_EXCL winner opens sockets.
     if not _start_gateway_claim_pid_file():
+        runtime_state.close()
         return False
+    import atexit
+    atexit.register(runtime_state.close)
 
     # Right after the PID claim (which makes us authoritative); non-fatal — consumers fall back to scan.
     _control_server = await _start_gateway_start_control_socket(runner)

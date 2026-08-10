@@ -546,6 +546,8 @@ class GatewayConfig:
     reset_triggers: List[str] = field(default_factory=lambda: ["/new", "/reset"])
     quick_commands: Dict[str, Any] = field(default_factory=dict)  # slash commands that bypass the agent loop
     sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
+    # ARCH-001 runtime state is separate from the legacy gateway/session DB.
+    runtime_state_db_path: Optional[Path] = None
     # Legacy sessions.json mirror of the routing index (primary: state.db) for external tooling / downgrades.
     # The primary copy lives in state.db (gateway_routing table, #9006). Default True for backward
     # compatibility with external tooling and downgrade safety; set gateway.write_sessions_json: false in
@@ -667,6 +669,11 @@ class GatewayConfig:
             "reset_triggers": self.reset_triggers,
             "quick_commands": self.quick_commands,
             "sessions_dir": str(self.sessions_dir),
+            "runtime_state_db_path": (
+                str(self.runtime_state_db_path)
+                if self.runtime_state_db_path is not None
+                else None
+            ),
             **{name: getattr(self, name) for name in self._SCALAR_DICT_FIELDS},
             "streaming": self.streaming.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
@@ -730,6 +737,16 @@ class GatewayConfig:
             pick("max_concurrent_sessions"), key_label("max_concurrent_sessions")
         )
 
+        runtime_state_db_path = data.get("runtime_state_db_path")
+        if runtime_state_db_path is None and isinstance(data.get("runtime_state"), dict):
+            runtime_state_db_path = data["runtime_state"].get("db_path")
+        if runtime_state_db_path is None and isinstance(nested_gateway, dict):
+            nested_runtime_state = nested_gateway.get("runtime_state")
+            if isinstance(nested_runtime_state, dict):
+                runtime_state_db_path = nested_runtime_state.get("db_path")
+        if runtime_state_db_path is not None:
+            runtime_state_db_path = Path(str(runtime_state_db_path))
+
         try:
             session_store_max_age_days = max(int(data.get("session_store_max_age_days", 90)), 0)
         except (TypeError, ValueError):
@@ -750,6 +767,7 @@ class GatewayConfig:
             reset_triggers=data.get("reset_triggers", ["/new", "/reset"]),
             quick_commands=_coerce_dict(data.get("quick_commands", {})),
             sessions_dir=Path(data["sessions_dir"]) if "sessions_dir" in data else get_hermes_home() / "sessions",
+            runtime_state_db_path=runtime_state_db_path,
             **{name: _coerce_bool(data.get(name), default) for name, default in _TOPLEVEL_BOOL_DEFAULTS.items()},
             stt_enabled=_coerce_bool(stt_setting("stt_enabled", "enabled"), True),
             stt_echo_transcripts=_coerce_bool(stt_setting("stt_echo_transcripts", "echo_transcripts"), True),

@@ -716,6 +716,14 @@ class TurnRunner:
     def _event_callback_sync(self, event_type: str, context: dict) -> None:
         ctx = self._ctx
         try:
+            if event_type == "session:compress":
+                from gateway.runtime_state import get_runtime_state_context
+
+                runtime_context = get_runtime_state_context()
+                if runtime_context is not None:
+                    runtime_context.profile.record_compression(
+                        runtime_context.session_id, "succeeded"
+                    )
             asyncio.run_coroutine_threadsafe(ctx._hooks_ref.emit(event_type, context), ctx._loop_for_step)
         except Exception as e:
             logger.debug("event_callback hook error: %s", e)

@@ -1938,7 +1938,22 @@ class GatewayTurnMixin:
             return prepared
         history, message_text = prepared.history, prepared.message_text
 
+        _runtime_task_status = "failed"
         try:
+            runtime_profile = self._runtime_state_profile_for_source(source)
+            if runtime_profile is not None:
+                runtime_profile.ensure_session(session_entry.session_id, source.user_id)
+                runtime_profile.ensure_compression(session_entry.session_id)
+                event._runtime_state_profile = runtime_profile
+                event._runtime_task_lease = runtime_profile.begin_task(session_entry.session_id)
+                from gateway.runtime_state import bind_runtime_state_context
+
+                event._runtime_state_context_token = bind_runtime_state_context(
+                    runtime_profile,
+                    session_entry.session_id,
+                    event._runtime_task_lease.task_id,
+                )
+
             hook_ctx = {
                 "platform": source.platform.value if source.platform else "",
                 "user_id": source.user_id,
@@ -1966,6 +1981,13 @@ class GatewayTurnMixin:
                 message_type=event.message_type,
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
+            if isinstance(agent_result, dict):
+                if agent_result.get("partial"):
+                    _runtime_task_status = "degraded"
+                elif not any(agent_result.get(key) for key in ("failed", "error", "interrupted")):
+                    _runtime_task_status = "succeeded"
+            elif agent_result is not None:
+                _runtime_task_status = "succeeded"
 
             await self._hmwa_stop_typing_for_turn(event, source)
 
@@ -2005,6 +2027,23 @@ class GatewayTurnMixin:
         except Exception as e:
             return await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
         finally:
+            _runtime_profile = getattr(event, "_runtime_state_profile", None)
+            _runtime_lease = getattr(event, "_runtime_task_lease", None)
+            if _runtime_profile is not None and _runtime_lease is not None:
+                try:
+                    _runtime_profile.finish_task(_runtime_lease, _runtime_task_status)
+                except Exception:
+                    logger.error(
+                        "ARCH-001 runtime task completion failed; leaving the gateway turn fail-closed",
+                        exc_info=True,
+                    )
+            _runtime_context_token = getattr(event, "_runtime_state_context_token", None)
+            if _runtime_context_token is not None:
+                try:
+                    from gateway.runtime_state import reset_runtime_state_context
+                    reset_runtime_state_context(_runtime_context_token)
+                except Exception:
+                    logger.debug("ARCH-001 runtime context cleanup failed", exc_info=True)
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
 

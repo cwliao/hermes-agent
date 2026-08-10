@@ -148,7 +148,8 @@ T01–T08 must consume the ARCH/SEC/RES/OPS contracts above; they are not a repl
 
 | Ticket | Current state | Required next gate |
 |---|---|---|
-| ARCH-001 | Commit `f0dd130c835fcd5f2ca94e0f091305ded51d07c9`; 29 focused tests passed on Windows and DGX staging; Ruff/compileall/diff-check passed. AC1 checksum bake and AC2 origin provenance passed. Live release: `v2026.8.3-arch-001-f0dd130c8`; fingerprint, process cwd, health guard, and AC3 audit verified. | Complete path-correct independent review, merge ARCH-001 to Hermes `main`, then re-bake/redeploy from mainline and preserve the current release as rollback. |
+| ARCH-001 | Commit `f0dd130c835fcd5f2ca94e0f091305ded51d07c9`; 29 focused tests passed on Windows and DGX staging; Ruff/compileall/diff-check passed. AC1 checksum bake and AC2 origin provenance passed. Live release: `v2026.8.3-arch-001-f0dd130c8`; fingerprint, process cwd, health guard, and AC3 audit verified. | Execute `ARCH-001-MAINLINE-001`: reconcile refs, isolate a clean main-based diff, complete review, merge to Hermes `main`, then re-bake/redeploy from mainline. |
+| ARCH-001-MAINLINE-001 | Reconcile release branch drift and isolate ARCH-001 for canonical Hermes `main` integration. | `NEEDS_RECONCILIATION`; current ARCH branch is ~5,143 commits ahead of main and contains a later unrelated merge. Create a clean main-based worktree before any merge. |
 
 ### Architecture-series status and proposed work
 
@@ -190,7 +191,7 @@ The v0.20 dependency order is: `ARCH-001` -> `ARCH-002` -> `ARCH-004`; `ARCH-003
 
 ## 8. Immediate execution queue
 
-1. Close the ARCH-001 review/consensus loop, merge it to Hermes `main`, and re-bake/redeploy from mainline.
+1. Execute `ARCH-001-MAINLINE-001`: clean main-based integration, review, merge, and re-bake/redeploy.
 2. Independently inspect the ARCH-003 reference design and reconstruct its authoritative acceptance criteria; do not import the delegated branch blindly.
 3. Draft/review ARCH-002 after ARCH-001 is mainline-complete; then implement/review ARCH-004.
 4. Implement/review SEC-001 and SEC-002, followed by RES-001 and RES-002 in parallel where dependencies permit.

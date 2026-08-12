@@ -89,7 +89,11 @@ def _gateway_origin_json(agent: "AIAgent") -> Optional[str]:
 
 from agent.iteration_budget import IterationBudget
 from hermes_cli.env_loader import load_hermes_dotenv
-from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
+from hermes_cli.timeouts import (
+    get_local_stale_timeout,
+    get_provider_request_timeout,
+    get_provider_stale_timeout,
+)
 
 _hermes_home = get_hermes_home()  # read by agent_init via _ra()._hermes_home
 _loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent / '.env')
@@ -542,6 +546,11 @@ class AIAgent(
         env_timeout = os.getenv("HERMES_API_CALL_STALE_TIMEOUT")
         if env_timeout is not None:
             return float(env_timeout), False
+        # Local providers need a bounded fallback even when the model name would
+        # otherwise receive a cloud reasoning-timeout floor.
+        base_url = getattr(self, "_base_url", None) or self.base_url or ""
+        if base_url and is_local_endpoint(base_url):
+            return get_local_stale_timeout(), True
         # Reasoning-model floor (cloud gateways idle-kill mid-think); not "implicit" so the local-endpoint
         # short-circuit does not disable stale detection here.
         from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
@@ -556,7 +565,7 @@ class AIAgent(
         stale_base, uses_implicit_default = self._resolved_api_call_stale_timeout_base()
         base_url = getattr(self, "_base_url", None) or self.base_url or ""
         if uses_implicit_default and base_url and is_local_endpoint(base_url):
-            return float("inf")
+            return get_local_stale_timeout()
 
         from agent.chat_completion_helpers import estimate_request_context_tokens
         est_tokens = estimate_request_context_tokens(api_payload)

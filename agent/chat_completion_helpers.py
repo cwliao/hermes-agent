@@ -23,7 +23,11 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
-from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
+from hermes_cli.timeouts import (
+    get_local_stale_timeout,
+    get_provider_request_timeout,
+    get_provider_stale_timeout,
+)
 from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import (FailoverReason, PROVIDER_STREAM_NON_JSON_ERROR_CODE)
 from agent.errors import EmptyStreamError
@@ -3455,22 +3459,13 @@ class _StreamingCall:
     # ── orchestration ───────────────────────────────────────────────────
 
     def _resolve_stale_timeout(self) -> None:
-        """Set ``_stream_stale_timeout``. Local endpoints (unless the env is set) get
-        long but FINITE patience — 900s / ``agent.local_stream_stale_timeout`` /
-        HERMES_LOCAL_STREAM_STALE_TIMEOUT — an infinite one stalled sessions on a
-        crashed endpoint forever. Cloud values scale with context size and are
+        """Set ``_stream_stale_timeout``. Local endpoints get a bounded configured
+        fallback so a crashed endpoint cannot stall a session forever. Cloud values
+        scale with context size and are
         floored for known reasoning models (else BrokenPipeError from the gateway)."""
         base = _configured_stale_base(self.agent)
         if base == 180.0 and self.agent.base_url and is_local_endpoint(self.agent.base_url):
-            _local_default = 900.0
-            with contextlib.suppress(Exception):
-                from hermes_cli.config import load_config_readonly
-                _cfg = load_config_readonly()  # read-only consumer — no deepcopy
-                _agent_cfg = _cfg.get("agent") if isinstance(_cfg, dict) else None
-                _v = _agent_cfg.get("local_stream_stale_timeout") if isinstance(_agent_cfg, dict) else None
-                if isinstance(_v, (int, float)):
-                    _local_default = float(_v)
-            self._stream_stale_timeout = env_float("HERMES_LOCAL_STREAM_STALE_TIMEOUT", _local_default)
+            self._stream_stale_timeout = get_local_stale_timeout()
             logger.debug("Local provider detected (%s) — stale stream timeout set to %.0fs",
                 self.agent.base_url, self._stream_stale_timeout)
             return

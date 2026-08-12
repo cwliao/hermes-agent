@@ -186,7 +186,11 @@ def build_memory_guidance(memory_enabled: bool = True, profile_enabled: bool = T
         "'Always respond concisely' ✗ (imperative phrasing gets re-read as "
         "a directive in later sessions and can override the user's current "
         "request). A fact stale within a week belongs in session history; "
-        "procedures and workflows belong in skills."
+        "procedures and workflows belong in skills. Do not use memory as a "
+        "document or bulk-content store: for document work, use write_file or "
+        "patch, read the result back, and verify it before claiming success; "
+        "never replace a failed file-tool call with a shell heredoc targeting "
+        "~/.hermes."
     )
 
 

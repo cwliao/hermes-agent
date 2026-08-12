@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 
+DEFAULT_LOCAL_STALE_TIMEOUT_SECONDS = 300.0
+
+
 def _coerce_timeout(raw: object) -> float | None:
     try:
         timeout = float(raw)
@@ -38,6 +41,22 @@ def get_provider_request_timeout(provider_id: str, model: str | None = None) -> 
 def get_provider_stale_timeout(provider_id: str, model: str | None = None) -> float | None:
     """Return a configured non-stream stale timeout in seconds, if any."""
     return _configured_timeout(provider_id, model, "stale_timeout_seconds", "stale_timeout_seconds")
+
+
+def get_local_stale_timeout() -> float:
+    """Return the bounded stale timeout for implicit local model calls."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly()
+    except Exception:
+        return DEFAULT_LOCAL_STALE_TIMEOUT_SECONDS
+
+    agent_config = config.get("agent", {}) if isinstance(config, dict) else {}
+    if isinstance(agent_config, dict):
+        configured = _coerce_timeout(agent_config.get("local_stale_timeout_seconds"))
+        if configured is not None:
+            return configured
+    return DEFAULT_LOCAL_STALE_TIMEOUT_SECONDS
 
 
 def _get_model_config(provider_config: dict[str, object], model: str | None) -> dict[str, object] | None:

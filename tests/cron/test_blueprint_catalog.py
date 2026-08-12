@@ -62,6 +62,11 @@ class TestScheduleResolution:
         assert spec["script"] == "builtin:morning-brief-weather"
         assert "WEATHER_UNAVAILABLE" in spec["prompt"]
 
+    def test_morning_brief_wires_bounded_weather_collection(self):
+        spec = fill_blueprint(get_blueprint("morning-brief"), {})
+        assert spec["script"] == "builtin:morning-brief-weather"
+        assert "WEATHER_UNAVAILABLE" in spec["prompt"]
+
 
 class TestValidation:
     def test_invalid_time_rejected(self):

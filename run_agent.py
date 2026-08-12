@@ -120,6 +120,7 @@ from agent.interrupt_compat import request_hard_interrupt
 
 from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_cli.timeouts import (
+    get_local_stale_timeout,
     get_provider_request_timeout,
     get_provider_stale_timeout,
 )
@@ -1471,7 +1472,7 @@ class AIAgent:
         stale_base, uses_implicit_default = self._resolved_api_call_stale_timeout_base()
         base_url = getattr(self, "_base_url", None) or self.base_url or ""
         if uses_implicit_default and base_url and is_local_endpoint(base_url):
-            return float("inf")
+            return get_local_stale_timeout()
 
         from agent.chat_completion_helpers import estimate_request_context_tokens
         est_tokens = estimate_request_context_tokens(api_payload)

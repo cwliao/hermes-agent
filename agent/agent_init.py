@@ -1794,9 +1794,23 @@ def init_agent(
         agent.lmstudio_load_mode = "explicit"
 
     try:
+        # Gateway and cron turns have no operator continuously watching the
+        # tool loop. Keep the interactive CLI/TUI soft-warning default, but
+        # circuit-break repeated failures for unattended runtimes. An explicit
+        # config value still wins inside ToolCallGuardrailConfig.from_mapping.
+        _platform_name = str(agent.platform or "").strip().lower()
+        _unattended_platform = _platform_name == "cron" or _platform_name not in {
+            "",
+            "cli",
+            "local",
+            "tui",
+            "desktop",
+            "acp",
+        }
         agent._tool_guardrails = ToolCallGuardrailController(
             ToolCallGuardrailConfig.from_mapping(
-                _agent_cfg.get("tool_loop_guardrails", {})
+                _agent_cfg.get("tool_loop_guardrails", {}),
+                default_hard_stop_enabled=_unattended_platform,
             )
         )
     except Exception as _tlg_err:

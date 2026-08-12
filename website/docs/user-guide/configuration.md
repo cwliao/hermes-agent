@@ -1084,20 +1084,20 @@ goals:
 
 ### API Timeouts
 
-Hermes has separate timeout layers for streaming, plus a stale detector for non-streaming calls. The stale detectors auto-adjust for local providers only when you leave them at their implicit defaults.
+Hermes has separate timeout layers for streaming, plus a stale detector for non-streaming calls. Local providers get extra prefill time, but implicit stale detection remains finite so a wedged Telegram job cannot wait forever.
 
 | Timeout | Default | Local providers | Config / env |
 |---------|---------|----------------|--------------|
 | Socket read timeout | 120s | Auto-raised to 1800s | `HERMES_STREAM_READ_TIMEOUT` |
-| Stale stream detection | 180s | Raised to a 900s ceiling (`agent.local_stream_stale_timeout`) | `HERMES_STREAM_STALE_TIMEOUT` |
-| Stale non-stream detection | 90s | Auto-disabled when left implicit | `providers.<id>.stale_timeout_seconds` or `HERMES_API_CALL_STALE_TIMEOUT` |
+| Stale stream detection | 180s | 300s by default | `agent.local_stale_timeout_seconds` or `HERMES_STREAM_STALE_TIMEOUT` |
+| Stale non-stream detection | 90s | 300s by default | `agent.local_stale_timeout_seconds`, provider/model stale timeout, or `HERMES_API_CALL_STALE_TIMEOUT` |
 | API call (non-streaming) | 1800s | Unchanged | `providers.<id>.request_timeout_seconds` / `timeout_seconds` or `HERMES_API_TIMEOUT` |
 
 The **socket read timeout** controls how long httpx waits for the next chunk of data from the provider. Local LLMs can take minutes for prefill on large contexts before producing the first token, so Hermes raises this to 30 minutes when it detects a local endpoint. If you explicitly set `HERMES_STREAM_READ_TIMEOUT`, that value is always used regardless of endpoint detection.
 
-The **stale stream detection** kills connections that receive SSE keep-alive pings but no actual content. For local providers (which don't send keep-alive pings during prefill) the default is raised to a finite 900-second ceiling instead of the 180s base — configurable via `agent.local_stream_stale_timeout` or the `HERMES_LOCAL_STREAM_STALE_TIMEOUT` env var.
+The **stale stream detection** kills connections that receive SSE keep-alive pings but no actual content. Local providers use a 300-second default to allow slow prefill while still recovering from a wedged request. Set `agent.local_stale_timeout_seconds` when a local model needs more or less time.
 
-The **stale non-stream detection** kills non-streaming calls that produce no response for too long. By default Hermes disables this on local endpoints to avoid false positives during long prefills. If you explicitly set `providers.<id>.stale_timeout_seconds`, `providers.<id>.models.<model>.stale_timeout_seconds`, or `HERMES_API_CALL_STALE_TIMEOUT`, that explicit value is honored even on local endpoints.
+The **stale non-stream detection** kills non-streaming calls that produce no response for too long. Local endpoints use the same bounded `agent.local_stale_timeout_seconds` default. `providers.<id>.stale_timeout_seconds`, `providers.<id>.models.<model>.stale_timeout_seconds`, and `HERMES_API_CALL_STALE_TIMEOUT` still take precedence.
 
 This budget bounds every non-streaming call, including the ones cron jobs and delegated subagents run inline. A provider that accepts a request and then goes silent — connection held open, no bytes, no error — is aborted at the stale timeout and retried, rather than hanging until the much longer socket read timeout (or, for an unattended cron run, until something external kills the process).
 
@@ -1714,14 +1714,18 @@ The gate is independent of `tool_use_enforcement` — either can be on without t
 
 ## Tool-Loop Guardrails
 
-Hermes detects when the agent is stuck in an unproductive tool-calling loop — the same tool call failing repeatedly, the same tool failing over and over, or an idempotent call returning the same result with no progress. By default it injects a **warning** into the tool result so the model self-corrects; it does not hard-stop, since a person watching the CLI/TUI can intervene.
+The warning-only behavior described below applies to interactive CLI/TUI
+sessions. Gateway and cron sessions use the same warnings plus a hard stop by
+default, because they may be unattended.
 
-For unattended gateway / server deployments, enable hard stops so a stuck agent is circuit-broken instead of burning the iteration budget:
+Hermes detects when the agent is stuck in an unproductive tool-calling loop — the same tool call failing repeatedly, the same tool failing over and over, or an idempotent call returning the same result with no progress. Interactive CLI/TUI sessions inject a **warning** into the tool result so a person can intervene; gateway and cron sessions default to a hard stop.
+
+Gateway and cron sessions default to hard stops so a stuck agent is circuit-broken instead of burning the iteration budget. Interactive CLI/TUI sessions remain warning-only unless you opt in:
 
 ```yaml
 tool_loop_guardrails:
   warnings_enabled: true       # inject warnings into tool results (default: true)
-  hard_stop_enabled: false     # also BLOCK the call past the hard-stop threshold (default: false)
+  # hard_stop_enabled: false   # explicit override; gateway/cron default to true
   warn_after:
     exact_failure: 2           # identical failing call repeated N times
     same_tool_failure: 3       # same tool failing N times (different args)
@@ -1735,7 +1739,7 @@ tool_loop_guardrails:
     max_subagents: 50          # max subagents spawned per turn (0 = unlimited)
 ```
 
-`hard_stop_enabled` defaults to `false` because interactive sessions have a human in the loop. In unattended deployments (gateway, cron, kanban workers) set it to `true` so repeated failures are blocked rather than only warned. See also [Docker / unattended deployments](docker.md).
+`hard_stop_enabled` defaults to `false` for interactive sessions and to `true` for gateway/cron sessions. An explicit value in `config.yaml` overrides the runtime default. See also [Docker / unattended deployments](docker.md).
 
 ### Per-turn runaway-loop caps
 

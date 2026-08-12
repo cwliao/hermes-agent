@@ -24,7 +24,10 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
-from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
+from hermes_cli.timeouts import (
+    get_provider_request_timeout,
+    get_provider_stale_timeout,
+)
 from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import (
     FailoverReason, PROVIDER_STREAM_EMPTY_FRAME_ERROR_CODE, PROVIDER_STREAM_NON_JSON_ERROR_CODE,
@@ -3898,10 +3901,9 @@ class _StreamingCall(StreamingWaitMonitor):
     # ── orchestration ───────────────────────────────────────────────────
 
     def _resolve_stale_timeout(self) -> None:
-        """Set ``_stream_stale_timeout``. Local endpoints (unless the env is set) get
-        long but FINITE patience — 900s / ``agent.local_stream_stale_timeout`` /
-        HERMES_LOCAL_STREAM_STALE_TIMEOUT — an infinite one stalled sessions on a
-        crashed endpoint forever. Cloud values scale with context size and are
+        """Set ``_stream_stale_timeout``. Local endpoints get a bounded configured
+        fallback so a crashed endpoint cannot stall a session forever. Cloud values
+        scale with context size and are
         floored for known reasoning models (else BrokenPipeError from the gateway)."""
         base = _configured_stale_base(self.agent)
         if base == 180.0 and self.agent.base_url and is_local_endpoint(self.agent.base_url):

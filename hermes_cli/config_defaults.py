@@ -2602,6 +2602,11 @@ DEFAULT_CONFIG = {
         # recent .md files and prunes older ones. 0 or negative disables
         # pruning (for operators who manage cleanup externally). Default 50.
         "output_retention": 50,
+        # Location used by the built-in morning-brief weather pre-run. Empty
+        # keeps weather non-blocking until the user configures a location.
+        "morning_brief": {
+            "weather_location": "",
+        },
         # Timeout (seconds) for a no-agent cron script. Also overridable via
         # HERMES_CRON_SCRIPT_TIMEOUT. Keep this in sync with
         # cron.scheduler._DEFAULT_SCRIPT_TIMEOUT so config set recognizes the

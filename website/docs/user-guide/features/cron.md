@@ -686,6 +686,21 @@ cron:
 ```
 
 Or set the `HERMES_CRON_MEDIA_SEND_TIMEOUT` environment variable. The resolution order is: env var → config.yaml → 300s default. A timed-out attachment is recorded in the job's run status as a partial delivery failure (the text still delivers).
+### Morning briefing weather
+
+The built-in `morning-brief` blueprint collects weather before the agent runs,
+so a weather outage or URL approval gate cannot prevent the rest of the brief
+from being delivered. Set the location in `config.yaml`:
+
+```yaml
+cron:
+  morning_brief:
+    weather_location: Taipei
+```
+
+The collector uses a fixed HTTPS endpoint with a bounded timeout and retry
+count. If the location is empty or the upstream is unavailable, it injects a
+`WEATHER_UNAVAILABLE` marker and the briefing continues without weather.
 
 ## Bot Chat delivery timeout
 

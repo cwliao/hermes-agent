@@ -313,6 +313,19 @@ def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optio
     return [python_exe, str(path)], env_overlay, None
 
 
+def _run_builtin_cron_script(script_path: str) -> Optional[tuple[bool, str]]:
+    """Run an allowlisted in-process cron data source when one is requested."""
+    if script_path != "builtin:morning-brief-weather":
+        return None
+    try:
+        from cron.weather import fetch_morning_brief_weather
+
+        return True, fetch_morning_brief_weather()
+    except Exception:  # pragma: no cover - final fail-safe
+        logger.warning("Built-in morning weather collection failed", exc_info=True)
+        return True, "WEATHER_UNAVAILABLE: internal weather collector failed"
+
+
 def _run_job_script(
     script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None,
@@ -327,6 +340,10 @@ def _run_job_script(
     Optional absolute path to use as the script's cwd. When set, the subprocess runs in this directory
     instead of the scripts-dir parent. See #69396.
     """
+    builtin_result = _run_builtin_cron_script(script_path)
+    if builtin_result is not None:
+        return builtin_result
+
     path, err = _resolve_script_path(script_path)
     if path is None:
         return False, err

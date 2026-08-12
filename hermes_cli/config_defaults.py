@@ -1677,6 +1677,11 @@ DEFAULT_CONFIG = {
         # save_job_output keeps the N most recent .md files per job; 0 or negative disables pruning
         # (for externally managed cleanup).
         "output_retention": 50,
+        # Location used by the built-in morning-brief weather pre-run. Empty
+        # keeps weather non-blocking until the user configures a location.
+        "morning_brief": {
+            "weather_location": "",
+        },
         # Timeout (seconds) for a no-agent cron script. Env: HERMES_CRON_SCRIPT_TIMEOUT. Keep in
         # sync with cron.scheduler._DEFAULT_SCRIPT_TIMEOUT.
         "script_timeout_seconds": 3600,

@@ -120,7 +120,10 @@ bootstrap() {
     chmod 700 "${HOME}/.ssh"
     if [[ ! -r "${identity}" ]]; then
         printf '%s\n' "No readable identity at ${identity}. Generating an Ed25519 key interactively." >&2
-        ssh-keygen -t ed25519 -f "${identity}" -C "hermes-dgx-recovery" || return 75
+        if ! ssh-keygen -t ed25519 -f "${identity}" -C "hermes-dgx-recovery"; then
+            printf '%s\n' "BOOTSTRAP_KEYGEN_FAILED: unable to create ${identity}" >&2
+            return 70
+        fi
     fi
 
     if ! command -v ssh-copy-id >/dev/null 2>&1; then

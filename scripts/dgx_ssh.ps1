@@ -13,9 +13,20 @@ if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
 }
 
 $wslInputPath = $scriptPath.Replace('\', '/')
-$wslScriptPath = (& wsl.exe -d Ubuntu -- wslpath -a $wslInputPath).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($wslScriptPath)) {
-    throw "Unable to resolve the WSL path for $scriptPath"
+$wslScriptPath = $null
+try {
+    $resolvedPath = & wsl.exe -d Ubuntu -- wslpath -a $wslInputPath 2>$null
+    if ($LASTEXITCODE -eq 0 -and $null -ne $resolvedPath) {
+        $candidatePath = $resolvedPath | Select-Object -First 1
+        if ($null -ne $candidatePath) {
+            $candidatePath = $candidatePath.ToString().Trim()
+            if (-not [string]::IsNullOrWhiteSpace($candidatePath)) {
+                $wslScriptPath = $candidatePath
+            }
+        }
+    }
+} catch {
+    $wslScriptPath = $null
 }
 
 $dgxTarget = "cwliao@140.96.58.171"
@@ -29,7 +40,12 @@ function Get-NativeSshOptions {
         "-o", "StrictHostKeyChecking=yes",
         "-o", "AddKeysToAgent=yes"
     )
-    $identity = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
+    $identity = $env:HERMES_DGX_IDENTITY
+    if ([string]::IsNullOrWhiteSpace($identity)) {
+        $identity = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
+    } else {
+        $identity = [Environment]::ExpandEnvironmentVariables($identity)
+    }
     if (Test-Path -LiteralPath $identity -PathType Leaf) {
         $options += @("-i", $identity)
     }
@@ -53,12 +69,15 @@ function Get-SshFailureStatus {
 
 function Invoke-NativeProbe {
     if (-not (Test-Path -LiteralPath $sshExe -PathType Leaf)) {
-        return 127
+        return [pscustomobject]@{ Output = @(); Status = 127 }
     }
     $output = & $sshExe @(Get-NativeSshOptions) "-o" "BatchMode=yes" $dgxTarget "printf 'SSH_OK\n'; hostname; id -un" 2>&1
     $status = $LASTEXITCODE
-    $output
-    return (Get-SshFailureStatus -Output $output -Status $status)
+    $classifiedStatus = [int](Get-SshFailureStatus -Output $output -Status $status)
+    return [pscustomobject]@{
+        Output = @($output)
+        Status = $classifiedStatus
+    }
 }
 
 function Invoke-NativeExec {
@@ -93,41 +112,46 @@ function Invoke-NativeAuth {
 
 switch ($Mode) {
     "probe" {
-        $wslOutput = & wsl.exe -d Ubuntu -- bash $wslScriptPath probe 2>&1
-        $wslStatus = $LASTEXITCODE
-        if ($wslStatus -eq 0) {
-            $wslOutput
+        if (-not [string]::IsNullOrWhiteSpace($wslScriptPath)) {
+            $wslOutput = & wsl.exe -d Ubuntu -- bash $wslScriptPath probe 2>&1
+            $wslStatus = $LASTEXITCODE
+            if ($wslStatus -eq 0) {
+                $wslOutput
+                exit 0
+            }
+            if ($wslStatus -ne 75) {
+                $wslOutput
+                exit $wslStatus
+            }
+        }
+        $nativeProbe = Invoke-NativeProbe
+        $nativeProbe.Output
+        if ($nativeProbe.Status -eq 0) {
             exit 0
         }
-        if ($wslStatus -ne 75) {
-            $wslOutput
-            exit $wslStatus
-        }
-        $nativeStatus = Invoke-NativeProbe
-        if ($nativeStatus -eq 0) {
-            exit 0
-        }
-        if ($nativeStatus -ne 75) {
-            exit $nativeStatus
+        if ($nativeProbe.Status -ne 75) {
+            exit $nativeProbe.Status
         }
         Write-Error "REAUTH_REQUIRED: both WSL and native Windows SSH routes failed"
         exit 75
     }
     "exec" {
-        $wslOutput = & wsl.exe -d Ubuntu -- bash $wslScriptPath exec @RemoteCommand 2>&1
-        $wslStatus = $LASTEXITCODE
-        if ($wslStatus -eq 0) {
-            $wslOutput
-            exit 0
+        if (-not [string]::IsNullOrWhiteSpace($wslScriptPath)) {
+            $wslOutput = & wsl.exe -d Ubuntu -- bash $wslScriptPath exec @RemoteCommand 2>&1
+            $wslStatus = $LASTEXITCODE
+            if ($wslStatus -eq 0) {
+                $wslOutput
+                exit 0
+            }
+            if ($wslStatus -ne 75) {
+                $wslOutput
+                exit $wslStatus
+            }
         }
-        if ($wslStatus -ne 75) {
-            $wslOutput
-            exit $wslStatus
-        }
-        $nativeProbeStatus = Invoke-NativeProbe
-        if ($nativeProbeStatus -ne 0) {
-            if ($nativeProbeStatus -ne 75) {
-                exit $nativeProbeStatus
+        $nativeProbe = Invoke-NativeProbe
+        if ($nativeProbe.Status -ne 0) {
+            if ($nativeProbe.Status -ne 75) {
+                exit $nativeProbe.Status
             }
             Write-Error "REAUTH_REQUIRED: both WSL and native Windows SSH routes failed"
             exit 75
@@ -136,13 +160,15 @@ switch ($Mode) {
         exit $nativeStatus
     }
     "auth" {
-        & wsl.exe -d Ubuntu -- bash $wslScriptPath auth @RemoteCommand
-        $wslStatus = $LASTEXITCODE
-        if ($wslStatus -eq 0) {
-            exit 0
-        }
-        if ($wslStatus -ne 75) {
-            exit $wslStatus
+        if (-not [string]::IsNullOrWhiteSpace($wslScriptPath)) {
+            & wsl.exe -d Ubuntu -- bash $wslScriptPath auth @RemoteCommand
+            $wslStatus = $LASTEXITCODE
+            if ($wslStatus -eq 0) {
+                exit 0
+            }
+            if ($wslStatus -ne 75) {
+                exit $wslStatus
+            }
         }
         $nativeStatus = Invoke-NativeAuth
         if ($nativeStatus -eq 0) {
@@ -155,6 +181,10 @@ switch ($Mode) {
         # Key bootstrap remains canonical in WSL; native Windows auth is still
         # available through `auth` and `exec` fallback without duplicating the
         # public-key installation policy here.
+        if ([string]::IsNullOrWhiteSpace($wslScriptPath)) {
+            Write-Error "BLOCKED_WSL_UNAVAILABLE: bootstrap is restricted to the canonical WSL path."
+            exit 69
+        }
         & wsl.exe -d Ubuntu -- bash $wslScriptPath bootstrap @RemoteCommand
         exit $LASTEXITCODE
     }

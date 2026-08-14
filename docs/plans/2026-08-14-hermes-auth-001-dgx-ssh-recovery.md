@@ -103,6 +103,10 @@ new headless agent or bypass host-key verification.
   -> native fallback, single-output preservation, and configured identity
   forwarding. Shell behavior tests fail when neither `bash` nor `wsl.exe` is
   available instead of silently skipping.
+- Follow-up path coverage found and fixed the same output/status aggregation
+  defect in native PowerShell `auth`; the mock harness now executes `probe`,
+  `exec`, and `auth` fallback paths plus a real shell bootstrap keygen failure,
+  with `7 passed` recorded locally.
 - The broader `tests/scripts` collection remains environment-blocked outside
   this change: the native interpreter lacks `httpx`, and the project venv's
   pytest temp root has an existing Windows ACL denial. These are recorded as

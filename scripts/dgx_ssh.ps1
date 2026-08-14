@@ -95,19 +95,22 @@ function Invoke-NativeExec {
 
 function Invoke-NativeAuth {
     if (-not (Test-Path -LiteralPath $sshExe -PathType Leaf)) {
-        return 127
+        return [pscustomobject]@{ Output = @(); Status = 127 }
     }
     $options = @(Get-NativeSshOptions) + @("-o", "BatchMode=no")
     if ($RemoteCommand.Count -gt 0) {
-        & $sshExe $options $dgxTarget ($RemoteCommand -join " ")
+        $output = @(& $sshExe $options $dgxTarget ($RemoteCommand -join " ") 2>&1)
     } else {
-        & $sshExe $options $dgxTarget
+        $output = @(& $sshExe $options $dgxTarget 2>&1)
     }
-    $status = $LASTEXITCODE
+    $status = [int]$LASTEXITCODE
     if ($status -eq 0) {
-        Write-Output "AUTH_OK: native Windows SSH route"
+        $output += "AUTH_OK: native Windows SSH route"
     }
-    return $status
+    return [pscustomobject]@{
+        Output = @($output)
+        Status = $status
+    }
 }
 
 switch ($Mode) {
@@ -170,8 +173,9 @@ switch ($Mode) {
                 exit $wslStatus
             }
         }
-        $nativeStatus = Invoke-NativeAuth
-        if ($nativeStatus -eq 0) {
+        $nativeAuth = Invoke-NativeAuth
+        $nativeAuth.Output
+        if ($nativeAuth.Status -eq 0) {
             exit 0
         }
         Write-Error "REAUTH_REQUIRED: interactive auth failed on both WSL and native Windows SSH"

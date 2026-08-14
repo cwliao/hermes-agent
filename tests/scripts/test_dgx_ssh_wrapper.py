@@ -22,7 +22,7 @@ if [[ -n "${FAKE_SSH_LOG:-}" ]]; then
     printf '<%s>\\n' "$@" >> "${FAKE_SSH_LOG}"
 fi
 case "${FAKE_SSH_MODE:-success}" in
-    permission)
+    permission|bootstrap-keygen-failure)
         printf '%s\\n' 'Permission denied (publickey).' >&2
         exit 255
         ;;
@@ -45,6 +45,11 @@ esac
     with fake_ssh.open("w", encoding="utf-8", newline="\n") as stream:
         stream.write(fake_ssh_content)
     fake_ssh.chmod(0o755)
+    if mode == "bootstrap-keygen-failure":
+        fake_keygen = tmp_path / "ssh-keygen"
+        with fake_keygen.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write("#!/usr/bin/env bash\nexit 42\n")
+        fake_keygen.chmod(0o755)
     env = os.environ.copy()
     log_path = tmp_path / "ssh-args.log"
     if wsl is not None:
@@ -213,7 +218,10 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
         "    $global:LASTEXITCODE = 75\n"
         "    Write-Output 'WSL_REAUTH_REQUIRED'\n"
         "}\n"
-        f'& "{wrapper_copy}" -Mode probe\n',
+        "$mode = if ([string]::IsNullOrWhiteSpace($env:FAKE_MODE)) { 'probe' } else { $env:FAKE_MODE }\n"
+        f'if ($mode -eq "exec") {{ & "{wrapper_copy}" -Mode exec hostname }} '
+        f'elseif ($mode -eq "auth") {{ & "{wrapper_copy}" -Mode auth }} '
+        f'else {{ & "{wrapper_copy}" -Mode probe }}\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -221,6 +229,7 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
     env["FAKE_SSH_LOG"] = str(log_path)
     env["FAKE_WSL_MODE"] = "auth-failure"
     env["HERMES_DGX_IDENTITY"] = str(identity)
+    env["FAKE_MODE"] = "probe"
     first = subprocess.run(
         [powershell, "-NoProfile", "-File", str(helper)],
         env=env,
@@ -245,3 +254,36 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
 
     assert second.returncode == 0, second.stderr
     assert second.stdout.count("SSH_OK") == 1
+
+    env["FAKE_MODE"] = "exec"
+    third = subprocess.run(
+        [powershell, "-NoProfile", "-File", str(helper)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert third.returncode == 0, third.stderr
+    assert "hostname" in log_path.read_text(encoding="utf-8")
+
+    env["FAKE_MODE"] = "auth"
+    fourth = subprocess.run(
+        [powershell, "-NoProfile", "-File", str(helper)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert fourth.returncode == 0, fourth.stderr
+    assert "AUTH_OK: native Windows SSH route" in fourth.stdout
+    assert "BatchMode=no" in log_path.read_text(encoding="utf-8")
+
+
+def test_shell_bootstrap_distinguishes_keygen_failure_from_reauthentication(tmp_path):
+    result = run_shell_wrapper(tmp_path, "bootstrap-keygen-failure", "bootstrap")
+
+    assert result.returncode == 70
+    assert "BOOTSTRAP_KEYGEN_FAILED" in result.stderr
+    assert "REAUTH_REQUIRED" not in result.stderr

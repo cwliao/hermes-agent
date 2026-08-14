@@ -93,6 +93,18 @@ function Invoke-NativeExec {
     return $LASTEXITCODE
 }
 
+function ConvertTo-StartProcessArgumentString {
+    param([string[]]$Arguments)
+    return (($Arguments | ForEach-Object {
+        $argument = [string]$_
+        if ($argument -match '[\s"]') {
+            '"' + $argument.Replace('"', '\"') + '"'
+        } else {
+            $argument
+        }
+    }) -join " ")
+}
+
 function Invoke-NativeAuth {
     if (-not (Test-Path -LiteralPath $sshExe -PathType Leaf)) {
         return [pscustomobject]@{ Output = @(); Status = 127 }
@@ -102,7 +114,8 @@ function Invoke-NativeAuth {
     if ($RemoteCommand.Count -gt 0) {
         $argumentList += ($RemoteCommand -join " ")
     }
-    $process = Start-Process -FilePath $sshExe -ArgumentList $argumentList -Wait -NoNewWindow -PassThru
+    $argumentString = ConvertTo-StartProcessArgumentString -Arguments $argumentList
+    $process = Start-Process -FilePath $sshExe -ArgumentList $argumentString -Wait -NoNewWindow -PassThru
     $status = [int]$process.ExitCode
     $output = @()
     if ($status -eq 0) {
@@ -149,7 +162,9 @@ switch ($Mode) {
             }
             $wslText = $wslOutput -join "`n"
             if ($wslStatus -eq 75 -and $wslText -match 'HERMES_DGX_REMOTE_EXIT_STATUS=(\d+)') {
-                $wslOutput
+                $wslOutput | Where-Object {
+                    $_.ToString() -notmatch '^HERMES_DGX_REMOTE_EXIT_STATUS=\d+$'
+                }
                 exit ([int]$matches[1])
             }
             if ($wslStatus -ne 75) {

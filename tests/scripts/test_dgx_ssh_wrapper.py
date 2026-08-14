@@ -207,7 +207,7 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
         encoding="utf-8",
         newline="",
     )
-    identity = tmp_path / "configured-id"
+    identity = tmp_path / "configured id"
     identity.write_text("test-only-placeholder", encoding="utf-8")
     log_path = tmp_path / "native-ssh.log"
     wrapper_copy = tmp_path / "dgx_ssh.ps1"
@@ -242,9 +242,10 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
         "}\n"
         "$mode = if ([string]::IsNullOrWhiteSpace($env:FAKE_MODE)) { 'probe' } else { $env:FAKE_MODE }\n"
         f'if ($mode -eq "exec") {{ & "{wrapper_copy}" -Mode exec hostname }} '
-        f'elseif ($mode -eq "auth") {{ & "{wrapper_copy}" -Mode auth }} '
-        f'else {{ & "{wrapper_copy}" -Mode probe }}\n'
-        "exit $LASTEXITCODE\n",
+            f'elseif ($mode -eq "auth") {{ & "{wrapper_copy}" -Mode auth }} '
+            f'else {{ & "{wrapper_copy}" -Mode probe }}\n'
+            "if ($env:FAKE_WSL_MODE -eq 'remote-exit-75') { exit 75 }\n"
+            "exit $LASTEXITCODE\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -315,7 +316,7 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
     )
 
     assert fifth.returncode == 75
-    assert "HERMES_DGX_REMOTE_EXIT_STATUS=75" in fifth.stdout
+    assert "HERMES_DGX_REMOTE_EXIT_STATUS=75" not in fifth.stdout
     assert log_path.read_text(encoding="utf-8") == before_remote_75
 
 

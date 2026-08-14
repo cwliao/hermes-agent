@@ -103,6 +103,10 @@ new headless agent or bypass host-key verification.
   -> native fallback, single-output preservation, and configured identity
   forwarding. Shell behavior tests fail when neither `bash` nor `wsl.exe` is
   available instead of silently skipping.
+- Final local evidence: `tests/scripts/test_dgx_ssh_wrapper.py` passed
+  `8 passed`, including spaced-identity auth argument forwarding and remote
+  exit-75 sentinel stripping; PowerShell parser, WSL `bash -n`, and
+  `git diff --check` passed.
 - Follow-up path coverage found and fixed the same output/status aggregation
   defect in native PowerShell `auth`; the mock harness now executes `probe`,
   `exec`, and `auth` fallback paths plus a real shell bootstrap keygen failure,
@@ -190,6 +194,18 @@ creating a new Claude/AGY headless session.
   native-auth status handling, behavioral `exec`/`auth`/bootstrap coverage, and
   the explicit non-Windows skip policy; CI evidence above is attached before
   the final re-review.
+- Final review correction set: native interactive auth now quotes
+  `Start-Process -ArgumentList` values so configured identity paths containing
+  spaces survive parsing; the internal remote-exit sentinel is stripped before
+  caller-visible output; and CI now includes a `windows-latest` wrapper-test
+  job so PowerShell behavior is continuously exercised rather than only
+  locally reported.
 - Final review cycle found and addressed a remote-exit-75 collision between
   wrapper `REAUTH_REQUIRED` and ordinary remote command statuses; final
   independent re-review is required against the successor commit.
+- Final AGY/Claude review of packet
+  `9a26739739333c0a0991faea1e577a3df92508ed3b05f4f73c5779c06b3a9c8e` found
+  `REVISE` from Claude for the remote-exit-75 collision, native auth argument
+  quoting, sentinel leakage, and missing Windows CI coverage. Those findings
+  are implemented in the successor commit and require one more independent
+  review cycle.

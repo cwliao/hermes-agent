@@ -11,8 +11,22 @@ SH_WRAPPER = ROOT / "scripts" / "dgx_ssh.sh"
 PS_WRAPPER = ROOT / "scripts" / "dgx_ssh.ps1"
 
 
-def run_shell_wrapper(tmp_path: Path, mode: str, *args: str) -> subprocess.CompletedProcess[str]:
+def usable_wsl() -> str | None:
+    """Return wsl.exe only when the Ubuntu distro is actually available."""
     wsl = shutil.which("wsl.exe")
+    if wsl is None:
+        return None
+    probe = subprocess.run(
+        [wsl, "-d", "Ubuntu", "--", "true"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return wsl if probe.returncode == 0 else None
+
+
+def run_shell_wrapper(tmp_path: Path, mode: str, *args: str) -> subprocess.CompletedProcess[str]:
+    wsl = usable_wsl()
     bash = shutil.which("bash")
     if wsl is None and bash is None:
         raise AssertionError("bash or wsl.exe is required for wrapper behavior tests")

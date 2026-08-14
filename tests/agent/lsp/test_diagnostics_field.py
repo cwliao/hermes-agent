@@ -64,6 +64,36 @@ def test_lint_and_lsp_diagnostics_are_separate_channels():
 
 
 
+def test_write_file_populates_lsp_diagnostics_when_layer_returns_block(tmp_path):
+    """When the LSP layer returns a non-empty block, write_file puts it
+    into the ``lsp_diagnostics`` field — NOT into ``lint.output``."""
+    fops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)))
+    target = tmp_path / "x.py"
+
+    block = "<diagnostics file=\"x.py\">\nERROR [1:1] problem\n</diagnostics>"
+
+    with patch.object(fops, "_maybe_lsp_diagnostics", return_value=block):
+        res = fops.write_file(str(target), "x = 1\n")
+
+    assert res.lsp_diagnostics == block
+    assert res.artifact_status["schema"] == "hermes.artifact.v1"
+    assert res.artifact_status["producer"] == "file_operations.write_file"
+    assert res.artifact_status["persisted"] is True
+    assert res.artifact_status["evidence"]["read_back"] is True
+    # Lint is the syntax check, which is clean for "x = 1" — must NOT
+    # have the LSP block folded into it.
+    assert res.lint == {"status": "ok", "output": ""}
+
+
+def test_write_file_lsp_diagnostics_none_when_layer_returns_empty(tmp_path):
+    fops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)))
+    target = tmp_path / "x.py"
+
+    with patch.object(fops, "_maybe_lsp_diagnostics", return_value=""):
+        res = fops.write_file(str(target), "x = 1\n")
+
+    assert res.lsp_diagnostics is None
+    assert res.artifact_status["status"] == "validated"
 
 
 def test_write_file_skips_lsp_when_syntax_failed(tmp_path):
@@ -78,6 +108,38 @@ def test_write_file_skips_lsp_when_syntax_failed(tmp_path):
     assert mock_lsp.call_count == 0
     assert res.lsp_diagnostics is None
     assert res.lint["status"] == "error"
+
+
+def test_write_file_without_validator_is_persisted_but_unvalidated(tmp_path, monkeypatch):
+    """A real file write with no format validator must not claim completion."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    fops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)))
+    target = tmp_path / "jokes.jsonl"
+
+    res = fops.write_file(str(target), '{"ok": true}\n')
+
+    assert res.error is None
+    assert target.read_text(encoding="utf-8") == '{"ok": true}\n'
+    assert res.artifact_status["status"] == "persisted"
+    assert res.artifact_status["persisted"] is True
+    assert res.artifact_status["validated"] is False
+    assert res.artifact_status["complete"] is False
+    assert res.artifact_status["evidence"]["read_back"] is True
+
+
+def test_write_file_malformed_json_is_blocked_before_persistence(tmp_path, monkeypatch):
+    """The in-process JSON gate must produce blocked, not completed, output."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    fops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)))
+    target = tmp_path / "broken.json"
+
+    res = fops.write_file(str(target), '{"broken":')
+
+    assert res.error is not None
+    assert res.artifact_status["status"] == "blocked"
+    assert res.artifact_status["persisted"] is False
+    assert res.artifact_status["complete"] is False
+    assert not target.exists()
 
 
 # ---------------------------------------------------------------------------

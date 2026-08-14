@@ -224,6 +224,9 @@ class TestApplyUpdate:
         result = apply_v4a_operations(operations, file_ops)
 
         assert result.success is True
+        assert result.artifact_status["schema"] == "hermes.artifact.v1"
+        assert result.artifact_status["producer"] == "file_operations.patch_v4a"
+        assert result.artifact_status["status"] == "persisted"
         assert file_ops.written == (
             'def run():\n'
             '    cmd = "echo a | sed s/a/b/"\n'
@@ -409,9 +412,114 @@ class TestValidationPhase:
 
         result = apply_v4a_operations(ops, FakeFileOps())
         assert result.success is False
+        assert result.artifact_status["status"] == "blocked"
         assert written == {}, f"No files should have been written, got: {list(written.keys())}"
         assert "validation failed" in result.error.lower()
 
+    def test_all_valid_operations_applied(self):
+        """When all operations are valid, all files are written."""
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+ def foo():
+-    return 1
++    return 2
+*** Update File: b.py
+ def bar():
+-    pass
++    return True
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        written = {}
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                files = {
+                    "a.py": "def foo():\n    return 1\n",
+                    "b.py": "def bar():\n    pass\n",
+                }
+                return SimpleNamespace(content=files[path], error=None)
+
+            def write_file(self, path, content):
+                written[path] = content
+                return SimpleNamespace(error=None)
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+        assert result.success is True
+        assert set(written.keys()) == {"a.py", "b.py"}
+
+    def test_context_only_hunk_does_not_reject_later_real_hunk(self):
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+@@ anchor @@
+ anchor
+@@ value @@
+-value = 1
++value = 2
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            written = None
+            def read_file_raw(self, path):
+                return SimpleNamespace(content="anchor\nvalue = 1\n", error=None)
+            def write_file(self, path, content):
+                self.written = content
+                return SimpleNamespace(error=None)
+
+        file_ops = FakeFileOps()
+        result = apply_v4a_operations(ops, file_ops)
+        assert result.success is True
+        assert file_ops.written == "anchor\nvalue = 2\n"
+
+    def test_apply_failure_is_unverified_with_artifact_contract(self):
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+ keep
+-old = 1
++new = 2
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                return SimpleNamespace(content="keep\nold = 1\n", error=None)
+
+            def write_file(self, path, content):
+                return SimpleNamespace(error="permission denied")
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+
+        assert result.success is False
+        assert result.artifact_status["schema"] == "hermes.artifact.v1"
+        assert result.artifact_status["status"] == "unverified"
+        assert result.artifact_status["complete"] is False
+
+    def test_patch_with_only_context_hunks_reports_no_changes(self):
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+@@ anchor @@
+ anchor
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                return SimpleNamespace(content="anchor\n", error=None)
+            def write_file(self, path, content):
+                raise AssertionError("no-op patch must not write")
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+        assert result.success is False
+        assert "no changes" in result.error.lower()
 
     def test_validation_error_identifies_hunk_number(self):
         patch = """\

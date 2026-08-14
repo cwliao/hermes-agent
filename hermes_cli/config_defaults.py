@@ -493,11 +493,15 @@ DEFAULT_CONFIG = {
     # 12-15K tokens). max_lines: max `limit` one read_file call may request before clamping.
     # max_line_length: per-line cap in read_file's line-numbered view (chars).
     "tool_output": {"max_bytes": 50000, "max_lines": 2000, "max_line_length": 2000},
-    # Tool loop guardrails nudge models that repeat failed/non-progressing tool calls. Soft warnings
-    # are always on; hard stops are opt-in so interactive sessions keep flowing.
+    # Tool loop guardrails nudge models that repeat failed/non-progressing tool calls. ``auto``
+    # enables hard stops for unattended surfaces while keeping interactive sessions warning-only.
     "tool_loop_guardrails": {
         "warnings_enabled": True,
-        "hard_stop_enabled": False,
+        "hard_stop_enabled": "auto",
+        "unattended_soft_mode": False,
+        "cross_turn_failure_halt_after": 3,
+        "cross_turn_ledger_max_entries": 128,
+        "cross_turn_ttl_seconds": 1800,
         # Unattended gateway/cron platforms hard-stop by default (nobody can /stop a model that
         # ignores warnings); interactive cli/tui/desktop/acp stay warning-only.
         "non_interactive_hard_stop_enabled": True,
@@ -2342,7 +2346,7 @@ DEFAULT_CONFIG = {
         # Extra ports detection probes for an external llama-server (besides 8080).
         "detect_ports": [],
     },
-    "_config_version": 40,  # Config schema version - bump this when adding new required fields
+    "_config_version": 41,  # Config schema version - bump this when adding new required fields
 }
 
 

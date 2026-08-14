@@ -1185,6 +1185,11 @@ def _apply_display_config(agent, _agent_cfg, platform):
                 _agent_cfg.get("tool_loop_guardrails", {}), platform=platform,
             )
         )
+        if agent._tool_guardrails.config.configuration_warning:
+            _ra().logger.warning(
+                "Tool loop guardrail configuration: %s",
+                agent._tool_guardrails.config.configuration_warning,
+            )
     except Exception as _tlg_err:
         _ra().logger.warning("Tool loop guardrail config ignored: %s", _tlg_err)
 

@@ -10,6 +10,28 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional
 
 
+def artifact_contract(
+    producer: str,
+    status: str,
+    *,
+    persisted: bool,
+    validated: bool,
+    read_back: bool,
+    evidence: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build the stable, non-secret artifact completion contract."""
+    return {
+        "schema": "hermes.artifact.v1",
+        "producer": producer,
+        "status": status,
+        "persisted": persisted,
+        "validated": validated,
+        "complete": status == "complete",
+        "delivered": False,
+        "evidence": {"read_back": read_back, "delivery": "not_applicable", **(evidence or {})},
+    }
+
+
 @dataclass
 class ReadResult:
     """Result from reading a file."""
@@ -44,6 +66,7 @@ class WriteResult:
     lsp_diagnostics: Optional[str] = None
     error: Optional[str] = None
     warning: Optional[str] = None
+    artifact_status: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not None}
@@ -63,6 +86,7 @@ class PatchResult:
     # Success-shaped no-op: the edit was already present, nothing written; ``note`` says why.
     no_change: bool = False
     note: Optional[str] = None
+    artifact_status: Optional[Dict[str, Any]] = None
 
     # Emission order is part of the output contract.
     _DICT_FIELDS: ClassVar[tuple] = (
@@ -80,6 +104,8 @@ class PatchResult:
             value = getattr(self, key)
             if value:
                 result[key] = value
+        if self.artifact_status is not None:
+            result["artifact_status"] = self.artifact_status
         return result
 
 

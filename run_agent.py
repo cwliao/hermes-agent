@@ -408,6 +408,11 @@ class AIAgent(
         # Copilot x-initiator: True for the first API call of a user turn, False for tool-loop follow-ups.
         self._is_user_initiated_turn = False
 
+        # A new session must not inherit deterministic tool blockers from the previous conversation.
+        reset_guardrails = getattr(getattr(self, "_tool_guardrails", None), "reset_for_session", None)
+        if callable(reset_guardrails):
+            reset_guardrails()
+
         self._transition_context_engine_session(
             old_session_id=old_session_id, new_session_id=getattr(self, "session_id", None),
             previous_messages=previous_messages, carry_over_context=carry_over_context, reset_engine=True,

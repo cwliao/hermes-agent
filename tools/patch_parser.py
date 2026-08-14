@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from tools.file_operations_common import artifact_contract
+
 
 class OperationType(Enum):
     ADD = "add"
@@ -262,7 +264,12 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> 'Pa
     if errors := _validate_operations(operations, file_ops):
         return PatchResult(
             success=False,
-            error="Patch validation failed (no files were modified):\n" + _bullets(errors))
+            error="Patch validation failed (no files were modified):\n" + _bullets(errors),
+            artifact_status=artifact_contract(
+                "file_operations.patch_v4a", "blocked",
+                persisted=False, validated=False, read_back=False,
+                evidence={"reason": "validation_failed"},
+            ))
     files: Dict[str, List[str]] = {"created": [], "deleted": [], "modified": []}
     all_diffs: List[str] = []
     # V4A bypasses write_file's WriteResult plumbing: LSP diagnostics and lint propagate per file.
@@ -286,13 +293,22 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> 'Pa
         if lint:
             lint_results[op.file_path] = lint
     # Each LSP block carries its own <diagnostics file="..."> header; joining keeps attribution.
+    completed = not errors
     return PatchResult(
-        success=not errors,
+        success=completed,
         error=("Apply phase failed (state may be inconsistent — run `git diff` to assess):\n"
                + _bullets(errors)) if errors else None,
         diff='\n'.join(all_diffs),
         files_modified=files["modified"], files_created=files["created"], files_deleted=files["deleted"],
-        lint=lint_results or None, lsp_diagnostics="\n\n".join(lsp_blocks) or None)
+        lint=lint_results or None, lsp_diagnostics="\n\n".join(lsp_blocks) or None,
+        artifact_status=artifact_contract(
+            "file_operations.patch_v4a",
+            "persisted" if completed else "unverified",
+            persisted=bool(all_diffs),
+            validated=False,
+            read_back=completed,
+            evidence={"reason": "apply_failed" if errors else "patch_applied"},
+        ))
 
 
 def _write_file_accepts_pre_content(file_ops: Any) -> bool:

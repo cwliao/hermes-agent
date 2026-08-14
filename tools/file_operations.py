@@ -28,6 +28,7 @@ from tools.file_operations_common import (
     ExecuteResult, PatchResult, ReadResult, SearchResult, WriteResult,
     _UTF8_BOM, _detect_line_ending, _has_bom, _normalize_line_endings, _strip_bom,
     _strip_terminal_fence_leaks, normalize_read_pagination, normalize_search_pagination)
+from tools.file_operations_common import artifact_contract
 from tools.file_operations_lint import LINTERS_INPROC, LintMixin, _FAIL_CLOSED_INPROC_EXTS
 from tools.file_operations_search import SearchMixin
 
@@ -1204,13 +1205,30 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         path = self._expand_path(path)
         denied = get_write_denied_error(path)
         if denied:
-            return WriteResult(error=denied)
+            return WriteResult(
+                error=denied,
+                artifact_status=artifact_contract(
+                    "file_operations.write_file", "blocked",
+                    persisted=False, validated=False, read_back=False,
+                    evidence={"reason": "write_denied"},
+                ),
+            )
         refused = self._reject_unencodable(path, content)
         if refused is not None:
+            refused.artifact_status = artifact_contract(
+                "file_operations.write_file", "blocked",
+                persisted=False, validated=False, read_back=False,
+                evidence={"reason": "unencodable_content"},
+            )
             return refused
         ext = os.path.splitext(path)[1].lower()
         refused = self._fail_closed_syntax_error(path, ext, content)
         if refused is not None:
+            refused.artifact_status = artifact_contract(
+                "file_operations.write_file", "blocked",
+                persisted=False, validated=False, read_back=False,
+                evidence={"reason": "format_validation_failed"},
+            )
             return refused
 
         # Pre-content is read only for extensions in the UNION of in-process lint and
@@ -1234,9 +1252,21 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         content_bytes = content.encode("utf-8", "surrogateescape")
         write_result = self._atomic_write(path, content)
         if write_result.exit_code != 0:
-            return WriteResult(error=f"Failed to write file: {write_result.stdout}")
+            return WriteResult(
+                error=f"Failed to write file: {write_result.stdout}",
+                artifact_status=artifact_contract(
+                    "file_operations.write_file", "blocked",
+                    persisted=False, validated=False, read_back=False,
+                    evidence={"reason": "atomic_write_failed"},
+                ),
+            )
         content_verified, verify_error = self._verify_written_hash(path, content_bytes)
         if verify_error is not None:
+            verify_error.artifact_status = artifact_contract(
+                "file_operations.write_file", "unverified",
+                persisted=True, validated=False, read_back=False,
+                evidence={"reason": "hash_mismatch"},
+            )
             return verify_error
 
         lint_result = self._check_lint_delta(path, pre_content=pre_content, post_content=content)
@@ -1247,7 +1277,15 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             lsp_diagnostics = self._maybe_lsp_diagnostics(path, pre_content=pre_content, post_content=content) or None
         return WriteResult(
             bytes_written=len(content_bytes), dirs_created=dirs_created, verified=content_verified,
-            lint=lint_result.to_dict() if lint_result else None, lsp_diagnostics=lsp_diagnostics)
+            lint=lint_result.to_dict() if lint_result else None, lsp_diagnostics=lsp_diagnostics,
+            artifact_status=artifact_contract(
+                "file_operations.write_file",
+                "validated" if bool(lint_result and lint_result.success and not lint_result.skipped) else "persisted",
+                persisted=True,
+                validated=bool(lint_result and lint_result.success and not lint_result.skipped),
+                read_back=content_verified is not False,
+                evidence={"format_validation": "passed" if bool(lint_result and lint_result.success and not lint_result.skipped) else "skipped_or_failed", "bytes_written": len(content_bytes)},
+            ))
 
     # --- PATCH (replace mode) -----------------------------------------------
 
@@ -1300,10 +1338,24 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         path = self._expand_path(path)
         denied = get_write_denied_error(path)
         if denied:
-            return PatchResult(error=denied)
+            return PatchResult(
+                error=denied,
+                artifact_status=artifact_contract(
+                    "file_operations.patch_replace", "blocked",
+                    persisted=False, validated=False, read_back=False,
+                    evidence={"reason": "write_denied"},
+                ),
+            )
         read_result = self._cat(path)
         if read_result.exit_code != 0:
-            return PatchResult(error=f"Failed to read file: {path}")
+            return PatchResult(
+                error=f"Failed to read file: {path}",
+                artifact_status=artifact_contract(
+                    "file_operations.patch_replace", "blocked",
+                    persisted=False, validated=False, read_back=False,
+                    evidence={"reason": "read_before_write_failed"},
+                ),
+            )
         # Match and diff on BOM-stripped content (a phantom U+FEFF defeats an exact
         # first-line match); the raw read becomes write_file's pre_content.
         raw_content = read_result.stdout
@@ -1313,7 +1365,14 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         new_content, match_count, _strategy, error = fuzzy_find_and_replace(
             content, old_string, new_string, replace_all)
         if error or match_count == 0:
-            return self._no_match_result(path, content, old_string, new_string, match_count, error)
+            result = self._no_match_result(path, content, old_string, new_string, match_count, error)
+            if result.artifact_status is None:
+                result.artifact_status = artifact_contract(
+                    "file_operations.patch_replace", "blocked",
+                    persisted=False, validated=False, read_back=False,
+                    evidence={"reason": "replacement_not_found"},
+                )
+            return result
         # Models send bare-LF old/new strings; normalize the substituted region to
         # the file's ending so CRLF files stay consistent.
         file_ending = _detect_line_ending(content)
@@ -1321,16 +1380,38 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             new_content = _normalize_line_endings(new_content, file_ending)
         write_result = self.write_file(path, new_content, pre_content=raw_content)
         if write_result.error:
-            return PatchResult(error=f"Failed to write changes: {write_result.error}")
+            source = write_result.artifact_status or {}
+            return PatchResult(
+                error=f"Failed to write changes: {write_result.error}",
+                artifact_status=artifact_contract(
+                    "file_operations.patch_replace", source.get("status", "blocked"),
+                    persisted=bool(source.get("persisted")), validated=bool(source.get("validated")),
+                    read_back=bool(source.get("evidence", {}).get("read_back")),
+                    evidence={"reason": "write_file_failed"},
+                ),
+            )
         verify_error = self._verify_patch_persisted(path, new_content)
         if verify_error is not None:
+            verify_error.artifact_status = artifact_contract(
+                "file_operations.patch_replace", "unverified",
+                persisted=True, validated=False, read_back=False,
+                evidence={"reason": "read_back_failed" if "could not re-read" in (verify_error.error or "") else "read_back_mismatch"},
+            )
             return verify_error
         lint_result = self._check_lint_delta(path, pre_content=content, post_content=new_content)
         return PatchResult(
             success=True, diff=self._unified_diff(content, new_content, path), files_modified=[path],
             lint=lint_result.to_dict() if lint_result else None,
             # From the internal write_file call, whose baseline was the pre-patch content.
-            lsp_diagnostics=write_result.lsp_diagnostics)
+            lsp_diagnostics=write_result.lsp_diagnostics,
+            artifact_status=artifact_contract(
+                "file_operations.patch_replace",
+                "validated" if bool(lint_result and lint_result.success and not lint_result.skipped) else "persisted",
+                persisted=True,
+                validated=bool(lint_result and lint_result.success and not lint_result.skipped),
+                read_back=True,
+                evidence={"format_validation": "passed" if bool(lint_result and lint_result.success and not lint_result.skipped) else "skipped_or_failed"},
+            ))
 
     def patch_v4a(self, patch_content: str) -> PatchResult:
         """Apply a V4A format patch (``*** Begin Patch`` / ``*** Update File:`` /
@@ -1338,7 +1419,14 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         from tools.patch_parser import parse_v4a_patch, apply_v4a_operations
         operations, parse_error = parse_v4a_patch(patch_content)
         if parse_error:
-            return PatchResult(error=f"Failed to parse patch: {parse_error}")
+            return PatchResult(
+                error=f"Failed to parse patch: {parse_error}",
+                artifact_status=artifact_contract(
+                    "file_operations.patch_v4a", "blocked",
+                    persisted=False, validated=False, read_back=False,
+                    evidence={"reason": "malformed_patch"},
+                ),
+            )
         return apply_v4a_operations(operations, self)
 
     # --- SEARCH -------------------------------------------------------------

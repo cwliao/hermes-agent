@@ -95,6 +95,17 @@ esac
             encoding="utf-8",
             newline="",
         )
+    bash_env = tmp_path / "bash-env"
+    bash_env.write_text(
+        f'ssh() {{ bash "{git_bash_path(fake_ssh)}" "$@"; }}\n'
+        + (
+            f'ssh-keygen() {{ bash "{git_bash_path(tmp_path / "ssh-keygen")}" "$@"; }}\n'
+            if mode == "bootstrap-keygen-failure"
+            else ""
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
     env = os.environ.copy()
     log_path = tmp_path / "ssh-args.log"
     if wsl is not None:
@@ -141,6 +152,7 @@ esac
     env["PATH"] = f"{bash_tmp}:/usr/bin:/bin"
     env["HOME"] = bash_tmp
     env["XDG_RUNTIME_DIR"] = "/tmp" if wsl is None else str(tmp_path)
+    env["BASH_ENV"] = git_bash_path(bash_env)
     env["FAKE_SSH_MODE"] = mode
     env["FAKE_SSH_LOG"] = bash_log
     return subprocess.run(

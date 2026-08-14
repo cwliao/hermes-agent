@@ -194,6 +194,32 @@ jobs:
     if: needs.detect.outputs.docker_meta == 'true'
     uses: ./.github/workflows/docker-lint.yml
 
+  docker:
+    name: Build&Test Docker image
+    needs: detect
+    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.frontend == 'true' || needs.detect.outputs.docker_meta == 'true'
+    uses: ./.github/workflows/docker.yml
+    secrets: inherit
+
+  windows-wrapper-tests:
+    name: Windows DGX wrapper tests
+    needs: detect
+    if: needs.detect.outputs.python == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependency
+        run: python -m pip install pytest
+
+      - name: Run Windows wrapper behavior tests
+        run: python -m pytest tests/scripts/test_dgx_ssh_wrapper.py -q
+
   supply-chain:
     name: Supply-chain scan
     needs: detect
@@ -248,6 +274,7 @@ jobs:
       - lockfile-diff
       - docker-lint
       - profile-artifact-check
+      - windows-wrapper-tests
       - supply-chain
       - review-labels
       - osv-scanner

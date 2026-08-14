@@ -28,8 +28,8 @@ def usable_wsl() -> str | None:
 def run_shell_wrapper(tmp_path: Path, mode: str, *args: str) -> subprocess.CompletedProcess[str]:
     wsl = usable_wsl()
     bash = shutil.which("bash")
-    if wsl is None and (bash is None or os.name == "nt"):
-        pytest.skip("Ubuntu WSL is required for shell wrapper behavior tests on Windows")
+    if wsl is None and bash is None:
+        pytest.skip("bash or an operational Ubuntu WSL distro is required for wrapper behavior tests")
 
     fake_ssh = tmp_path / "ssh"
     fake_ssh_content = """#!/usr/bin/env bash
@@ -116,7 +116,7 @@ esac
 
     env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
     env["HOME"] = str(tmp_path)
-    env["XDG_RUNTIME_DIR"] = str(tmp_path)
+    env["XDG_RUNTIME_DIR"] = "/tmp" if wsl is None else str(tmp_path)
     env["FAKE_SSH_MODE"] = mode
     env["FAKE_SSH_LOG"] = str(log_path)
     return subprocess.run(
@@ -255,7 +255,9 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
         "    Write-Output 'WSL_REAUTH_REQUIRED'\n"
         "}\n"
         "$mode = if ([string]::IsNullOrWhiteSpace($env:FAKE_MODE)) { 'probe' } else { $env:FAKE_MODE }\n"
-        f'if ($mode -eq "exec") {{ & "{wrapper_copy}" -Mode exec hostname }} '
+        f'if ($mode -eq "exec") {{ '
+            f'if ($env:FAKE_MULTIWORD -eq "1") {{ & "{wrapper_copy}" -Mode exec bash -c "\'echo hi there\'" }} '
+            f'else {{ & "{wrapper_copy}" -Mode exec hostname }} }} '
             f'elseif ($mode -eq "auth") {{ & "{wrapper_copy}" -Mode auth }} '
             f'else {{ & "{wrapper_copy}" -Mode probe }}\n'
             "if ($env:FAKE_WSL_MODE -eq 'remote-exit-75') { exit 75 }\n"
@@ -304,6 +306,21 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
 
     assert third.returncode == 0, third.stderr
     assert "hostname" in log_path.read_text(encoding="utf-8")
+
+    env["FAKE_MULTIWORD"] = "1"
+    sixth = subprocess.run(
+        [powershell, "-NoProfile", "-File", str(helper)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert sixth.returncode == 0, sixth.stderr
+    multiword_log = log_path.read_text(encoding="utf-8")
+    assert "bash" in multiword_log
+    assert "-c" in multiword_log
+    assert "'echo hi there'" in multiword_log
 
     env["FAKE_MODE"] = "auth"
     fourth = subprocess.run(

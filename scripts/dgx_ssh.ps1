@@ -88,8 +88,7 @@ function Invoke-NativeExec {
         Write-Error "USAGE: dgx_ssh.ps1 exec <remote-command>"
         return 64
     }
-    $remote = $RemoteCommand -join " "
-    & $sshExe @(Get-NativeSshOptions) "-o" "BatchMode=yes" $dgxTarget $remote
+    & $sshExe @(Get-NativeSshOptions) "-o" "BatchMode=yes" $dgxTarget @RemoteCommand
     return $LASTEXITCODE
 }
 
@@ -112,7 +111,7 @@ function Invoke-NativeAuth {
     $options = @(Get-NativeSshOptions) + @("-o", "BatchMode=no")
     $argumentList = @($options) + @($dgxTarget)
     if ($RemoteCommand.Count -gt 0) {
-        $argumentList += ($RemoteCommand -join " ")
+        $argumentList += @($RemoteCommand)
     }
     $argumentString = ConvertTo-StartProcessArgumentString -Arguments $argumentList
     $process = Start-Process -FilePath $sshExe -ArgumentList $argumentString -Wait -NoNewWindow -PassThru

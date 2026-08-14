@@ -107,6 +107,11 @@ new headless agent or bypass host-key verification.
   defect in native PowerShell `auth`; the mock harness now executes `probe`,
   `exec`, and `auth` fallback paths plus a real shell bootstrap keygen failure,
   with `7 passed` recorded locally.
+- GitHub CI evidence for code SHA `bcca3df06` is green: run
+  `31784150099` ([CI run](https://github.com/cwliao/hermes-agent/actions/runs/31784150099));
+  all required checks passed, 4,941 Linux tests passed, and the Windows-only
+  PowerShell harness was explicitly skipped on the Linux runner. The local
+  Windows run executed all 7 wrapper tests successfully.
 - The broader `tests/scripts` collection remains environment-blocked outside
   this change: the native interpreter lacks `httpx`, and the project venv's
   pytest temp root has an existing Windows ACL denial. These are recorded as
@@ -166,5 +171,12 @@ creating a new Claude/AGY headless session.
   and WSL distro de-duplication is a non-blocking maintainability follow-up.
 - Consensus: `REVISE`; AUTH-001 is not ready for merge or deployment until the
   correction set is implemented, independently re-reviewed, and CI is rerun.
-- Correction implementation: commit `a1e6a8a62` pushed to
-  `ticket/hermes-auth-001`; re-review is now required against that exact SHA.
+- Initial correction implementation: commit `a1e6a8a62` pushed to
+  `ticket/hermes-auth-001`; subsequent follow-up commits are recorded below.
+- First correction re-review packet (`4e79dc46563518bc144bf84a1f94ed34532288bfffc419dd3c80840dc987dee4`):
+  AGY returned `PASS`; Claude returned `REVISE` because PowerShell `exec`/`auth`
+  and shell bootstrap failure paths still lacked behavioral execution.
+- Follow-up correction commits `83ffc667c` and `bcca3df06` added structured
+  native-auth status handling, behavioral `exec`/`auth`/bootstrap coverage, and
+  the explicit non-Windows skip policy; CI evidence above is attached before
+  the final re-review.

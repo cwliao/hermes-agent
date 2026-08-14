@@ -125,7 +125,7 @@ esac
 
     bash_tmp = git_bash_path(tmp_path)
     bash_log = git_bash_path(log_path)
-    env["PATH"] = f"{bash_tmp}:{env.get('PATH', '')}"
+    env["PATH"] = f"{bash_tmp}:/usr/bin:/bin"
     env["HOME"] = bash_tmp
     env["XDG_RUNTIME_DIR"] = "/tmp" if wsl is None else str(tmp_path)
     env["FAKE_SSH_MODE"] = mode

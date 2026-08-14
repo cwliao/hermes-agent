@@ -1,6 +1,6 @@
 ---
 title: "HERMES-AUTH-001: DGX SSH authentication recovery"
-status: REVISE_PENDING_IMPLEMENTATION
+status: IMPLEMENTED_PENDING_REVIEW
 date: 2026-08-14
 type: reliability
 ticket: HERMES-AUTH-001
@@ -16,11 +16,11 @@ to the authenticated DGX Spark host. GitHub issues are disabled for this
 repository. The mechanism must never store passwords, MFA codes, private keys,
 tokens, or host-key bypasses in the repository.
 
-Current gate: `REVISE_PENDING_IMPLEMENTATION`.
+Current gate: `IMPLEMENTED_PENDING_REVIEW`.
 
-Required sequence: independent review of the ticket and wrapper, revise the
-correction set, then local hermetic tests, CI, and only separately authorized
-deployment or user-environment installation.
+Required sequence: independent review of the ticket and wrapper, implement the
+consensus correction set, re-review, then local hermetic tests, CI, and only
+separately authorized deployment or user-environment installation.
 
 ## Observed failure and verified recovery
 
@@ -89,6 +89,19 @@ new headless agent or bypass host-key verification.
   fail-closed instead of being mislabeled as `REAUTH_REQUIRED`; the native
   Windows fallback is entered only for the wrapper's explicit authentication
   failure status, and `bootstrap` does not proceed after a non-auth failure.
+- Consensus correction set implemented in commit `a1e6a8a62`: PowerShell native
+  probe now returns structured output/status data so internal fallback does not
+  pollute command output; WSL path resolution failure falls back to native
+  `probe`/`exec`/`auth`; native Windows honors `HERMES_DGX_IDENTITY`; bootstrap
+  key-generation failure is reported as `BOOTSTRAP_KEYGEN_FAILED` with status
+  70; and shell tests exercise permission-denied, host-key, success, and
+  remote-argument forwarding behavior.
+- Post-correction local evidence: `tests/scripts/test_dgx_ssh_wrapper.py`
+  passed `5 passed`; PowerShell parser validation and WSL `bash -n` passed.
+- The broader `tests/scripts` collection remains environment-blocked outside
+  this change: the native interpreter lacks `httpx`, and the project venv's
+  pytest temp root has an existing Windows ACL denial. These are recorded as
+  environment evidence, not treated as AUTH-001 test failures.
 
 ## Scope boundaries
 
@@ -144,3 +157,5 @@ creating a new Claude/AGY headless session.
   and WSL distro de-duplication is a non-blocking maintainability follow-up.
 - Consensus: `REVISE`; AUTH-001 is not ready for merge or deployment until the
   correction set is implemented, independently re-reviewed, and CI is rerun.
+- Correction implementation: commit `a1e6a8a62` pushed to
+  `ticket/hermes-auth-001`; re-review is now required against that exact SHA.

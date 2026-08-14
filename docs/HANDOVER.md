@@ -10,15 +10,14 @@
 - **Purpose:** Hermes is a private-first agent gateway and CLI with memory,
   skills, scheduled jobs, delegated agents, and messaging-platform adapters.
 - **Repository:** <https://github.com/cwliao/hermes-agent>
-- **Working checkout:** `D:/PROJECT/Hermes`.
+- **Working checkout:** `D:/PROJECT/Hermes/.worktrees/hermes-auth-002`.
 - **Canonical remote:** `origin` -> `git@github.com:cwliao/hermes-agent.git`.
 - **Canonical mainline:** `origin/main` at
-  `7018f93aaee7aa0319ee342ea860ad90da206c9b`.
-- **Current checkout branch:** `ticket/hermes-reliability-002`.
-- **Current checkout HEAD:** `9f3755c42` (`fix: register Claude recovery
-  builtin`) on the historical ticket branch. The canonical integrated state is
-  `origin/main=7018f93aa`; do not infer mainline status from the ticket branch.
-- **DGX runtime:** host `140.96.58.171`, checkout
+  `63bcd7acbbb93d2c797090800ac1e4677b590449`.
+- **Current checkout branch:** `ticket/hermes-auth-002-target-config`.
+- **Current checkout HEAD:** `63bcd7acb` (`Merge PR #14: HERMES-AUTH-001
+  DGX SSH recovery`).
+- **DGX runtime:** configured target, checkout
   `/home/cwliao/.hermes/hermes-agent`, service `hermes-gateway.service`.
 - **In scope:** Hermes CLI, gateway, runtime state, platform adapters, CI,
   skills, documentation, and explicitly ticketed deployment work.
@@ -28,71 +27,58 @@
 
 ## 2. Goal and roadmap
 
-- **Current goal:** Preserve the verified merged/deployed state of
-  `HERMES-CLAUDE-RECOVERY-001` and move to the next independently reviewed
-  ticket, without repurposing the existing KLIB Claude session.
-- **Completed and verified:** CI baseline and earlier ARCH-001 work are on the
-  recorded mainline history; Telegram controlled execution reached PR #10 and
-  passed CI run `31571694814`; HERMES-AUTH-001's bounded DGX SSH probe reached
-  the host without mutating runtime data.
-- **Completed and deployed:** HERMES-CLAUDE-RECOVERY-001 merged as PR #12 at
-  `7018f93aa` after CI run `31768361031` passed. DGX now runs the immutable
-  release snapshot `v2026.8.14-hermes-claude-recovery-7018f93aa`; no
-  Hermes-scoped scheduled task was enabled.
+- **Current goal:** Independently review and implement `HERMES-AUTH-002`,
+  moving the public DGX target metadata into user-owned Hermes configuration.
+- **Completed and verified:** HERMES-AUTH-001 merged as PR #14 at
+  `63bcd7ac` after main CI run `31791195033` passed all required checks,
+  including the Windows wrapper job.
+- **Completed and deployed:** DGX now runs immutable release snapshot
+  `v2026.8.14-hermes-auth-001-63bcd7ac`; the active service marker, cwd, and
+  `NRestarts=0` were verified after restart.
+- **Telegram evidence:** direct outbound verification through the merged
+  release returned `success=true`, `message_id=1919`, and `mirrored=true` for
+  the configured SPARK target. Gateway polling still reports network timeout /
+  reconnect warnings, so inbound polling is not claimed as healthy.
 - **Deferred or pending:** HERMES-MONITORING-001 remains `BLOCKED`;
-  HERMES-AUTH-001 and HERMES-RELIABILITY-002 remain
-  `IMPLEMENTED_PENDING_REVIEW`. Live skill synchronization, SkillClaw work,
-  and unrelated DGX service changes remain separate work.
-- **Next candidates:** complete the required independent reviews and
-  reconciliation for pending tickets, then advance `ARCH-002`. Do not promote
-  a candidate to active work without its ticket and acceptance gates.
+  HERMES-AUTH-002 is `READY_FOR_REVIEW`. Live skill synchronization,
+  SkillClaw work, and unrelated DGX service changes remain separate work.
 
 ## 3. Verified runtime and deployment state
 
-- **Mainline versus deployed code:** mainline is `7018f93aa`; DGX uses
-  `/home/cwliao/.hermes/releases/v2026.8.14-hermes-claude-recovery-7018f93aaee`
-  selected through `25-hermes-claude-recovery-7018f93aa.conf`. The live
+- **Mainline versus deployed code:** mainline is `63bcd7ac`; DGX uses
+  `/home/cwliao/.hermes/releases/v2026.8.14-hermes-auth-001-63bcd7ac`
+  selected through `27-hermes-auth-001-63bcd7ac.conf`. The live source
   checkout remains untouched.
 - **DGX service evidence:** `hermes-gateway.service` is active/running with
-  MainPID `1969858`, exit status `0`, and `NRestarts=0`; cwd and `PYTHONPATH`
-  match the release snapshot and the new PID has no Traceback/ERROR logs.
-- **Telegram evidence:** the gateway was active or attempting connection, but
-  end-to-end Telegram readiness/polling was not confirmed in the observed
-  window.
-- **DGX SSH evidence:** a bounded WSL probe returned `SSH_OK`, hostname
-  `55-0940189-03`, user `cwliao`. The requested WSL key path was absent; an
-  already available identity/agent was used. No credentials were stored.
+  MainPID `2299452`, exit status `0`, and `NRestarts=0`; cwd, drop-in, and
+  `HERMES_RELEASE_SHA` match the merged release. The new PID had no
+  Traceback/ERROR logs in the observed window.
+- **DGX SSH evidence:** a bounded WSL probe returned `SSH_OK` through the
+  authenticated route. No credentials were stored.
 - **Storage and safety:** this handover refresh does not mutate Hermes memory,
-  user data, credentials, scheduled tasks, or DGX runtime state.
+  user data, credentials, or scheduled tasks.
 
 ## 4. Ticket and gate state
 
-### Current ticket: HERMES-CLAUDE-RECOVERY-001
+### Current ticket: HERMES-AUTH-002
 
-- **Plan:** `docs/plans/2026-08-14-hermes-claude-recovery-001-auto.md`
-- **Status:** `MERGED_DEPLOYED`.
-- **Scope:** opt-in native-Windows `hermes claude-recovery status|repair`;
-  disabled and empty by default; no task creation, OAuth, kill/restart,
-  DGX mutation, Telegram watchdog, or LLM watchdog.
-- **Evidence:** 45 local tests passed; GitHub CI run `31768361031` passed all
-  required checks; Claude and AGY independent review consensus is `PASS/PASS`.
-  DGX snapshot, systemd drop-in, compile, service state, cwd/PYTHONPATH, and
-  new-PID log evidence are verified. Live Telegram readiness remains
-  unverified and no Hermes-scoped task is configured or enabled.
-- **Required next action:** select the next ticket; do not create a new
-  headless session, repurpose the KLIB-scoped session, inject a guessed TTY, or
-  bypass approval and permission boundaries.
-- **Repository state:** PR #12 is merged; the current checkout contains only
-  the follow-up documentation changes plus unrelated pre-existing dirty work
-  that must be preserved.
+- **Plan:** `docs/plans/2026-08-14-hermes-auth-002-target-config.md`
+- **Status:** `READY_FOR_REVIEW`.
+- **Scope:** parameterize public DGX SSH host/user metadata through existing
+  Hermes user configuration; preserve strict host-key and fail-closed auth
+  behavior.
+- **Required next action:** independently review the plan, implement only the
+  reviewed correction set, run local behavioral tests and GitHub CI, then keep
+  merge/deployment separately authorized.
 
 ### Other ticket state
 
 - `HERMES-MONITORING-001`: `BLOCKED`; DGX SSH and agentmemory health reporting
   is not cleared for merge or deployment.
-- `HERMES-AUTH-001`: `IMPLEMENTED_PENDING_REVIEW`; review and merge gates remain.
-- `HERMES-RELIABILITY-002`: `IMPLEMENTED_PENDING_REVIEW`; do not infer
-  completion from the current checkout branch name.
+- `HERMES-AUTH-001`: `MERGED_DEPLOYED`; main CI, DGX runtime, and outbound
+  Telegram evidence are recorded above.
+- `HERMES-RELIABILITY-002`: implementation remains separate; do not infer
+  completion from historical checkout files.
 - `ARCH-002`: proposed next core ticket; not started here.
 
 ### Gate rule

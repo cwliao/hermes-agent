@@ -1,0 +1,127 @@
+---
+title: "HERMES-AUTH-001: DGX SSH authentication recovery"
+status: IMPLEMENTED_PENDING_REVIEW
+date: 2026-08-14
+type: reliability
+ticket: HERMES-AUTH-001
+target_repo: hermes-agent
+---
+
+# HERMES-AUTH-001: DGX SSH authentication recovery
+
+## Gate
+
+This repo-local ticket centralizes the safe connection path from Windows/Codex
+to the authenticated DGX Spark host. GitHub issues are disabled for this
+repository. The mechanism must never store passwords, MFA codes, private keys,
+tokens, or host-key bypasses in the repository.
+
+Current gate: `IMPLEMENTED_PENDING_REVIEW`.
+
+Required sequence: independent review of the ticket and wrapper, revise the
+correction set, then local hermetic tests, CI, and only separately authorized
+deployment or user-environment installation.
+
+## Observed failure and verified recovery
+
+The Windows OpenSSH route returned `Permission denied (publickey,password)`.
+A bounded WSL route subsequently succeeded:
+
+```text
+SSH_OK
+55-0940189-03
+cwliao
+```
+
+The requested `/home/cwlia/.ssh/id_ed25519` path was absent in that WSL
+instance; SSH succeeded through another available identity/agent. The fix must
+therefore try the existing agent/default identity before reporting that
+reauthentication is required. A single missing preferred key is not proof that
+authentication is unavailable.
+
+## Objective
+
+Make future DGX operations reuse the authenticated WSL SSH agent and a short
+lived SSH control connection automatically. If the connection genuinely needs
+human authentication, emit one machine-detectable `REAUTH_REQUIRED` result and
+provide an explicit interactive bootstrap path. Do not silently fall back to a
+new headless agent or bypass host-key verification.
+
+## Proposed mechanism
+
+- `scripts/dgx_ssh.sh` is the canonical WSL wrapper for `probe`, `exec`,
+  `auth`, and `bootstrap`.
+- `scripts/dgx_ssh.ps1` is the Windows entrypoint. It tries the canonical WSL
+  wrapper first, then uses native Windows OpenSSH only for an authentication
+  failure; it keeps the same strict host-key and bounded-time policy.
+- `probe` and `exec` use `BatchMode=yes`, `StrictHostKeyChecking=yes`, bounded
+  connect/keepalive timeouts, and `ControlMaster=auto` with a ten-minute
+  `ControlPersist` socket under the WSL runtime directory.
+- A readable configured identity is added as a candidate, but the wrapper does
+  not force it with `IdentitiesOnly=yes`; an already-loaded SSH agent can still
+  satisfy authentication when that file is absent or different.
+- `bootstrap` first probes and reuses any working identity. Only when that
+  fails may the user interactively generate/load a key and authorize its public
+  half on DGX. The wrapper never receives or persists a password/MFA value.
+- Exit code `75` means `REAUTH_REQUIRED`; host-key errors remain fail-closed and
+  are not converted into authentication success.
+
+## Implementation evidence
+
+- Added `scripts/dgx_ssh.sh`, `scripts/dgx_ssh.ps1`, and
+  `docs/dgx-ssh-recovery.md`.
+- The WSL wrapper syntax check passed with `bash -n`.
+- PowerShell parser validation passed.
+- Hermetic policy tests passed: `2 passed`.
+- Live read-only wrapper evidence passed through both entrypoints:
+  `probe -> SSH_OK`, host `55-0940189-03`, user `cwliao`; PowerShell
+  `exec hostname` returned the same host.
+- The Windows entrypoint now has a native OpenSSH fallback for WSL
+  authentication failures; its fallback policy is covered by the static
+  contract test. A WSL remote-command failure is not misclassified as an auth
+  failure and is returned directly.
+- No bootstrap, key generation, `ssh-copy-id`, remote file write, service
+  restart, or agent launch was performed. The currently working identity/agent
+  was reused.
+- The PowerShell-to-WSL path conversion bug found by the live smoke test was
+  corrected before recording the passing evidence.
+- Self-review correction: host-key and general transport failures now remain
+  fail-closed instead of being mislabeled as `REAUTH_REQUIRED`; the native
+  Windows fallback is entered only for the wrapper's explicit authentication
+  failure status, and `bootstrap` does not proceed after a non-auth failure.
+
+## Scope boundaries
+
+In scope: local wrapper scripts, deterministic auth-status classification,
+bounded SSH reuse, unit/shell-contract tests, and operator documentation.
+
+Out of scope: editing the live DGX checkout, changing `sshd_config`, disabling
+host-key checks, storing credentials, automating MFA, modifying Telegram, or
+creating a new Claude/AGY headless session.
+
+## Acceptance criteria
+
+1. A successful existing WSL agent/default-identity probe returns `SSH_OK` and
+   does not emit a reauth warning.
+2. A failed non-interactive probe returns `REAUTH_REQUIRED` with exit code 75;
+   it never prompts for a password and never runs `sshpass`, `expect`, or an
+   equivalent credential bypass.
+3. Repeated `exec` calls reuse the control connection when available and are
+   bounded by connect/keepalive timeouts.
+4. Host-key verification is strict; unknown or changed host keys cannot be
+   auto-accepted by the wrapper.
+5. `bootstrap` is the only interactive path and keeps all secrets outside the
+   repository; a successful existing identity prevents key generation.
+6. Hermetic tests cover command policy, exit/status vocabulary, argument
+   forwarding, and no-secret/no-headless invariants. No test makes a network
+   call.
+7. Separate evidence names local tests, GitHub CI, DGX connection, and any
+   downstream agent-review result.
+
+## Review record
+
+- Initial local design review: pending implementation review.
+- DGX auth preflight: `PASS` via WSL on 2026-08-14; the preferred explicit key
+  path was absent but another available SSH identity/agent succeeded.
+- Independent Claude/AGY review: pending; do not claim consensus until a safe
+  existing-session dispatch path returns a bounded result.

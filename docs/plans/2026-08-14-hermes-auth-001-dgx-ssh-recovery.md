@@ -1,6 +1,6 @@
 ---
 title: "HERMES-AUTH-001: DGX SSH authentication recovery"
-status: IMPLEMENTED_PENDING_REVIEW
+status: REVISE_PENDING_IMPLEMENTATION
 date: 2026-08-14
 type: reliability
 ticket: HERMES-AUTH-001
@@ -16,7 +16,7 @@ to the authenticated DGX Spark host. GitHub issues are disabled for this
 repository. The mechanism must never store passwords, MFA codes, private keys,
 tokens, or host-key bypasses in the repository.
 
-Current gate: `IMPLEMENTED_PENDING_REVIEW`.
+Current gate: `REVISE_PENDING_IMPLEMENTATION`.
 
 Required sequence: independent review of the ticket and wrapper, revise the
 correction set, then local hermetic tests, CI, and only separately authorized
@@ -123,5 +123,24 @@ creating a new Claude/AGY headless session.
 - Initial local design review: pending implementation review.
 - DGX auth preflight: `PASS` via WSL on 2026-08-14; the preferred explicit key
   path was absent but another available SSH identity/agent succeeded.
-- Independent Claude/AGY review: pending; do not claim consensus until a safe
-  existing-session dispatch path returns a bounded result.
+- Real-session routing evidence: no uniquely addressable Hermes Claude/AGY
+  session was available on DGX, WSL, or native Windows. The DGX Claude remote
+  processes were either session servers without a Hermes cwd or a client in
+  `/home/cwliao/dgx-workspace`; they were not reused for this ticket.
+- DGX AGY packet-only review: `REVISE` from AGY 1.1.13. Packet SHA256:
+  `3b4e3f8bef76fc89555132dc76e10825d048b2d317475dc504c1f95df139eb26`.
+  Findings: PowerShell native-probe output/status separation; WSL path
+  resolution must fall back to native Windows; PowerShell must honor
+  `HERMES_DGX_IDENTITY`; static tests need behavioral coverage.
+- DGX Claude packet-only review: `REVISE` using the existing authenticated
+  Claude CLI in no-session-persistence print mode after real Hermes sessions
+  were unavailable. Findings: PowerShell native-probe output/status handling;
+  behavioral rather than static tests; distinguish bootstrap keygen/tool
+  failures from `REAUTH_REQUIRED`; attach CI evidence after the correction.
+- Reconciliation: Claude and AGY agree on the two medium-risk corrections
+  (PowerShell fallback output/status handling and behavioral tests). The
+  complete correction set also includes WSL resolution fallback,
+  `HERMES_DGX_IDENTITY` parity, and distinct bootstrap failure status. Target
+  and WSL distro de-duplication is a non-blocking maintainability follow-up.
+- Consensus: `REVISE`; AUTH-001 is not ready for merge or deployment until the
+  correction set is implemented, independently re-reviewed, and CI is rerun.

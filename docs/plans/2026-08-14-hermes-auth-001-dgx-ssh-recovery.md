@@ -1,6 +1,6 @@
 ---
 title: "HERMES-AUTH-001: DGX SSH authentication recovery"
-status: IMPLEMENTED_PENDING_REVIEW
+status: REVIEWED_PENDING_MERGE
 date: 2026-08-14
 type: reliability
 ticket: HERMES-AUTH-001
@@ -209,3 +209,25 @@ creating a new Claude/AGY headless session.
   quoting, sentinel leakage, and missing Windows CI coverage. Those findings
   are implemented in the successor commit and require one more independent
   review cycle.
+
+- Final correction commit `e9d5f9ab1` adds `BASH_ENV` shell-function shims to
+  the Git Bash fallback test harness. This prevents a Windows runner without
+  Ubuntu WSL from resolving the real OpenSSH client, while retaining the
+  existing fake-SSH behavior. Local hermetic evidence is `8 passed`; the
+  GitHub Windows job in run `31789781906` recorded `8 passed in 9.84s` with no
+  skipped tests or network connection attempt. The full CI run is green:
+  [31789781906](https://github.com/cwliao/hermes-agent/actions/runs/31789781906).
+- The final review packet was built from branch SHA `e9d5f9ab1` and matched on
+  DGX by SHA256
+  `36e8716c8a7096d74affcd0dae967a38a1508af6b83d3120d2facd37c8cd727a`.
+  AGY and Claude independently returned `VERDICT: PASS` for that exact packet.
+  Claude's host/user disclosure note was reconciled against live GitHub
+  metadata: the repository is public. It is accepted as a non-blocking,
+  explicitly acknowledged operational follow-up for a future target-config
+  hardening ticket; it is not a credential or authentication bypass.
+- The CI classifier was independently exercised with only
+  `scripts/dgx_ssh.sh` and `scripts/dgx_ssh.ps1`; it returned `python=true`,
+  so the `windows-wrapper-tests` gate is not silently skipped for wrapper-only
+  changes. Merge and deployment remain separate authorization gates.
+- Consensus: `PASS`; AUTH-001 is ready for a separately authorized merge, but
+  this task did not merge, deploy, or modify the live DGX checkout.

@@ -313,6 +313,7 @@ from typing import Optional
 
 
 from hermes_cli.subcommands.cron import build_cron_parser
+from hermes_cli.subcommands.claude_recovery import build_claude_recovery_parser
 from hermes_cli.subcommands.sync import build_sync_parser
 from hermes_cli.subcommands.gateway import build_gateway_parser
 from hermes_cli.subcommands.profile import build_profile_parser
@@ -2602,7 +2603,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "approvals", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
+        "claude-recovery", "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "egress", "fallback", "gateway", "hooks", "import", "import-agent", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
@@ -3156,6 +3157,13 @@ def _cmd_sessions_lazy(args, **kwargs):
     return cmd_sessions(args, **kwargs)
 
 
+def cmd_claude_recovery(args):
+    """Inspect or safely trigger an existing Claude Remote Control task."""
+    from hermes_cli.claude_recovery import claude_recovery_command
+
+    return claude_recovery_command(args)
+
+
 def _build_cli_parser():
     """Build the full ``hermes`` argparse tree -> ``(parser, subparsers)``.
 
@@ -3203,6 +3211,7 @@ def _build_cli_parser():
     build_pause_parser(subparsers)
     build_cron_parser(subparsers, cmd_cron=cmd_cron)
     build_sync_parser(subparsers, cmd_sync=cmd_sync)
+    build_claude_recovery_parser(subparsers, cmd_claude_recovery=cmd_claude_recovery)
     build_webhook_parser(subparsers, cmd_webhook=cmd_webhook)
 
     from hermes_cli.subcommands.peer import build_peer_parser

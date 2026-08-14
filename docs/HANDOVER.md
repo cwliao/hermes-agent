@@ -15,8 +15,8 @@
 - **Canonical mainline:** `origin/main` at
   `63bcd7acbbb93d2c797090800ac1e4677b590449`.
 - **Current checkout branch:** `ticket/hermes-auth-002-target-config`.
-- **Current checkout HEAD:** `63bcd7acb` (`Merge PR #14: HERMES-AUTH-001
-  DGX SSH recovery`).
+- **Current checkout HEAD:** `29de01fad9692ec9033daa210518a041e0bc8ddb`
+  (`docs: open AUTH-002 target config hardening ticket`).
 - **DGX runtime:** configured target, checkout
   `/home/cwliao/.hermes/hermes-agent`, service `hermes-gateway.service`.
 - **In scope:** Hermes CLI, gateway, runtime state, platform adapters, CI,
@@ -27,8 +27,9 @@
 
 ## 2. Goal and roadmap
 
-- **Current goal:** Independently review and implement `HERMES-AUTH-002`,
-  moving the public DGX target metadata into user-owned Hermes configuration.
+- **Current goal:** Independently review `HERMES-AUTH-002`, then implement only
+  its reconciled correction set: move public DGX target metadata into
+  user-owned Hermes configuration without weakening the fail-closed SSH path.
 - **Completed and verified:** HERMES-AUTH-001 merged as PR #14 at
   `63bcd7ac` after main CI run `31791195033` passed all required checks,
   including the Windows wrapper job.
@@ -40,7 +41,7 @@
   the configured SPARK target. Gateway polling still reports network timeout /
   reconnect warnings, so inbound polling is not claimed as healthy.
 - **Deferred or pending:** HERMES-MONITORING-001 remains `BLOCKED`;
-  HERMES-AUTH-002 is `READY_FOR_REVIEW`. Live skill synchronization,
+  HERMES-AUTH-002 is `READY_FOR_REVIEW` and is plan-only. Live skill synchronization,
   SkillClaw work, and unrelated DGX service changes remain separate work.
 
 ## 3. Verified runtime and deployment state
@@ -85,8 +86,8 @@
 
 Ticket implementation, local tests, independent cross-review, reconciliation,
 CI, merge, DGX deployment, runtime health, and Telegram delivery are separate
-gates. A pass at one gate cannot be reported as a pass at another. The current
-ticket is complete for this implementation/deployment scope; Telegram
+gates. A pass at one gate cannot be reported as a pass at another. The handover
+refresh is complete; the AUTH-002 ticket itself is not complete. Telegram
 readiness and future ticket gates remain separate.
 
 ## 5. Safe continuation instructions

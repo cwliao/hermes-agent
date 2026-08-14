@@ -25,6 +25,15 @@ def usable_wsl() -> str | None:
     return wsl if probe.returncode == 0 else None
 
 
+def git_bash_path(path: Path) -> str:
+    """Convert a Windows path to the MSYS form expected by Git Bash."""
+    if os.name != "nt":
+        return str(path)
+    absolute = path.resolve().as_posix()
+    drive, remainder = absolute.split(":", 1)
+    return f"/{drive.lower()}{remainder}"
+
+
 def run_shell_wrapper(tmp_path: Path, mode: str, *args: str) -> subprocess.CompletedProcess[str]:
     wsl = usable_wsl()
     bash = shutil.which("bash")
@@ -114,11 +123,13 @@ esac
             check=False,
         )
 
-    env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
-    env["HOME"] = str(tmp_path)
+    bash_tmp = git_bash_path(tmp_path)
+    bash_log = git_bash_path(log_path)
+    env["PATH"] = f"{bash_tmp}:{env.get('PATH', '')}"
+    env["HOME"] = bash_tmp
     env["XDG_RUNTIME_DIR"] = "/tmp" if wsl is None else str(tmp_path)
     env["FAKE_SSH_MODE"] = mode
-    env["FAKE_SSH_LOG"] = str(log_path)
+    env["FAKE_SSH_LOG"] = bash_log
     return subprocess.run(
         [bash, str(SH_WRAPPER).replace("\\", "/"), *args],
         cwd=ROOT,

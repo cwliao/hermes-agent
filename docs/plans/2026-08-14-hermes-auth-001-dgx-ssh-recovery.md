@@ -118,7 +118,10 @@ new headless agent or bypass host-key verification.
   `31784150099` ([CI run](https://github.com/cwliao/hermes-agent/actions/runs/31784150099));
   all required checks passed, 4,941 Linux tests passed, and the Windows-only
   PowerShell harness was explicitly skipped on the Linux runner. The local
-  Windows run executed all 7 wrapper tests successfully.
+  Windows run executed all 8 wrapper tests successfully.
+- GitHub CI evidence for final implementation SHA `f016b925f` is green: run
+  `31785366128` ([CI run](https://github.com/cwliao/hermes-agent/actions/runs/31785366128));
+  all required checks and all 8 Python test slices passed.
 - The broader `tests/scripts` collection remains environment-blocked outside
   this change: the native interpreter lacks `httpx`, and the project venv's
   pytest temp root has an existing Windows ACL denial. These are recorded as

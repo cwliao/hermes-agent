@@ -28,8 +28,8 @@ def usable_wsl() -> str | None:
 def run_shell_wrapper(tmp_path: Path, mode: str, *args: str) -> subprocess.CompletedProcess[str]:
     wsl = usable_wsl()
     bash = shutil.which("bash")
-    if wsl is None and bash is None:
-        raise AssertionError("bash or wsl.exe is required for wrapper behavior tests")
+    if wsl is None and (bash is None or os.name == "nt"):
+        pytest.skip("Ubuntu WSL is required for shell wrapper behavior tests on Windows")
 
     fake_ssh = tmp_path / "ssh"
     fake_ssh_content = """#!/usr/bin/env bash

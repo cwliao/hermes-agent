@@ -3,6 +3,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SH_WRAPPER = ROOT / "scripts" / "dgx_ssh.sh"
@@ -177,7 +179,7 @@ def test_shell_exec_forwards_remote_command_arguments(tmp_path):
 def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tmp_path):
     powershell = shutil.which("powershell.exe")
     if powershell is None:
-        raise AssertionError("powershell.exe is required for Windows wrapper behavior tests")
+        pytest.skip("Windows PowerShell is required for Windows wrapper behavior tests")
 
     fake_ssh = tmp_path / "ssh.cmd"
     fake_ssh.write_text(

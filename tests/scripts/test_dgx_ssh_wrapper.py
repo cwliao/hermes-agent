@@ -77,11 +77,24 @@ esac
     with fake_ssh.open("w", encoding="utf-8", newline="\n") as stream:
         stream.write(fake_ssh_content)
     fake_ssh.chmod(0o755)
+    fake_windows_ssh = tmp_path / "ssh.cmd"
+    fake_windows_ssh.write_text(
+        '@echo off\r\n'
+        'bash "%~dp0ssh" %*\r\n'
+        'exit /b %ERRORLEVEL%\r\n',
+        encoding="utf-8",
+        newline="",
+    )
     if mode == "bootstrap-keygen-failure":
         fake_keygen = tmp_path / "ssh-keygen"
         with fake_keygen.open("w", encoding="utf-8", newline="\n") as stream:
             stream.write("#!/usr/bin/env bash\nexit 42\n")
         fake_keygen.chmod(0o755)
+        (tmp_path / "ssh-keygen.cmd").write_text(
+            "@echo off\r\nexit /b 42\r\n",
+            encoding="utf-8",
+            newline="",
+        )
     env = os.environ.copy()
     log_path = tmp_path / "ssh-args.log"
     if wsl is not None:

@@ -13,9 +13,7 @@ def run_shell_wrapper(tmp_path: Path, mode: str, *args: str) -> subprocess.Compl
     wsl = shutil.which("wsl.exe")
     bash = shutil.which("bash")
     if wsl is None and bash is None:
-        import pytest
-
-        pytest.skip("bash or wsl.exe is required for wrapper behavior tests")
+        raise AssertionError("bash or wsl.exe is required for wrapper behavior tests")
 
     fake_ssh = tmp_path / "ssh"
     fake_ssh_content = """#!/usr/bin/env bash
@@ -169,3 +167,81 @@ def test_shell_exec_forwards_remote_command_arguments(tmp_path):
     assert result.returncode == 0
     assert "<echo>" in log
     assert "<hello>" in log
+
+
+def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        raise AssertionError("powershell.exe is required for Windows wrapper behavior tests")
+
+    fake_ssh = tmp_path / "ssh.cmd"
+    fake_ssh.write_text(
+        "@echo off\r\n"
+        ">>\"%FAKE_SSH_LOG%\" echo %*\r\n"
+        "echo SSH_OK\r\n"
+        "echo dgx-test\r\n"
+        "echo cwliao\r\n"
+        "exit /b 0\r\n",
+        encoding="utf-8",
+        newline="",
+    )
+    identity = tmp_path / "configured-id"
+    identity.write_text("test-only-placeholder", encoding="utf-8")
+    log_path = tmp_path / "native-ssh.log"
+    wrapper_copy = tmp_path / "dgx_ssh.ps1"
+    (tmp_path / "dgx_ssh.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8", newline="\n")
+    original_assignment = '$sshExe = Join-Path $env:WINDIR "System32\\OpenSSH\\ssh.exe"'
+    replacement_assignment = f'$sshExe = "{fake_ssh}"'
+    wrapper_copy.write_text(
+        PS_WRAPPER.read_text(encoding="utf-8").replace(original_assignment, replacement_assignment),
+        encoding="utf-8",
+        newline="\n",
+    )
+    helper = tmp_path / "invoke-wrapper.ps1"
+    helper.write_text(
+        "function global:wsl.exe {\n"
+        "    param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Args)\n"
+        "    if ($Args -contains 'wslpath') {\n"
+        "        if ($env:FAKE_WSL_MODE -eq 'path-failure') {\n"
+        "            $global:LASTEXITCODE = 1\n"
+        "            return\n"
+        "        }\n"
+        "        $global:LASTEXITCODE = 0\n"
+        "        Write-Output '/mnt/fake/scripts/dgx_ssh.sh'\n"
+        "        return\n"
+        "    }\n"
+        "    $global:LASTEXITCODE = 75\n"
+        "    Write-Output 'WSL_REAUTH_REQUIRED'\n"
+        "}\n"
+        f'& "{wrapper_copy}" -Mode probe\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    env = os.environ.copy()
+    env["FAKE_SSH_LOG"] = str(log_path)
+    env["FAKE_WSL_MODE"] = "auth-failure"
+    env["HERMES_DGX_IDENTITY"] = str(identity)
+    first = subprocess.run(
+        [powershell, "-NoProfile", "-File", str(helper)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert first.stdout.count("SSH_OK") == 1
+    assert "WSL_REAUTH_REQUIRED" not in first.stdout
+    assert str(identity) in log_path.read_text(encoding="utf-8")
+
+    env["FAKE_WSL_MODE"] = "path-failure"
+    second = subprocess.run(
+        [powershell, "-NoProfile", "-File", str(helper)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.count("SSH_OK") == 1

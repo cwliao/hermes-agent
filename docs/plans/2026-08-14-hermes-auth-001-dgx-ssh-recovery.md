@@ -97,7 +97,12 @@ new headless agent or bypass host-key verification.
   70; and shell tests exercise permission-denied, host-key, success, and
   remote-argument forwarding behavior.
 - Post-correction local evidence: `tests/scripts/test_dgx_ssh_wrapper.py`
-  passed `5 passed`; PowerShell parser validation and WSL `bash -n` passed.
+  passed `6 passed`; PowerShell parser validation and WSL `bash -n` passed.
+- The behavior suite now runs a Windows PowerShell mock harness that exercises
+  WSL authentication failure -> native fallback, WSL path-resolution failure
+  -> native fallback, single-output preservation, and configured identity
+  forwarding. Shell behavior tests fail when neither `bash` nor `wsl.exe` is
+  available instead of silently skipping.
 - The broader `tests/scripts` collection remains environment-blocked outside
   this change: the native interpreter lacks `httpx`, and the project venv's
   pytest temp root has an existing Windows ACL denial. These are recorded as

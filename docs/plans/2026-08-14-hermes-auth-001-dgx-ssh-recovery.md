@@ -107,6 +107,13 @@ new headless agent or bypass host-key verification.
   defect in native PowerShell `auth`; the mock harness now executes `probe`,
   `exec`, and `auth` fallback paths plus a real shell bootstrap keygen failure,
   with `7 passed` recorded locally.
+- Follow-up collision fix: the WSL-to-PowerShell `exec` bridge marks a remote
+  command exit status `75` before returning it, so PowerShell does not mistake
+  a real remote `75` for `REAUTH_REQUIRED` and execute a non-idempotent command
+  twice. Native interactive auth now uses a waited, inherited-console process
+  so password/MFA prompts are not captured into a buffered output array.
+- Collision regression evidence: the hermetic suite now has `8 passed`,
+  including a remote-command exit-75/no-native-fallback assertion.
 - GitHub CI evidence for code SHA `bcca3df06` is green: run
   `31784150099` ([CI run](https://github.com/cwliao/hermes-agent/actions/runs/31784150099));
   all required checks passed, 4,941 Linux tests passed, and the Windows-only
@@ -180,3 +187,6 @@ creating a new Claude/AGY headless session.
   native-auth status handling, behavioral `exec`/`auth`/bootstrap coverage, and
   the explicit non-Windows skip policy; CI evidence above is attached before
   the final re-review.
+- Final review cycle found and addressed a remote-exit-75 collision between
+  wrapper `REAUTH_REQUIRED` and ordinary remote command statuses; final
+  independent re-review is required against the successor commit.

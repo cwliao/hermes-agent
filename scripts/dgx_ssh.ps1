@@ -98,12 +98,13 @@ function Invoke-NativeAuth {
         return [pscustomobject]@{ Output = @(); Status = 127 }
     }
     $options = @(Get-NativeSshOptions) + @("-o", "BatchMode=no")
+    $argumentList = @($options) + @($dgxTarget)
     if ($RemoteCommand.Count -gt 0) {
-        $output = @(& $sshExe $options $dgxTarget ($RemoteCommand -join " ") 2>&1)
-    } else {
-        $output = @(& $sshExe $options $dgxTarget 2>&1)
+        $argumentList += ($RemoteCommand -join " ")
     }
-    $status = [int]$LASTEXITCODE
+    $process = Start-Process -FilePath $sshExe -ArgumentList $argumentList -Wait -NoNewWindow -PassThru
+    $status = [int]$process.ExitCode
+    $output = @()
     if ($status -eq 0) {
         $output += "AUTH_OK: native Windows SSH route"
     }
@@ -140,11 +141,16 @@ switch ($Mode) {
     }
     "exec" {
         if (-not [string]::IsNullOrWhiteSpace($wslScriptPath)) {
-            $wslOutput = & wsl.exe -d Ubuntu -- bash $wslScriptPath exec @RemoteCommand 2>&1
+            $wslOutput = & wsl.exe -d Ubuntu -- env HERMES_DGX_EXEC_PROTOCOL=1 bash $wslScriptPath exec @RemoteCommand 2>&1
             $wslStatus = $LASTEXITCODE
             if ($wslStatus -eq 0) {
                 $wslOutput
                 exit 0
+            }
+            $wslText = $wslOutput -join "`n"
+            if ($wslStatus -eq 75 -and $wslText -match 'HERMES_DGX_REMOTE_EXIT_STATUS=(\d+)') {
+                $wslOutput
+                exit ([int]$matches[1])
             }
             if ($wslStatus -ne 75) {
                 $wslOutput

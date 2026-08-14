@@ -39,6 +39,13 @@ case "${FAKE_SSH_MODE:-success}" in
         printf '%s\\n' 'SSH_OK' 'dgx-test' 'cwliao'
         exit 0
         ;;
+    remote-75)
+        if [[ "${@: -1}" == "true" ]]; then
+            exit 0
+        fi
+        printf '%s\\n' 'REMOTE_COMMAND_EXIT_75'
+        exit 75
+        ;;
     *)
         exit 99
         ;;
@@ -176,6 +183,14 @@ def test_shell_exec_forwards_remote_command_arguments(tmp_path):
     assert "<hello>" in log
 
 
+def test_shell_exec_preserves_remote_exit_75_without_reclassification(tmp_path):
+    result = run_shell_wrapper(tmp_path, "remote-75", "exec", "remote-command")
+
+    assert result.returncode == 75
+    assert "REMOTE_COMMAND_EXIT_75" in result.stdout
+    assert "REAUTH_REQUIRED" not in result.stderr
+
+
 def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tmp_path):
     powershell = shutil.which("powershell.exe")
     if powershell is None:
@@ -217,13 +232,19 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
         "        Write-Output '/mnt/fake/scripts/dgx_ssh.sh'\n"
         "        return\n"
         "    }\n"
+        "    if ($Args -contains 'exec' -and $env:FAKE_WSL_MODE -eq 'remote-exit-75') {\n"
+        "        $global:LASTEXITCODE = 75\n"
+        "        Write-Output 'HERMES_DGX_REMOTE_EXIT_STATUS=75'\n"
+        "        return\n"
+        "    }\n"
         "    $global:LASTEXITCODE = 75\n"
         "    Write-Output 'WSL_REAUTH_REQUIRED'\n"
         "}\n"
         "$mode = if ([string]::IsNullOrWhiteSpace($env:FAKE_MODE)) { 'probe' } else { $env:FAKE_MODE }\n"
         f'if ($mode -eq "exec") {{ & "{wrapper_copy}" -Mode exec hostname }} '
         f'elseif ($mode -eq "auth") {{ & "{wrapper_copy}" -Mode auth }} '
-        f'else {{ & "{wrapper_copy}" -Mode probe }}\n',
+        f'else {{ & "{wrapper_copy}" -Mode probe }}\n'
+        "exit $LASTEXITCODE\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -281,6 +302,21 @@ def test_windows_probe_falls_back_without_polluting_output_or_losing_identity(tm
     assert fourth.returncode == 0, fourth.stderr
     assert "AUTH_OK: native Windows SSH route" in fourth.stdout
     assert "BatchMode=no" in log_path.read_text(encoding="utf-8")
+
+    before_remote_75 = log_path.read_text(encoding="utf-8")
+    env["FAKE_MODE"] = "exec"
+    env["FAKE_WSL_MODE"] = "remote-exit-75"
+    fifth = subprocess.run(
+        [powershell, "-NoProfile", "-File", str(helper)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert fifth.returncode == 75
+    assert "HERMES_DGX_REMOTE_EXIT_STATUS=75" in fifth.stdout
+    assert log_path.read_text(encoding="utf-8") == before_remote_75
 
 
 def test_shell_bootstrap_distinguishes_keygen_failure_from_reauthentication(tmp_path):

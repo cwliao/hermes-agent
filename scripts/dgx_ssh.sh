@@ -155,6 +155,11 @@ exec_remote() {
     fi
     if (($#)); then
         ssh "${common_ssh_opts[@]}" -o BatchMode=yes "${DGX_TARGET}" "$@"
+        local command_status=$?
+        if ((command_status == 75)) && [[ "${HERMES_DGX_EXEC_PROTOCOL:-0}" == "1" ]]; then
+            printf '%s\n' "HERMES_DGX_REMOTE_EXIT_STATUS=75" >&2
+        fi
+        return "${command_status}"
     else
         printf '%s\n' "USAGE: scripts/dgx_ssh.sh exec <remote-command>" >&2
         return 64

@@ -41,10 +41,16 @@ the existing fail-closed safety boundaries.
 - Define distinct states for service/process health, inbound polling health,
   and outbound send-path health. A systemd `active` result alone must not clear
   inbound degradation.
+- Define polling progress concretely: a successful, error-free `getUpdates`
+  response (including HTTP 200 with an empty update batch), an accepted update
+  callback, or an equivalent bounded transport heartbeat may advance readiness;
+  `start_polling()` returning or a retry timer firing alone may not.
 - Fix only the confirmed root cause in the Telegram polling transport. The
   correction must keep polling start/reconnect awaits bounded, prevent
   overlapping polling generations, preserve request-pool cleanup, and retain
-  bounded retry/backoff/fatal escalation semantics.
+  bounded retry/backoff/fatal escalation semantics. Retry backoff must have a
+  bounded ceiling and jitter so sustained failures do not create a reconnect
+  storm.
 - Ensure a successful reconnect is promoted to healthy only after observable
   polling progress or an equivalent bounded readiness signal, not merely after
   `start_polling()` returns.
@@ -52,6 +58,16 @@ the existing fail-closed safety boundaries.
   start, `TimedOut`/network error, reconnect retry scheduling, progress-based
   recovery, fatal escalation, cancellation/cleanup, and separation of inbound
   polling from outbound send health.
+- Treat the existing Telegram timeout/reconnect tests as baseline coverage, not
+  proof that the deployed path is healthy. Extend or refactor them only where
+  they do not assert this ticket's new readiness and ownership contract, then
+  add focused hermetic cases for empty successful polls, retry exhaustion,
+  request-pool cleanup across multiple retry cycles, and cancellation.
+- Add a deployment/rollback checklist as a deliverable: immutable release
+  identity, effective user-unit verification, bounded restart procedure, live
+  inbound/outbound evidence requirements, and the exact rollback trigger and
+  prior release restoration steps. This remains documentation and a gate, not
+  authorization to execute it.
 - Record CI, independent review, deployment, rollback, and live Telegram
   evidence as separate gates.
 
@@ -76,19 +92,32 @@ the existing fail-closed safety boundaries.
    proof that the deployed path is healthy.
 2. Inbound polling, outbound send, and process/service health have explicit,
    non-colliding states and transitions. A timeout/reconnect loop is visibly
-   degraded and a successful recovery requires bounded progress evidence.
+   degraded and a successful recovery requires bounded progress evidence: a
+   successful empty or non-empty `getUpdates` response, accepted update
+   callback, or equivalent bounded heartbeat. A returned `start_polling()` with
+   no such signal does not clear degradation.
 3. Reconnect behavior is bounded and single-owner: no forever-hung await, no
    overlapping polling generations, no request-pool leak across retries, and
-   no silent death after a transient failure.
-4. Focused hermetic tests cover timeout, retry, progress, cancellation,
-   cleanup, fatal escalation, and inbound/outbound health separation without
-   real Telegram calls or credentials.
-5. Relevant GitHub CI checks pass, and one authenticated Claude reviewer plus
-   one authenticated AGY reviewer independently PASS the same correction set;
-   findings are reconciled before implementation or deployment.
-6. Deployment, service restart, live inbound Telegram verification, outbound
-   verification, and rollback evidence remain separately authorized and
-   recorded. A green unit/CI result is not live health evidence.
+   no silent death after a transient failure. Backoff has bounded maximum
+   delay plus jitter, and retry exhaustion reaches an explicit fatal state.
+4. Focused hermetic tests cover timeout, retry scheduling, bounded/jittered
+   backoff, empty successful poll progress, non-empty update progress,
+   cancellation, request-pool cleanup across repeated retry cycles, fatal
+   max-retry escalation, and inbound/outbound health separation without real
+   Telegram calls or credentials. Existing regression tests are identified as
+   baseline or explicitly extended; neither is treated as deployed-path proof.
+5. Relevant GitHub CI checks pass, and exactly one authenticated Claude
+   reviewer plus exactly one authenticated AGY reviewer independently review
+   the same packet/correction set and return a traceable final `PASS`. Each
+   reviewer is a uniquely addressable real session, uses no implementation
+   tools, and has its findings reconciled before implementation or deployment.
+6. A deployment/rollback checklist is present before implementation approval,
+   covering immutable release identity, effective `systemctl --user` unit,
+   bounded restart, live inbound and outbound evidence, rollback trigger, and
+   prior-release restoration. Deployment, service restart, live inbound
+   Telegram verification, outbound verification, and rollback remain
+   separately authorized and recorded. A green unit/CI result is not live
+   health evidence.
 
 ## Review questions
 
@@ -98,6 +127,15 @@ the existing fail-closed safety boundaries.
 - Are the proposed health boundaries and acceptance tests sufficient to avoid
   false `healthy` status while preserving safe recovery?
 - Is any part of the scope speculative or missing a required failure path?
+
+## Re-review correction set
+
+The first independent review round identified clarifications rather than an
+implementation blocker. The plan now explicitly defines empty successful poll
+responses as valid low-traffic progress, requires bounded jittered backoff,
+separates baseline tests from new contract tests, names retry-exhaustion and
+pool-cleanup cases, defines the Claude/AGY reviewer qualification, and makes
+the deployment/rollback checklist a pre-implementation deliverable.
 
 ## Current gate
 

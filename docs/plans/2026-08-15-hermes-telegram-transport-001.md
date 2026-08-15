@@ -187,6 +187,7 @@ and the implementation/test/deployment gate order.
 
 ## Implementation evidence
 
+- Implementation commit: `683a1e122` (`fix: bound Telegram polling reconnect recovery`).
 - Changed files: `plugins/platforms/telegram/adapter.py` and
   `tests/gateway/test_telegram_network_reconnect.py`.
 - Implemented bounded polling request shutdown/initialization, jittered capped

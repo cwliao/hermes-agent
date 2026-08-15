@@ -1,6 +1,6 @@
 # Hermes Architecture Roadmap
 
-> Snapshot: 2026-08-14 (Asia/Taipei). `main` is the canonical Hermes
+> Snapshot: 2026-08-15 (Asia/Taipei). `main` is the canonical Hermes
 > integration line; DGX release snapshots are staging inputs only. The
 > current handover/ticket state below supersedes older historical rows.
 
@@ -17,14 +17,15 @@
 
 | Reference | Current evidence | Meaning |
 |---|---|---|
-| origin/main | 63bcd7acbbb93d2c797090800ac1e4677b590449 | Canonical Hermes mainline after HERMES-AUTH-001 merge (PR #14). |
+| origin/main | 1b3d4449553433100038f38e7b58f2f2dc489fa7 | Canonical Hermes mainline after Calendar Guard correction PR #18. |
 | origin/ticket/T0127-v2026.8.3-merged | release staging branch | DGX release input; not the ARCH merge target. |
 | live DGX checkout | /home/cwliao/.hermes/hermes-agent | Claude-owned; do not edit or reset. |
-| live DGX deployed commit | 63bcd7acbbb93d2c797090800ac1e4677b590449 | Release snapshot deployed; gateway active after restart. |
-| live DGX release snapshot | `/home/cwliao/.hermes/releases/v2026.8.14-hermes-auth-001-63bcd7ac` | Service cwd and PYTHONPATH target; live checkout remains untouched. |
+| live DGX deployed commit | 1b3d4449553433100038f38e7b58f2f2dc489fa7 | Release snapshot deployed; gateway active after restart. |
+| live DGX release snapshot | `/home/cwliao/.hermes/releases/v2026.8.15-hermes-calendar-guard-1b3d444955` | Service cwd and PYTHONPATH target; live checkout remains untouched. |
 | rollback ref | backup/pre-arch-001-deploy-20260810T031625Z | DGX-local pre-ARCH-001 deploy ref; preserved for rollback. |
 | Telegram controlled-execution merge | af99f0f1ad52e266fcc2cfbf261e1ee9f71e39c2 | PR #10 merged; CI run 31571694814 successful; deployed to DGX. |
 | HERMES-AUTH-001 merge | 63bcd7acbbb93d2c797090800ac1e4677b590449 | PR #14 merged; main CI run 31791195033 passed; deployed to DGX. |
+| HERMES-CALENDAR-GUARD-001 merge | 1b3d4449553433100038f38e7b58f2f2dc489fa7 | PR #17 implementation plus PR #18 deployment correction; CI and DGX timer/recovery evidence verified. |
 
 ## Core engineering order
 
@@ -92,14 +93,17 @@ docs/plans/2026-08-10-hermes-skills-roadmap.md.
 | HERMES-SKILLS-004 | proposed | Reconcile pinned HermesHub skill bytes, scanner evidence, and HH-005 installed-state mismatch. |
 | HERMES-SKILLS-002 to HERMES-SKILLCLAW-001 | proposed | Select only after the relevant contract and evidence gates are reviewed. |
 | HERMES-AUTH-002 | READY_FOR_REVIEW | Plan-only PR #16; independently review before implementation. |
+| HERMES-CALENDAR-GUARD-001 | MERGED_DEPLOYED | PR #17/#18 merged; immutable DGX release and recovery timer verified. |
 
 ## Runtime and deployment boundary
 
-HERMES-AUTH-001 is the latest verified DGX deployment in an isolated release
-snapshot; the live checkout remains untouched and drop-in
-`27-hermes-auth-001-63bcd7ac.conf` selects it. Rollback remains available by
-restoring the preceding drop-in/release selection. The service was active with
-MainPID `2299452`, exit status `0`, and `NRestarts=0` at verification time.
+HERMES-CALENDAR-GUARD-001 is the latest verified DGX deployment in an isolated
+release snapshot; the live checkout remains untouched and drop-in
+`29-hermes-calendar-guard-1b3d444955.conf` selects it. Rollback remains
+available by restoring the preceding drop-in/release selection. The service
+was active with MainPID `3161529`, exit status `0`, and `NRestarts=0` at
+verification time. The recovery timer was active/waiting and its oneshot last
+completed successfully.
 Direct outbound Telegram verification succeeded (`message_id=1919`,
 `mirrored=true`); inbound polling remains unconfirmed because timeout and
 reconnect warnings were observed.

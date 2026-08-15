@@ -60,6 +60,9 @@ host key, or fall back to a different agent.
 
 ## Evidence boundary
 
-The current AUTH-001 deployment remains on DGX release
-`v2026.8.14-hermes-auth-001-63bcd7ac` and is not changed by this plan. This
-ticket starts from merged main SHA `63bcd7acbbb93d2c797090800ac1e4677b590449`.
+The current DGX deployment is the separately merged Calendar Guard release
+`v2026.8.15-hermes-calendar-guard-1b3d444955` from main SHA
+`1b3d4449553433100038f38e7b58f2f2dc489fa7`. AUTH-002 must not change that
+runtime as part of the plan-only review or implementation gate; it starts from
+the current merged mainline and remains a separate ticket from AUTH-001 and
+Calendar Guard.

@@ -1,7 +1,7 @@
 # Project Handover - hermes-agent
 
 **Plan key:** hermes-agent
-**Last verified:** 2026-08-14
+**Last verified:** 2026-08-15
 **Handover owner/session:** Codex
 **Authoritative project log:** `docs/ROADMAP-HERMES-DGX.md`
 
@@ -13,9 +13,9 @@
 - **Working checkout:** `D:/PROJECT/Hermes/.worktrees/hermes-auth-002`.
 - **Canonical remote:** `origin` -> `git@github.com:cwliao/hermes-agent.git`.
 - **Canonical mainline:** `origin/main` at
-  `63bcd7acbbb93d2c797090800ac1e4677b590449`.
+  `1b3d4449553433100038f38e7b58f2f2dc489fa7`.
 - **Current checkout branch:** `ticket/hermes-auth-002-target-config`.
-- **Current checkout HEAD:** `29de01fad9692ec9033daa210518a041e0bc8ddb`
+- **Current checkout HEAD:** `b8c37b47961f8a2f90e1b6fefc4025e98f28a4be`
   (`docs: open AUTH-002 target config hardening ticket`).
 - **DGX runtime:** configured target, checkout
   `/home/cwliao/.hermes/hermes-agent`, service `hermes-gateway.service`.
@@ -33,9 +33,10 @@
 - **Completed and verified:** HERMES-AUTH-001 merged as PR #14 at
   `63bcd7ac` after main CI run `31791195033` passed all required checks,
   including the Windows wrapper job.
-- **Completed and deployed:** DGX now runs immutable release snapshot
-  `v2026.8.14-hermes-auth-001-63bcd7ac`; the active service marker, cwd, and
-  `NRestarts=0` were verified after restart.
+- **Completed and deployed:** HERMES-CALENDAR-GUARD-001 merged through PR #17
+  and correction PR #18; `main` is `1b3d444955...`, and DGX runs immutable
+  release snapshot
+  `v2026.8.15-hermes-calendar-guard-1b3d444955`.
 - **Telegram evidence:** direct outbound verification through the merged
   release returned `success=true`, `message_id=1919`, and `mirrored=true` for
   the configured SPARK target. Gateway polling still reports network timeout /
@@ -46,14 +47,16 @@
 
 ## 3. Verified runtime and deployment state
 
-- **Mainline versus deployed code:** mainline is `63bcd7ac`; DGX uses
-  `/home/cwliao/.hermes/releases/v2026.8.14-hermes-auth-001-63bcd7ac`
-  selected through `27-hermes-auth-001-63bcd7ac.conf`. The live source
+- **Mainline versus deployed code:** mainline and deployed code are
+  `1b3d4449553433100038f38e7b58f2f2dc489fa7`; DGX uses
+  `/home/cwliao/.hermes/releases/v2026.8.15-hermes-calendar-guard-1b3d444955`
+  selected through `29-hermes-calendar-guard-1b3d444955.conf`. The live source
   checkout remains untouched.
-- **DGX service evidence:** `hermes-gateway.service` is active/running with
-  MainPID `2299452`, exit status `0`, and `NRestarts=0`; cwd, drop-in, and
-  `HERMES_RELEASE_SHA` match the merged release. The new PID had no
-  Traceback/ERROR logs in the observed window.
+- **DGX service evidence:** host `55-0940189-03`, user `cwliao`;
+  `hermes-gateway.service` is active/running with MainPID `3161529`, exit
+  status `0`, and `NRestarts=0`; cwd and release identity match the merged
+  release. `hermes-gateway-recovery.timer` is active/waiting and its oneshot
+  has `Result=success`.
 - **DGX SSH evidence:** a bounded WSL probe returned `SSH_OK` through the
   authenticated route. No credentials were stored.
 - **Storage and safety:** this handover refresh does not mutate Hermes memory,
@@ -78,6 +81,9 @@
   is not cleared for merge or deployment.
 - `HERMES-AUTH-001`: `MERGED_DEPLOYED`; main CI, DGX runtime, and outbound
   Telegram evidence are recorded above.
+- `HERMES-CALENDAR-GUARD-001`: `MERGED_DEPLOYED`; PR #17 introduced the
+  recovery path and PR #18 corrected the release-wrapper/venv deployment
+  integration. DGX timer and recovery oneshot are verified healthy.
 - `HERMES-RELIABILITY-002`: implementation remains separate; do not infer
   completion from historical checkout files.
 - `ARCH-002`: proposed next core ticket; not started here.

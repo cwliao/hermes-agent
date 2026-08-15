@@ -1,6 +1,6 @@
 ---
 title: "HERMES-AUTH-002: parameterize public DGX target metadata"
-status: PLAN_REVIEW_PASS
+status: IMPLEMENTATION_PENDING_REVIEW
 date: 2026-08-14
 type: security-hardening
 ticket: HERMES-AUTH-002
@@ -46,9 +46,10 @@ implementation, merge, or deployment gate can advance.
 
   `HERMES_HOME` remains the existing optional home selector; it is not a new
   ticket-specific environment variable. WSL resolves
-  `${HERMES_HOME:-$HOME/.hermes}/config.yaml`; native Windows resolves
-  `${HERMES_HOME:-$env:USERPROFILE/.hermes}/config.yaml`. There is no fallback
-  between these paths and no baked-in target.
+  `${HERMES_HOME:-$HOME/.hermes}/config.yaml`; native Windows follows the
+  existing `hermes_constants.get_hermes_home()` platform default
+  (`%LOCALAPPDATA%\hermes\config.yaml`) unless `HERMES_HOME` is set. There is
+  no fallback between these paths and no baked-in target.
 - Add one small shared resolver (`scripts/dgx_target.py`) used by both
   wrappers. Its raw-read primitive is explicitly
   `hermes_constants.get_hermes_home()` for the canonical home path plus
@@ -105,7 +106,7 @@ implementation, merge, or deployment gate can advance.
   WSL is unavailable. Tests must assert no network call occurs on
   configuration failure and must replace the current source-snapshot
   assertions `readonly DGX_HOST=...` and the PowerShell/fake-SSH literals
-  containing `cwliao@140.96.58.171` with behavioral assertions against a
+  containing the old public `user@host` literal with behavioral assertions against a
   configured test target. At least one success test per platform must assert
   the fake-SSH log contains the exact configured `user@host` emitted by the
   resolver; every config-error test must assert the fake SSH process was never

@@ -43,8 +43,9 @@
   the configured SPARK target. Gateway polling still reports network timeout /
   reconnect warnings, so inbound polling is not claimed as healthy.
 - **Deferred or pending:** HERMES-MONITORING-001 remains `BLOCKED`;
-  HERMES-AUTH-002 is `PLAN_REVIEW_PASS`; implementation and implementation
-  review are next, while merge/deployment remain separately gated. Live skill synchronization,
+  HERMES-AUTH-002 is `IMPLEMENTATION_PENDING_REVIEW`; implementation is
+  present, targeted tests pass, and implementation review is next, while
+  merge/deployment remain separately gated. Live skill synchronization,
   SkillClaw work, and unrelated DGX service changes remain separate work.
 
 ## 3. Verified runtime and deployment state
@@ -54,7 +55,7 @@
   `/home/cwliao/.hermes/releases/v2026.8.15-hermes-calendar-guard-1b3d444955`
   selected through `29-hermes-calendar-guard-1b3d444955.conf`. The live source
   checkout remains untouched.
-- **DGX service evidence:** host `55-0940189-03`, user `cwliao`;
+- **DGX service evidence:** the configured DGX target;
   `hermes-gateway.service` is active/running with MainPID `3161529`, exit
   status `0`, and `NRestarts=0`; cwd and release identity match the merged
   release. `hermes-gateway-recovery.timer` is active/waiting and its oneshot
@@ -69,13 +70,13 @@
 ### Current ticket: HERMES-AUTH-002
 
 - **Plan:** `docs/plans/2026-08-14-hermes-auth-002-target-config.md`
-- **Status:** `PLAN_REVIEW_PASS`.
+- **Status:** `IMPLEMENTATION_PENDING_REVIEW`.
 - **Scope:** parameterize public DGX SSH host/user metadata through existing
   Hermes user configuration; preserve strict host-key and fail-closed auth
   behavior.
-- **Required next action:** implement only the reviewed correction set, run
-  local behavioral tests, route the implementation to authenticated DGX Claude
-  and WSL AGY for independent review, then run GitHub CI. Keep
+- **Required next action:** route the implementation to authenticated DGX
+  Claude and WSL AGY for independent review, resolve any correction set, then
+  run GitHub CI. Keep
   merge/deployment separately authorized.
 
 ### Other ticket state

@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001: safely update DGX Spark from upstream"
-status: IMPLEMENTATION_REVIEW_PASS_MATRIX_INCOMPLETE
+status: MATRIX_INCOMPLETE_ENVIRONMENT_BLOCKED
 date: 2026-08-15
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -178,12 +178,13 @@ exit status, and final verdict. The final consensus pair must be DGX host
 
 ## Current status
 
-`IMPLEMENTATION_IN_PROGRESS_REVIEW_REQUIRED`: upstream and private fork are
-not a fast-forward update. The source-side inventory and matrix are added, but
-the matrix rows are still `NOT_RUN`; focused fallback tests pass, while the
-canonical test runner lacks a repo or shared Hermes virtualenv. The final
-Claude/AGY plan review remains `PASS`, but merge, deployment, restart, runtime
-health, and Telegram delivery remain separate gates.
+`MATRIX_INCOMPLETE_ENVIRONMENT_BLOCKED`: upstream and private fork are not a
+fast-forward update. Source-side inventory and matrix implementation review
+passed, but prompt-cache, gateway, state, browser, and upstream-candidate rows
+remain blocked or not run because the local fallback environment lacks required
+dependencies/Windows symlink privilege. The final Claude/AGY reviews remain
+`PASS`; merge, deployment, restart, runtime health, and Telegram delivery
+remain separate gates.
 
 ## Review evidence
 
@@ -256,5 +257,13 @@ health, and Telegram delivery remain separate gates.
 - Both implementation reviewers inspected the identical packet digest and
   reached independent consensus `PASS`. Claude noted only minor optional test
   gaps for invalid refs/non-repo input and a non-mutating-subcommand property;
-  neither is a correction request. Matrix behavior rows remain `NOT_RUN`, so
-  `RETAIN_PRIVATE_RELEASE` and all merge/deploy/runtime gates remain in force.
+  neither is a correction request. The matrix has only partial baseline
+  evidence; blocked/unrun rows keep `RETAIN_PRIVATE_RELEASE` and all
+  merge/deploy/runtime gates in force.
+- Matrix execution evidence: cron profile isolation `4 passed`, general plugin
+  discovery `4 passed`, and candidate inventory `2 passed`. Prompt-cache and
+  gateway checks were blocked by missing `requests`/`httpx`; browser/web plugin
+  checks were partially blocked by the same missing dependencies; Hermes state
+  path checks also hit Windows symlink/HERMES_HOME environment limits. No
+  dependencies were installed and no DGX state, Telegram transport, or dirty
+  checkout was touched.

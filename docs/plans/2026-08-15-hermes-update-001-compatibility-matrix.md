@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001 compatibility matrix"
-status: MATRIX_INCOMPLETE_ENVIRONMENT_BLOCKED
+status: MATRIX_INCOMPLETE_PORTABILITY_AND_GATE_BLOCKED
 date: 2026-08-15
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -88,13 +88,23 @@ environment (`hermes-agent 0.20.1`, `pytest 9.1.1`, `anthropic 0.87.0`):
 | Primary runtime restore | `24 passed` | Upstream candidate provider recovery only |
 | Backup suite | `39 passed`, `3 failed`, `9 skipped` | Windows wrapper/path/mode semantics remain unresolved |
 
+The Windows-only boundary was validated separately in the same detached
+upstream candidate through WSL Linux using Python 3.11.15 and the upstream
+locked environment:
+
+| WSL candidate check | Result | Evidence boundary |
+| --- | --- | --- |
+| Backup suite | `51 passed`, `1 warning` | Linux candidate backup behavior; not Windows native behavior |
+| Atomic symlink suite | `21 passed`, `4 skipped` | Linux symlink behavior; Windows privilege boundary explained |
+| Hermes constants suite | `61 passed`, `5 skipped` | Linux home/path behavior; Windows native boundary explained |
+
 The canonical `scripts/run_tests.sh` is a POSIX shell runner and was not
 executed from native PowerShell; the recorded fallback used the isolated
 Windows `.venv` directly. The isolated environment installed only locked
 test/provider extras and no product code was changed to hide environment
-failures. The candidate remains `RETAIN_PRIVATE_RELEASE` until the unresolved
-Windows/portable rows, post-change state manifest, and Telegram/DGX evidence
-are complete.
+failures. The candidate remains `RETAIN_PRIVATE_RELEASE` until the Windows
+native portability decision, post-change state manifest, and Telegram/DGX
+evidence are complete.
 
 ## Candidate decision
 

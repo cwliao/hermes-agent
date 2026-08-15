@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001: safely update DGX Spark from upstream"
-status: MATRIX_INCOMPLETE_ENVIRONMENT_BLOCKED
+status: MATRIX_INCOMPLETE_PORTABILITY_AND_GATE_BLOCKED
 date: 2026-08-15
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -178,11 +178,12 @@ exit status, and final verdict. The final consensus pair must be DGX host
 
 ## Current status
 
-`MATRIX_INCOMPLETE_ENVIRONMENT_BLOCKED`: upstream and private fork are not a
+`MATRIX_INCOMPLETE_PORTABILITY_AND_GATE_BLOCKED`: upstream and private fork are not a
 fast-forward update. A locked isolated Windows environment now covers the
 prompt/cache, gateway, state/WAL, message-loop, plugin, and provider-recovery
 focused suites for both the private baseline and clean upstream candidate.
-Backup/portable symlink cases still have Windows-specific failures; the DGX
+WSL Linux validation passes the upstream backup and symlink suites; the
+remaining Windows-specific failures are a native portability boundary. The DGX
 baseline manifest is captured, but post-change state, Telegram, and DGX
 promotion gates are not run. The final Claude/AGY reviews remain
 `PASS`; merge, deployment, restart, runtime health, and Telegram delivery
@@ -280,6 +281,11 @@ remain separate gates.
   passed` and `2 skipped`, message-loop `16 passed`, runtime-restore `24
   passed`, and backup `39 passed`, `3 failed`, `9 skipped`. The upstream
   candidate was never merged or deployed.
+- WSL Linux validation of the same detached candidate passed backup `51
+  passed`, `1 warning`, atomic symlinks `21 passed`, `4 skipped`, and Hermes
+  constants `61 passed`, `5 skipped` using Python `3.11.15` and the locked
+  upstream environment. This confirms the three Windows failures are native
+  Windows portability/permission semantics, not Linux candidate failures.
 - DGX protected-state baseline manifest:
   `docs/plans/evidence/2026-08-15-hermes-update-001-dgx-protected-state-manifest.txt`.
   It records host `55-0940189-03`, active service/MainPID `3504674`, release

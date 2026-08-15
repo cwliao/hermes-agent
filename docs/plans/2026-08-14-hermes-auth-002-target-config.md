@@ -62,6 +62,12 @@ implementation, merge, or deployment gate can advance.
   for every config or resolver failure. If the resolver or its Python runtime
   is unavailable, the wrapper returns the same configuration error and does
   not attempt SSH.
+- Pin the resolver import contract: when executed as a standalone script,
+  `scripts/dgx_target.py` inserts `Path(__file__).resolve().parents[1]` at the
+  front of `sys.path`, then imports exactly
+  `hermes_constants.get_hermes_home` and `utils.fast_safe_load`. It must not
+  depend on the caller's current working directory or an activated virtual
+  environment.
 - Define interpreter discovery without adding a new user-facing environment
   variable: WSL tries `python3` then `python`; native Windows tries
   `python.exe` then `py.exe -3`. The wrapper invokes the resolver by argument
@@ -76,15 +82,22 @@ implementation, merge, or deployment gate can advance.
   unreadable, malformed, non-mapping, empty, partial, or invalid target
   values. Host values are hostname/IPv4 only and user values are restricted to
   safe SSH username characters; neither may contain whitespace, `@`, `/`,
-  `:`, shell metacharacters, or a leading `-`.
+  `:`, shell metacharacters, or a leading `-`. The exact resolver bounds are:
+  host length 1-253, each dot-separated label length 1-63 with only ASCII
+  letters/digits/hyphens and alphanumeric label ends; user length 1-32 with
+  `^[A-Za-z_][A-Za-z0-9._-]*$`.
 - Replace real host/user literals in public operational documentation with
   placeholders or configuration references where they are not required as
   historical evidence. This includes active runtime sections in
   `docs/HANDOVER.md` and `docs/ROADMAP-HERMES-DGX.md`, the recovery guide, the
   wrappers, and active tests; specifically remove the current operational
-  host/user presentation in `docs/HANDOVER.md` §3. Preserve repository identity strings such as
+  host/user presentation in `docs/HANDOVER.md` §3. `ROADMAP-HERMES-DGX.md`
+  must be searched as an audit target and changed only if an active pair is
+  present; the current snapshot has no such pair. Preserve repository identity strings such as
   `github.com/cwliao/hermes-agent`; preserve completed AUTH-001 evidence only
-  when it is explicitly labeled historical and non-operational.
+  when it is explicitly labeled historical and non-operational. Add that
+  historical/non-operational annotation inline beside the raw host/user output
+  block in `docs/plans/2026-08-14-hermes-auth-001-dgx-ssh-recovery.md`.
 - Add behavioral tests for configured targets, missing configuration,
   malformed configuration, non-mapping/empty/partial/invalid targets, resolver
   unavailability, and parity across WSL and native Windows paths. The native
@@ -93,7 +106,10 @@ implementation, merge, or deployment gate can advance.
   configuration failure and must replace the current source-snapshot
   assertions `readonly DGX_HOST=...` and the PowerShell/fake-SSH literals
   containing `cwliao@140.96.58.171` with behavioral assertions against a
-  configured test target.
+  configured test target. At least one success test per platform must assert
+  the fake-SSH log contains the exact configured `user@host` emitted by the
+  resolver; every config-error test must assert the fake SSH process was never
+  invoked.
 
 ## Non-goals
 

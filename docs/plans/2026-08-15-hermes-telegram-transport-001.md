@@ -42,9 +42,10 @@ the existing fail-closed safety boundaries.
   and outbound send-path health. A systemd `active` result alone must not clear
   inbound degradation.
 - Define polling progress concretely: a successful, error-free `getUpdates`
-  response (including HTTP 200 with an empty update batch), an accepted update
-  callback, or an equivalent bounded transport heartbeat may advance readiness;
-  `start_polling()` returning or a retry timer firing alone may not.
+  response, including HTTP 200 with an empty update batch, or an accepted
+  update callback may advance readiness. `start_polling()` returning or a
+  retry timer firing alone may not. No other signal qualifies unless added to
+  this correction set and independently re-reviewed.
 - Fix only the confirmed root cause in the Telegram polling transport. The
   correction must keep polling start/reconnect awaits bounded, prevent
   overlapping polling generations, preserve request-pool cleanup, and retain
@@ -52,8 +53,7 @@ the existing fail-closed safety boundaries.
   bounded ceiling and jitter so sustained failures do not create a reconnect
   storm.
 - Ensure a successful reconnect is promoted to healthy only after observable
-  polling progress or an equivalent bounded readiness signal, not merely after
-  `start_polling()` returns.
+  polling progress, not merely after `start_polling()` returns.
 - Add regression coverage for the exact failure class, including hung polling
   start, `TimedOut`/network error, reconnect retry scheduling, progress-based
   recovery, fatal escalation, cancellation/cleanup, and separation of inbound
@@ -98,9 +98,8 @@ the existing fail-closed safety boundaries.
    non-colliding states and transitions. A timeout/reconnect loop is visibly
    degraded and a successful recovery requires bounded progress evidence: a
    successful empty or non-empty `getUpdates` response or an accepted update
-   callback. No other signal qualifies unless it is added to this correction
-   set and independently re-reviewed. A returned `start_polling()` with no
-   such signal does not clear degradation.
+   callback. A returned `start_polling()` with no such signal does not clear
+   degradation.
 3. Reconnect behavior is bounded and single-owner: no forever-hung await, no
    overlapping polling generations, no request-pool leak across retries, and
    no silent death after a transient failure. Backoff has bounded maximum
@@ -109,32 +108,40 @@ the existing fail-closed safety boundaries.
    backoff, empty successful poll progress, non-empty update progress,
    cancellation, request-pool cleanup across repeated retry cycles, fatal
    max-retry escalation, and inbound/outbound health separation without real
-   Telegram calls or credentials. Existing regression tests are identified as
-   baseline or explicitly extended; neither is treated as deployed-path proof.
+   Telegram calls or credentials. The pool-cleanup assertion must verify that
+   a failed generation's pending `getUpdates` request does not leak into the
+   next generation's request context or timeout budget. Existing regression
+   tests are identified as baseline or explicitly extended; neither is treated
+   as deployed-path proof.
 5. Relevant GitHub CI checks pass, and exactly two independent authenticated
    CLI-agent review sessions independently review the same packet/correction
    set and return a traceable final `PASS`: one Claude session using the
    Claude Code remote binary at `/home/cwliao/.claude/remote/ccd-cli/2.1.229`,
    and one AGY session using the Antigravity CLI at
-   `/home/cwliao/.local/bin/agy`. “Reviewer” here means the independently
-   invoked authenticated agent session, not an additional human or an
-   unverified process. Qualification requires a real response from the
-   named binary in the named host/OS session, with authentication/config
-   presence verified without exposing credentials. Record only host, cwd,
-   binary/version, non-secret auth/session preflight result, packet hash,
-   bounded command mode, final output, and verdict. The packet-only review
-   may not invoke tools or inspect other files; “no implementation tools”
-   specifically excludes edit/write/patch, test or lint execution, deploy,
-   restart, credential access, and network mutation. Findings are reconciled
-   before implementation or deployment.
+   `/home/cwliao/.local/bin/agy`. Reviewer means the independently invoked
+   authenticated agent session, not an additional human or an unverified
+   process. Qualification requires a real response from the named binary in
+   the named host/OS session, with authentication proven by that response; a
+   config directory may be absent when the existing authenticated session is
+   supplied by its runtime. Record only host, cwd, binary/version, non-secret
+   auth/session preflight result, packet hash, bounded command mode, final
+   output, and verdict. Binary versions are recorded per run, not product
+   dependencies; a changed path or version requires fresh qualification. No
+   additional human or third reviewer is required for this ticket's review
+   gate unless separately authorized. The packet-only review may not invoke
+   tools or inspect other files; no implementation tools specifically means
+   no edit/write/patch, test or lint execution, deploy, restart, credential
+   access, or network mutation. Findings are reconciled before implementation
+   or deployment.
 6. A deployment/rollback checklist is present before implementation approval,
    covering immutable release identity, effective `systemctl --user` unit,
    bounded restart, live inbound and outbound evidence, rollback trigger, and
-   prior-release restoration. Deployment, service restart, live inbound
-   Telegram verification, outbound verification, and rollback remain
-   separately authorized and recorded. A green unit/CI result is not live
-   health evidence.
-
+   prior-release restoration. The checklist must be documented and reviewed
+   before implementation approval; its execution remains separately authorized
+   after implementation, CI, and deployment approval. Deployment, service
+   restart, live inbound Telegram verification, outbound verification, and
+   rollback remain separately authorized and recorded. A green unit/CI result
+   is not live health evidence.
 7. Gate order is explicit: dual reviewer `PASS` on this plan permits
    implementation to begin; implementation then requires the pre-
    implementation test audit, focused hermetic tests, and relevant CI; only
@@ -155,27 +162,28 @@ the existing fail-closed safety boundaries.
 
 - Record the immutable implementation/release SHA and changed-file manifest.
 - Verify the effective `systemctl --user` unit, drop-ins, release path, and
-  `HERMES_RELEASE_SHA` before any restart.
+  `HERMES_RELEASE_SHA` before any restart; capture `MainPID`, `NRestarts`,
+  exit status, and bounded logs showing no hung polling await or restart loop.
 - Use a bounded, operator-visible restart procedure with a captured prior
   release and a stop condition for unhealthy polling.
 - Require separate live evidence for inbound polling progress and outbound
   send success; process `active` alone is insufficient.
 - Roll back when the bounded post-restart health window shows no qualifying
-  `getUpdates` success/update callback, repeated fatal escalation, or a
-  regression in outbound delivery; restore the captured prior release and
-  re-check service/process state.
+  `getUpdates` success/update callback, two fatal escalations within ten
+  minutes, no qualifying progress within 90 seconds after a bounded reconnect
+  attempt, or a regression in outbound delivery; restore the captured prior
+  release and re-check service/process state.
 - Do not execute any checklist step during planning or review without a
   separate deployment authorization.
 
 ## Re-review correction set
 
-The independent review rounds identified clarifications rather than
-an implementation defect. The plan now explicitly defines empty successful
-poll responses as valid low-traffic progress, requires bounded jittered
-backoff, separates baseline tests from new contract tests, names
-retry-exhaustion and pool-cleanup cases, defines the exact Claude/AGY reviewer
-qualification, makes the deployment/rollback checklist a pre-review
-deliverable, and requires a pre-implementation baseline-test audit.
+The independent review rounds identified clarifications rather than an
+implementation defect. The plan now defines low-traffic empty-poll progress,
+bounded jittered backoff, explicit pool-cleanup assertions, baseline versus
+new contract tests, quantitative rollback triggers, authenticated Claude/AGY
+reviewer qualification and traceability, pre-review deployment documentation,
+and the implementation/test/deployment gate order.
 
 ## Current gate
 

@@ -1,12 +1,12 @@
 [Unit]
 Description=Hermes gateway calendar-guard recovery
-After=hermes-gateway.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=300
 Environment=HERMES_HOME=@HERMES_HOME@
 Environment=PYTHONPATH=@RELEASE_PATH@
-Environment=_HERMES_GATEWAY=
+UnsetEnvironment=_HERMES_GATEWAY HERMES_GATEWAY_SESSION
 ExecStart=@PYTHON@ -m hermes_cli.calendar_guard --recover
 NoNewPrivileges=true
 PrivateTmp=true

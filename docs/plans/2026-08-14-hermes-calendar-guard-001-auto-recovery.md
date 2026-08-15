@@ -93,8 +93,8 @@ signals and must not be treated as proof of code skew.
    service, triggered by a user path/timer, performs the restart outside the
    gateway cgroup. It must not inherit `_HERMES_GATEWAY=1`; the unit has an
    explicit minimal environment and no gateway process ancestry. The service
-   uses the POSIX `flock` pattern from `cron/jobs.py::_jobs_lock()` (extracting
-   a generic helper if needed), the rolling bounded-window semantics from
+  follows the POSIX `flock` pattern from `cron/jobs.py::_jobs_lock()` (without
+  importing the cron module into the supervisor), the rolling bounded-window semantics from
    `gateway/restart_loop_guard.py`, and the `system=` user/system scope
    convention in `hermes_cli/gateway.py`. It enforces an absolute timeout and
    verifies the user-level unit, old/new MainPID, active release path, marker,
@@ -273,3 +273,40 @@ signals and must not be treated as proof of code skew.
   the independent Claude+AGY correction-set consensus is now `PASS`.
 - Review gate is complete. Merge, CI/PR, deployment, service health, and
   Telegram delivery remain separate gates and are not implied by this review.
+- 2026-08-15 complete-packet model re-review: the earlier Haiku `PASS` used a
+  packet that contained literal truncation markers and is not valid evidence
+  for the full implementation. Authenticated DGX Spark Claude Opus and
+  Sonnet both reviewed the complete post-correction packet and returned
+  `REVISE`. Findings included recovery classification, long lock ownership,
+  attempt accounting, systemd timeout/environment semantics, and exhausted
+  BLOCKED delivery. The prior PASS record is superseded; merge and deployment
+  are blocked.
+- Correction pass after complete-packet review: recovery requests are now
+  created only for proven `SKEW`; service-down and unverifiable states are
+  deduplicated `BLOCKED` diagnostics; attempts are claimed before restart
+  outside the lock; exhausted requests are removed and surfaced once by the
+  hourly path; recovery verification tolerates legacy missing release paths;
+  systemd uses `TimeoutStartSec=300` and `UnsetEnvironment`; installer and
+  snapshot/marker validation are fail-closed; focused tests now pass `29` with
+  `2` unrelated model-switch tests deselected, plus `py_compile` and
+  `git diff --check`. Independent re-review is still required.
+- Second correction pass after the complete-packet re-review: the installed
+  wrapper is now rendered with the matching release path; BLOCKED/SKEW
+  notifications and pending requests are deduplicated at hourly cadence;
+  recovery attempts have a rolling window, stale RUNNING-claim recovery,
+  one absolute deadline, and reset-on-success accounting; legacy boot records
+  are migration-only; and marker-name validation is case-insensitive with
+  documented file suffix exclusions. Focused evidence after this pass is
+  `33 passed, 2 deselected` for the exact calendar/code-skew selection, plus
+  `py_compile` and `git diff --check`. Final independent re-review is pending.
+- Final independent review consensus after the second correction pass:
+  authenticated DGX Spark Claude Sonnet 5 reviewed the complete two-part
+  packet and returned `PASS` with only non-blocking P2/P3 observations;
+  authenticated WSL AGY (Gemini 3.7 Flash) reviewed the same packet and
+  returned `PASS`, `FINDINGS: NONE`, `CORRECTION_SET: NONE`. The packet had no
+  intentional truncation. The accepted review gate is `PASS`; merge, CI,
+  deployment, service health, and Telegram delivery remain separate gates.
+- Final local evidence after the accepted correction set: `34 passed, 2
+  deselected` for `tests/hermes_cli/test_calendar_guard.py` and
+  `tests/test_code_skew.py -k 'not ModelSwitchSkewGuard'`; targeted
+  `py_compile` passed; `git diff --check` passed.

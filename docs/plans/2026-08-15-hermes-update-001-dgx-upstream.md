@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001: safely update DGX Spark from upstream"
-status: MATRIX_INCOMPLETE_GATED
+status: PORT_PRESERVE_SCOPE_REVIEW_PENDING
 date: 2026-08-15
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -96,10 +96,11 @@ in this repository, so this repo-local plan is the ticket source of truth.
    separately, and retain a tested rollback path.
 
 The source-side implementation now provides the metadata-only ref inventory in
-`scripts/update_candidate.py` and the protected-behavior matrix in
-`docs/plans/2026-08-15-hermes-update-001-compatibility-matrix.md`. The
-inventory does not fetch, merge, reset, create a worktree, read `.hermes`, or
-contact DGX.
+`scripts/update_candidate.py`, the protected-behavior matrix in
+`docs/plans/2026-08-15-hermes-update-001-compatibility-matrix.md`, and the
+complete port/preserve correction set in
+`docs/plans/2026-08-15-hermes-update-001-port-preserve-scope.md`. The inventory
+does not fetch, merge, reset, create a worktree, read `.hermes`, or contact DGX.
 
 ## Concrete rollback gate (plan only)
 
@@ -178,7 +179,7 @@ exit status, and final verdict. The final consensus pair must be DGX host
 
 ## Current status
 
-`MATRIX_INCOMPLETE_GATED`: upstream and private fork are not a
+`PORT_PRESERVE_SCOPE_REVIEW_PENDING`: upstream and private fork are not a
 fast-forward update. A locked isolated Windows environment now covers the
 prompt/cache, gateway, state/WAL, message-loop, plugin, and provider-recovery
 focused suites for both the private baseline and clean upstream candidate.
@@ -186,8 +187,9 @@ WSL Linux validation passes the upstream backup and symlink suites. The
 remaining Windows-specific failures are explicitly out of scope because the
 declared deployment target is Linux. The DGX
 baseline manifest is captured, but post-change state, Telegram, and DGX
-promotion gates are not run. The final Claude/AGY reviews remain
-`PASS`; merge, deployment, restart, runtime health, and Telegram delivery
+promotion gates are not run. The complete port/preserve correction set is now
+ready for independent Claude+AGY review; no implementation has started for
+these lanes. Merge, deployment, restart, runtime health, and Telegram delivery
 remain separate gates.
 
 ## Review evidence

@@ -15,7 +15,7 @@
 - **Canonical mainline:** `origin/main` at
   `826349ccbfe165ef9f2f7f47f72ed53226c13603`.
 - **Current checkout branch:** `ticket/hermes-telegram-transport-001`.
-- **Current checkout HEAD at implementation handoff:** `d7ddfa839`.
+- **Current checkout HEAD at implementation handoff:** `6bb24ec25`.
 - **DGX runtime:** configured target, checkout
   `/home/cwliao/.hermes/hermes-agent`, service `hermes-gateway.service`.
 - **In scope:** Hermes CLI, gateway, runtime state, platform adapters, CI,

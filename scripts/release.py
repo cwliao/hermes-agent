@@ -28,6 +28,7 @@ from hermes_cli.update_channel import (
 )
 from scripts.releases.authors import resolve_author
 
+
 # GitHub release publication remains here; isolated filesystem snapshots and
 # their canonical .hermes-release-sha marker are built by
 # scripts/release_snapshot.py.

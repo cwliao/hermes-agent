@@ -1,6 +1,6 @@
 ---
 title: "HERMES-AUTH-002: parameterize public DGX target metadata"
-status: REVISE
+status: PLAN_REVIEW_PASS
 date: 2026-08-14
 type: security-hardening
 ticket: HERMES-AUTH-002
@@ -139,6 +139,15 @@ resolver dependency is intentionally fail-closed: a missing Python/runtime or
 resolver failure is `CONFIG_ERROR`/78, never an SSH attempt or authentication
 classification. The implementation review must prove that this new failure
 mode is documented and tested.
+
+## Final plan-review evidence
+
+On 2026-08-15, the same bounded packet and plan-only correction set were
+reviewed independently by authenticated DGX Claude Haiku and authenticated
+WSL AGY (`gemini-3.7-flash-low`). Both returned `PASS`; the AGY result required
+one bounded retry after a timeout. This is a plan-review PASS only. The
+resolver, wrapper changes, behavioral tests, CI, implementation review,
+merge, and deployment have not run and remain separate gates.
 
 ## Evidence boundary
 

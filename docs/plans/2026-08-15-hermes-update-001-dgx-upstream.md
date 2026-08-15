@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001: safely update DGX Spark from upstream"
-status: PLAN_ONLY_BLOCKED_REVIEW_CONSENSUS
+status: READY_FOR_IMPLEMENTATION_REVIEW_PASS
 date: 2026-08-15
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -94,6 +94,41 @@ plan is the ticket source of truth.
    CLI/gateway/cron/memory/skills/plugins/Telegram inbound and outbound
    separately, and retain a tested rollback path.
 
+## Concrete rollback gate (plan only)
+
+Before any separately authorized restart, capture the effective unit/drop-ins,
+prior release SHA and path, process identity, and a redacted metadata manifest
+of protected user state. Roll back if any of these occurs during the bounded
+post-restart window:
+
+- the service is not `active/running` within 30 seconds, exits nonzero, or
+  `NRestarts` increases;
+- process cwd, `PYTHONPATH`, release marker, or effective unit does not match
+  the immutable candidate;
+- any required CLI/gateway smoke command exits nonzero, the service health
+  tuple differs from `active/running`, `ExecMainStatus=0`, unchanged
+  `NRestarts`, and the exact candidate cwd/release marker;
+- the compatibility-matrix memory/session check does not return
+  `PRAGMA integrity_check=ok`, the schema identity changes, or the approved
+  session-continuity sentinel cannot be read back;
+- any matrix-listed skill/plugin registration is missing or raises an import
+  exception, or any matrix-listed cron definition fails to parse/load;
+- an authorized Telegram inbound or outbound check does not return its
+  documented success evidence; if either check is not authorized, that gate
+  remains open and the candidate is not promoted;
+- the pre/post redacted manifest detects a byte/hash/mode change in the
+  protected static set (config, credentials, pairing, skills, plugins, cron
+  definitions, or dirty-checkout files), or the DB/WAL integrity/schema check
+  fails; or
+- the 120-second health window ends without every required evidence item above
+  recorded as pass. The evidence checklist is the pass/fail definition, not a
+  subjective health judgment.
+
+Restore the captured prior drop-in and immutable release selection, run a
+bounded `systemctl --user daemon-reload`/restart only under the separate
+rollback authorization, then verify the prior release identity, process state,
+and protected-state boundary. No rollback action is executed by this ticket.
+
 ## Acceptance gates
 
 - [x] Actual DGX launcher and runtime source identity resolved.
@@ -102,10 +137,23 @@ plan is the ticket source of truth.
 - [ ] Upstream/private compatibility matrix covers all protected behaviors.
 - [ ] Candidate update strategy and rollback plan are explicitly selected.
 - [ ] Tests and CI pass for the selected strategy.
-- [ ] Exactly one authenticated Claude and one authenticated AGY independently
+- [x] Exactly one authenticated Claude and one authenticated AGY independently
   review the same packet and reach `PASS` consensus.
+- [x] Quantitative rollback triggers, prior-release restoration, and
+  post-rollback verification are documented; execution remains separately
+  authorized.
 - [ ] Implementation, merge, deployment, restart, runtime health, and
   Telegram delivery remain separate gates.
+
+Unchecked gates are intentionally not claimed as evidence by this plan; they
+require a later implementation/deployment correction set.
+
+For reviewer attribution, a verdict counts only when the evidence records the
+host, user, absolute binary path, binary version, packet SHA256, bounded mode,
+exit status, and final verdict. The final consensus pair must be DGX host
+`55-0940189-03` with Claude
+`/home/cwliao/.claude/remote/ccd-cli/2.1.229` and AGY
+`/home/cwliao/.local/bin/agy`, both reviewing the identical packet digest.
 
 ## Review questions
 
@@ -122,9 +170,11 @@ plan is the ticket source of truth.
 
 ## Current status
 
-`PLAN_ONLY_READY_FOR_REVIEW`: upstream and private fork are not a fast-forward
-update; the DGX runtime identity is now resolved, but no implementation or
-deployment is authorized.
+`READY_FOR_IMPLEMENTATION_REVIEW_PASS`: upstream and private fork are not a
+fast-forward update; the DGX runtime identity is resolved, and the final
+same-packet authenticated Claude/AGY review reached consensus `PASS`. This is
+the plan/review gate only: implementation, merge, deployment, restart, runtime
+health, and Telegram delivery remain separately authorized gates.
 
 ## Review evidence
 
@@ -136,11 +186,8 @@ deployment is authorized.
   exit `0`; final verdict `BLOCKED`.
 - AGY confirmed the dirty-checkout/state protections and upstream isolation
   strategy, but blocked on unresolved runtime supervisor/launcher identity.
-- Recorded DGX Claude path
-  `/home/cwliao/.claude/remote/ccd-cli/2.1.229` was absent. The current
-  DGX `claude` command was also not available. WSL Claude `2.1.233`
-  preflight produced no final marker and ended with a cancelled session-end
-  hook; no Claude verdict is accepted.
+- Historical DGX/WSL/Windows Claude probes without a final verdict remain
+  recorded as failed attempts; they were not used as approval.
 - Corrected re-review packet: the current plan contents after this correction;
   the packet SHA256 is recorded in the bounded review command/evidence for
   that run.
@@ -149,12 +196,29 @@ deployment is authorized.
 - DGX AGY reviewed that corrected packet with host `55-0940189-03`, user
   `cwliao`, absolute binary `/home/cwliao/.local/bin/agy` version
   `1.1.13`, packet-only mode, exit `0`; final verdict `PASS`.
-- No valid Claude final verdict was obtained: the recorded DGX Claude binary
-  was absent; the correct WSL Claude `2.1.233` produced no final marker and
-  the session ended without a verdict; native Windows Claude `2.1.223`
-  also produced no output. These are `BLOCKED_INVALID_VERDICT` outcomes,
-  not PASS.
-- Independent review consensus: `BLOCKED` because the required one Claude
-  PASS is missing. Do not implement, merge, deploy, restart, or overwrite the
-  DGX checkout until the same corrected packet receives a valid authenticated
-  Claude PASS.
+- DGX Claude `2.1.229` then reviewed packet
+  `3f8ccbe9c3eb79a7e897a4f774223d45e693bf145b493084892f9b5d82c8c410`
+  directly on host `55-0940189-03`, with packet-only tool restrictions and
+  exit `0`; final verdict `PASS`.
+- Claude flagged the initial hash as one character short. Independent local
+  verification counted the recorded initial digest as 64 hexadecimal
+  characters, so no hash correction is required; this is provenance
+  clarification only.
+- Same-packet run `77ae411c95290c4b4d216c4831c434734746772bdb496f97684d618d6b5262a8`:
+  AGY returned `PASS`; DGX Claude returned `BLOCKED` because rollback
+  triggers were not quantitative and the evidence trail still described
+  different packet snapshots. Those findings are the current correction set.
+- The correction set now defines measurable smoke, state-manifest,
+  DB/WAL-integrity, compatibility-matrix, Telegram-evidence, and 120-second
+  health-window pass/fail criteria, plus the required reviewer identity fields.
+- Final same-packet review packet SHA256:
+  `84431197fd6e09c10164c95ca7b124a0f8798cbd5b09df1d7cbedc17fcb499`.
+- Final DGX AGY review: host `55-0940189-03`, user `cwliao`, absolute binary
+  `/home/cwliao/.local/bin/agy`, version `1.1.13`, packet-only mode, exit `0`,
+  final verdict `PASS`.
+- Final DGX Claude review: host `55-0940189-03`, user `cwliao`, absolute
+  binary `/home/cwliao/.claude/remote/ccd-cli/2.1.229`, version `2.1.229`,
+  packet-only mode with disallowed tools, exit `0`, final verdict `PASS`.
+- Both final reviewers inspected the identical packet SHA256 above;
+  independent review consensus is `PASS`. No implementation, merge,
+  deployment, restart, or DGX mutation was performed by this ticket.

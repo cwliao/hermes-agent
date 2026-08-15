@@ -85,7 +85,7 @@ def _load_json(path: Path, *, tolerate_invalid: bool = True) -> dict[str, object
 def _exclusive_lock(path: Path, timeout: float = 5.0) -> Iterator[None]:
     """Use a bounded POSIX flock; fail closed when it cannot be acquired."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+")
+    handle = path.open("a+", encoding="utf-8")
     locked = False
     try:
         try:

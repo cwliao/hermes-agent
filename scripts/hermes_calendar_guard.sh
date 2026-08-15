@@ -12,7 +12,7 @@ if [[ ! -d "$RELEASE_PATH" ]]; then
 fi
 export PYTHONPATH="$RELEASE_PATH${PYTHONPATH:+:$PYTHONPATH}"
 
-if [[ "$RELEASE_PYTHON" != "@PYTHON@" && -x "$RELEASE_PYTHON" ]]; then
+if [[ -x "$RELEASE_PYTHON" ]]; then
   VENV_PY="$RELEASE_PYTHON"
 fi
 

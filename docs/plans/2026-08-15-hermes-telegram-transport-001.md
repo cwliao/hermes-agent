@@ -1,6 +1,6 @@
 ---
 title: "HERMES-TELEGRAM-TRANSPORT-001: restore Telegram polling health"
-status: READY_FOR_REVIEW
+status: IMPLEMENTED_PENDING_REVIEW
 date: 2026-08-15
 type: reliability
 ticket: HERMES-TELEGRAM-TRANSPORT-001
@@ -185,7 +185,30 @@ new contract tests, quantitative rollback triggers, authenticated Claude/AGY
 reviewer qualification and traceability, pre-review deployment documentation,
 and the implementation/test/deployment gate order.
 
+## Implementation evidence
+
+- Changed files: `plugins/platforms/telegram/adapter.py` and
+  `tests/gateway/test_telegram_network_reconnect.py`.
+- Implemented bounded polling request shutdown/initialization, jittered capped
+  reconnect backoff, stale-generation progress protection, and regression
+  coverage for jitter, pool-operation timeout, empty successful polling
+  progress, and stale generation isolation.
+- `py -m py_compile` passed for both changed Python files.
+- `git diff --check` passed.
+- Focused pytest collection was blocked before test execution because the
+  available system Python lacks `httpx`; the isolated worktree and WSL
+  environment had no project venv. This is an environment blocker, not a test
+  pass.
+- No CI, DGX deployment, service restart, live inbound verification, outbound
+  verification, or rollback execution has been performed.
+
+## Current implementation gate
+
+`IMPLEMENTED_PENDING_REVIEW`: implementation is present locally and requires
+independent Claude + AGY review of the same correction set before CI, merge, or
+deployment. No DGX mutation is authorized by this ticket.
+
 ## Current gate
 
-`READY_FOR_REVIEW` only. No implementation, merge, deployment, DGX mutation,
-or Telegram credential/network action is authorized by this plan.
+`IMPLEMENTED_PENDING_REVIEW`. No merge, deployment, DGX mutation, or Telegram
+credential/network action is authorized by this plan.

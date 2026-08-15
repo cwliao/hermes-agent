@@ -63,11 +63,15 @@ the existing fail-closed safety boundaries.
   they do not assert this ticket's new readiness and ownership contract, then
   add focused hermetic cases for empty successful polls, retry exhaustion,
   request-pool cleanup across multiple retry cycles, and cancellation.
-- Add a deployment/rollback checklist as a deliverable: immutable release
-  identity, effective user-unit verification, bounded restart procedure, live
-  inbound/outbound evidence requirements, and the exact rollback trigger and
-  prior release restoration steps. This remains documentation and a gate, not
-  authorization to execute it.
+- Before implementation approval, audit the existing Telegram timeout/reconnect
+  tests and record which are baseline, which need extension, and which new
+  contract cases are missing. This audit is a review gate, not deployed-path
+  evidence.
+- The pre-implementation deployment/rollback checklist below is a required
+  deliverable: immutable release identity, effective user-unit verification,
+  bounded restart procedure, live inbound/outbound evidence requirements, and
+  the exact rollback trigger and prior release restoration steps. This remains
+  documentation and a gate, not authorization to execute it.
 - Record CI, independent review, deployment, rollback, and live Telegram
   evidence as separate gates.
 
@@ -93,9 +97,10 @@ the existing fail-closed safety boundaries.
 2. Inbound polling, outbound send, and process/service health have explicit,
    non-colliding states and transitions. A timeout/reconnect loop is visibly
    degraded and a successful recovery requires bounded progress evidence: a
-   successful empty or non-empty `getUpdates` response, accepted update
-   callback, or equivalent bounded heartbeat. A returned `start_polling()` with
-   no such signal does not clear degradation.
+   successful empty or non-empty `getUpdates` response or an accepted update
+   callback. No other signal qualifies unless it is added to this correction
+   set and independently re-reviewed. A returned `start_polling()` with no
+   such signal does not clear degradation.
 3. Reconnect behavior is bounded and single-owner: no forever-hung await, no
    overlapping polling generations, no request-pool leak across retries, and
    no silent death after a transient failure. Backoff has bounded maximum
@@ -108,9 +113,12 @@ the existing fail-closed safety boundaries.
    baseline or explicitly extended; neither is treated as deployed-path proof.
 5. Relevant GitHub CI checks pass, and exactly one authenticated Claude
    reviewer plus exactly one authenticated AGY reviewer independently review
-   the same packet/correction set and return a traceable final `PASS`. Each
-   reviewer is a uniquely addressable real session, uses no implementation
-   tools, and has its findings reconciled before implementation or deployment.
+   the same packet/correction set and return a traceable final `PASS`. AGY
+   means the Antigravity CLI at `/home/cwliao/.local/bin/agy`, running in a
+   uniquely addressable authenticated DGX session; the binary, authenticated
+   config/session, packet hash, and final verdict must be recorded. Claude and
+   AGY each use no implementation tools, and their findings are reconciled
+   before implementation or deployment.
 6. A deployment/rollback checklist is present before implementation approval,
    covering immutable release identity, effective `systemctl --user` unit,
    bounded restart, live inbound and outbound evidence, rollback trigger, and
@@ -128,14 +136,31 @@ the existing fail-closed safety boundaries.
   false `healthy` status while preserving safe recovery?
 - Is any part of the scope speculative or missing a required failure path?
 
+## Pre-implementation deployment/rollback checklist
+
+- Record the immutable implementation/release SHA and changed-file manifest.
+- Verify the effective `systemctl --user` unit, drop-ins, release path, and
+  `HERMES_RELEASE_SHA` before any restart.
+- Use a bounded, operator-visible restart procedure with a captured prior
+  release and a stop condition for unhealthy polling.
+- Require separate live evidence for inbound polling progress and outbound
+  send success; process `active` alone is insufficient.
+- Roll back when the bounded post-restart health window shows no qualifying
+  `getUpdates` success/update callback, repeated fatal escalation, or a
+  regression in outbound delivery; restore the captured prior release and
+  re-check service/process state.
+- Do not execute any checklist step during planning or review without a
+  separate deployment authorization.
+
 ## Re-review correction set
 
-The first independent review round identified clarifications rather than an
-implementation blocker. The plan now explicitly defines empty successful poll
-responses as valid low-traffic progress, requires bounded jittered backoff,
-separates baseline tests from new contract tests, names retry-exhaustion and
-pool-cleanup cases, defines the Claude/AGY reviewer qualification, and makes
-the deployment/rollback checklist a pre-implementation deliverable.
+The first two independent review rounds identified clarifications rather than
+an implementation defect. The plan now explicitly defines empty successful
+poll responses as valid low-traffic progress, requires bounded jittered
+backoff, separates baseline tests from new contract tests, names
+retry-exhaustion and pool-cleanup cases, defines the exact Claude/AGY reviewer
+qualification, makes the deployment/rollback checklist a pre-review
+deliverable, and requires a pre-implementation baseline-test audit.
 
 ## Current gate
 

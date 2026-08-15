@@ -971,6 +971,21 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception:
                 pass
 
+        # Multiplex profiles register a platform-bound authorization callback
+        # even when the message handler is a profile closure. Resolve that
+        # callback before batching so group_allowed_chats is enforced during
+        # intake rather than after prompt content has entered the agent path.
+        if getattr(self, "_authorization_check", None) is not None:
+            if not self._telegram_auth_env_configured():
+                return True
+            decision = self._is_sender_authorized(
+                user_id,
+                chat_type=source.chat_type,
+                chat_id=source.chat_id,
+            )
+            if decision is not None:
+                return bool(decision)
+
         runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
         auth_fn = getattr(runner, "_is_user_authorized", None)
         if callable(auth_fn):

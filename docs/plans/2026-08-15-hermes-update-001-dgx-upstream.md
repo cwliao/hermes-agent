@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001: safely update DGX Spark from upstream"
-status: PLAN_ONLY_BLOCKED_ON_RUNTIME_IDENTITY
+status: PLAN_ONLY_BLOCKED_REVIEW_CONSENSUS
 date: 2026-08-15
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -35,12 +35,22 @@ plan is the ticket source of truth.
   - modified `plugins/platforms/telegram/adapter.py`;
   - untracked `plugins/kmdaily_gateway.py`;
   - untracked `tests/gateway/test_video_cache.py`.
-- The previously recorded path `/home/cwliao/.hermes/hermes-agent` was not
-  present during this verification.
-- `systemctl --user show hermes-gateway.service` reported `inactive/dead`, and
-  `systemctl --user cat hermes-gateway.service` reported no unit file. A
-  transient `hermes` process was observed separately and then was no longer
-  present; the real launcher/process owner must be resolved before updating.
+- The path `/home/cwliao/.hermes/hermes-agent` is the runtime virtualenv
+  support path, not a Git checkout; `git -C` failed there because it has no
+  repository metadata. The Claude-owned Git checkout is the separate path
+  above.
+- A direct bounded probe resolved the launcher: user unit
+  `hermes-gateway.service`, fragment
+  `/home/cwliao/.config/systemd/user/hermes-gateway.service`, is
+  `active/running` with MainPID `3504674`, `NRestarts=0`,
+  `ExecMainStatus=0`, and `Result=success`.
+- The effective drop-in is
+  `30-hermes-telegram-transport-77bcb5d0717e.conf`; its working directory
+  and `PYTHONPATH` select the immutable release
+  `/home/cwliao/.hermes/releases/v2026.8.15-hermes-telegram-transport-77bcb5d0717e`.
+- The service process command and its MCP watchdog were directly observed.
+  Runtime identity is now resolved; the dirty Claude checkout remains
+  protected and is not the service's current source.
 
 ## State and behavior that must be protected
 
@@ -86,7 +96,7 @@ plan is the ticket source of truth.
 
 ## Acceptance gates
 
-- [ ] Actual DGX launcher and runtime source identity resolved.
+- [x] Actual DGX launcher and runtime source identity resolved.
 - [ ] Dirty checkout and `~/.hermes` state protected by metadata/backup
   evidence without exposing secrets.
 - [ ] Upstream/private compatibility matrix covers all protected behaviors.
@@ -103,8 +113,8 @@ plan is the ticket source of truth.
   from the private fork?
 - Which private-fork features are required on DGX and must be ported or
   preserved before any update?
-- What launcher currently owns the observed Hermes process, since the recorded
-  user service is absent/inactive?
+- Does the resolved `hermes-gateway.service` release identity match the
+  candidate update and rollback records at deployment time?
 - Can the update be rolled back without touching `~/.hermes` user state or the
   Claude-owned dirty checkout?
 - Are the proposed tests sufficient to prove memory, skills, cron, plugins,
@@ -112,14 +122,15 @@ plan is the ticket source of truth.
 
 ## Current status
 
-`PLAN_ONLY_BLOCKED_ON_RUNTIME_IDENTITY`: upstream and private fork are not a
-fast-forward update; DGX source/runtime identity has drifted from the previous
-handover; no implementation or deployment is authorized.
+`PLAN_ONLY_READY_FOR_REVIEW`: upstream and private fork are not a fast-forward
+update; the DGX runtime identity is now resolved, but no implementation or
+deployment is authorized.
 
 ## Review evidence
 
-- Review packet SHA256:
-  `282f74977c475857b4bb1bc564e79393e85c3910b00edba50d8f5f3387e73499`.
+- Initial review packet SHA256:
+  `282f74977c475857b4bb1bc564e79393e85c3910b00edba50d8f5f3387e73499`;
+  AGY correctly blocked that packet on the then-unresolved runtime identity.
 - DGX AGY preflight: host `55-0940189-03`, user `cwliao`, absolute binary
   `/home/cwliao/.local/bin/agy`, version `1.1.13`, packet-only mode,
   exit `0`; final verdict `BLOCKED`.
@@ -130,7 +141,20 @@ handover; no implementation or deployment is authorized.
   DGX `claude` command was also not available. WSL Claude `2.1.233`
   preflight produced no final marker and ended with a cancelled session-end
   hook; no Claude verdict is accepted.
-- Independent reviewer consensus: `BLOCKED`; do not implement, merge,
-  deploy, restart, or overwrite the DGX checkout until runtime identity is
-  resolved and one authenticated Claude plus one authenticated AGY review the
-  same corrected packet.
+- Corrected re-review packet: the current plan contents after this correction;
+  the packet SHA256 is recorded in the bounded review command/evidence for
+  that run.
+- Corrected re-review packet SHA256:
+  `bb08bc805b8ca6e1ed4c3f391817ba830b0ab3c073496d2b94e6308326c0c6cd`.
+- DGX AGY reviewed that corrected packet with host `55-0940189-03`, user
+  `cwliao`, absolute binary `/home/cwliao/.local/bin/agy` version
+  `1.1.13`, packet-only mode, exit `0`; final verdict `PASS`.
+- No valid Claude final verdict was obtained: the recorded DGX Claude binary
+  was absent; the correct WSL Claude `2.1.233` produced no final marker and
+  the session ended without a verdict; native Windows Claude `2.1.223`
+  also produced no output. These are `BLOCKED_INVALID_VERDICT` outcomes,
+  not PASS.
+- Independent review consensus: `BLOCKED` because the required one Claude
+  PASS is missing. Do not implement, merge, deploy, restart, or overwrite the
+  DGX checkout until the same corrected packet receives a valid authenticated
+  Claude PASS.

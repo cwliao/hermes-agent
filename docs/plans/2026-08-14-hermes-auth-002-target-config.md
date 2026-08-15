@@ -50,13 +50,24 @@ implementation, merge, or deployment gate can advance.
   `${HERMES_HOME:-$env:USERPROFILE/.hermes}/config.yaml`. There is no fallback
   between these paths and no baked-in target.
 - Add one small shared resolver (`scripts/dgx_target.py`) used by both
-  wrappers. It must read the raw user config with the repository's YAML
-  loader, distinguish missing/unreadable/malformed/non-mapping/partial target
-  data, validate the two scalar values, and emit only a validated
-  `user@host` result. It must not use `load_config()`'s defaults or
-  last-known-good fallback for this security boundary. If the resolver or its
-  Python runtime is unavailable, the wrapper returns the same configuration
-  error and does not attempt SSH.
+  wrappers. Its raw-read primitive is explicitly
+  `hermes_constants.get_hermes_home()` for the canonical home path plus
+  `utils.fast_safe_load()` for parsing the selected file. It must not import or
+  call `load_config()` or `read_raw_config()`, because those APIs intentionally
+  collapse parse/type failures into defaults/empty data. The resolver must
+  distinguish missing/unreadable/malformed/non-mapping/partial target data,
+  validate the two scalar values, and emit only a validated `user@host` result.
+  Its process contract is: exactly one `user@host` line on stdout and exit 0
+  on success; `CONFIG_ERROR:<stable-reason>` on stderr, no stdout, and exit 78
+  for every config or resolver failure. If the resolver or its Python runtime
+  is unavailable, the wrapper returns the same configuration error and does
+  not attempt SSH.
+- Define interpreter discovery without adding a new user-facing environment
+  variable: WSL tries `python3` then `python`; native Windows tries
+  `python.exe` then `py.exe -3`. The wrapper invokes the resolver by argument
+  array/call operator (never a shell-built command string), verifies its output
+  is exactly one safe line, and converts any unexpected output/exit status to
+  `CONFIG_ERROR`/78.
 - Update both `scripts/dgx_ssh.sh` and `scripts/dgx_ssh.ps1` to resolve the
   same configured user/host and preserve identity, strict host-key, timeout,
   auth classification, and remote-exit-status behavior.
@@ -70,14 +81,19 @@ implementation, merge, or deployment gate can advance.
   placeholders or configuration references where they are not required as
   historical evidence. This includes active runtime sections in
   `docs/HANDOVER.md` and `docs/ROADMAP-HERMES-DGX.md`, the recovery guide, the
-  wrappers, and active tests. Preserve repository identity strings such as
+  wrappers, and active tests; specifically remove the current operational
+  host/user presentation in `docs/HANDOVER.md` §3. Preserve repository identity strings such as
   `github.com/cwliao/hermes-agent`; preserve completed AUTH-001 evidence only
   when it is explicitly labeled historical and non-operational.
 - Add behavioral tests for configured targets, missing configuration,
   malformed configuration, non-mapping/empty/partial/invalid targets, resolver
-  unavailability, and parity across WSL and native Windows paths. Tests must
-  assert no network call occurs on configuration failure and must replace
-  source-snapshot assertions about the old public target.
+  unavailability, and parity across WSL and native Windows paths. The native
+  matrix must include a missing `python.exe`/`py.exe` resolver runtime while
+  WSL is unavailable. Tests must assert no network call occurs on
+  configuration failure and must replace the current source-snapshot
+  assertions `readonly DGX_HOST=...` and the PowerShell/fake-SSH literals
+  containing `cwliao@140.96.58.171` with behavioral assertions against a
+  configured test target.
 
 ## Non-goals
 

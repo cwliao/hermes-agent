@@ -94,7 +94,7 @@ docs/plans/2026-08-10-hermes-skills-roadmap.md.
 | HERMES-SKILLS-002 to HERMES-SKILLCLAW-001 | proposed | Select only after the relevant contract and evidence gates are reviewed. |
 | HERMES-AUTH-002 | READY_FOR_MERGE | Commit `5e8df81b6`; targeted tests 21 passed, CI run `31873607667` and Windows wrapper job `94985879064` passed, and authenticated DGX Claude/AGY implementation re-review reached PASS consensus; merge and deployment remain separate gates. |
 | HERMES-CALENDAR-GUARD-001 | MERGED_DEPLOYED | PR #17/#18 merged; immutable DGX release and recovery timer verified. |
-| HERMES-TELEGRAM-TRANSPORT-001 | IMPLEMENTED_PENDING_REVIEW | `ticket/hermes-telegram-transport-001`; bounded pool lifecycle and jittered reconnect backoff implemented. Compile/diff checks pass; focused Telegram tests pass (`51 passed`) in a disposable pinned review venv; Claude/AGY implementation review is next. |
+| HERMES-TELEGRAM-TRANSPORT-001 | REVIEW_PASS_PENDING_CI | `ticket/hermes-telegram-transport-001`; bounded pool lifecycle and jittered reconnect backoff implemented. Compile/diff checks pass; focused Telegram tests pass (`51 passed`) in a disposable pinned review venv; authenticated DGX Claude/AGY re-review reached PASS on packet `1dd4ffbd…66d5e`; CI is next. |
 
 ## Runtime and deployment boundary
 

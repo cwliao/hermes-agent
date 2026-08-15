@@ -1,6 +1,6 @@
 ---
 title: "HERMES-TELEGRAM-TRANSPORT-001: restore Telegram polling health"
-status: IMPLEMENTED_PENDING_REVIEW
+status: REVIEW_PASS_PENDING_CI
 date: 2026-08-15
 type: reliability
 ticket: HERMES-TELEGRAM-TRANSPORT-001
@@ -205,13 +205,23 @@ and the implementation/test/deployment gate order.
 - No CI, DGX deployment, service restart, live inbound verification, outbound
   verification, or rollback execution has been performed.
 
+## Post-implementation review evidence
+
+- Review packet SHA-256: `1dd4ffbd7aa4316f508a5dc4d2416faecb9eb87943f32ecb883e335fc4666d5e`.
+- DGX preflight: `/home/cwliao/.hermes/hermes-agent`, authenticated host
+  `55-0940189-03`, packet hash matched.
+- Authenticated DGX Claude `PASS` and authenticated DGX AGY `PASS` were
+  independently returned for the same packet and correction set.
+- Review found no remaining implementation defect. CI is the next gate; merge,
+  deployment, and runtime verification remain separately unauthorized.
+
 ## Current implementation gate
 
-`IMPLEMENTED_PENDING_REVIEW`: implementation is present locally and requires
-independent Claude + AGY review of the same correction set before CI, merge, or
-deployment. No DGX mutation is authorized by this ticket.
+`REVIEW_PASS_PENDING_CI`: independent Claude + AGY review reached PASS on the
+same correction set. CI is required before any merge or deployment decision; no
+DGX mutation is authorized by this ticket.
 
 ## Current gate
 
-`IMPLEMENTED_PENDING_REVIEW`. No merge, deployment, DGX mutation, or Telegram
+`REVIEW_PASS_PENDING_CI`. No merge, deployment, DGX mutation, or Telegram
 credential/network action is authorized by this plan.

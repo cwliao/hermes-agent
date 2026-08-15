@@ -41,7 +41,7 @@
   the configured SPARK target. Gateway polling still reports network timeout /
   reconnect warnings, so inbound polling is not claimed as healthy.
 - **Deferred or pending:** HERMES-MONITORING-001 remains `BLOCKED`;
-  `HERMES-TELEGRAM-TRANSPORT-001` is `IMPLEMENTED_PENDING_REVIEW` with local
+  `HERMES-TELEGRAM-TRANSPORT-001` is `REVIEW_PASS_PENDING_CI` with local
   compile/diff checks passed and focused pytest passing in the disposable
   pinned review venv (`51 passed`).
   Live skill synchronization, SkillClaw work, and unrelated DGX service
@@ -69,12 +69,11 @@
 ### Current ticket: HERMES-TELEGRAM-TRANSPORT-001
 
 - **Plan:** `docs/plans/2026-08-15-hermes-telegram-transport-001.md`
-- **Status:** `IMPLEMENTED_PENDING_REVIEW`.
+- **Status:** `REVIEW_PASS_PENDING_CI`.
 - **Scope:** bounded Telegram polling recovery with generation-bound progress,
   request-pool lifecycle bounds, jittered retry backoff, and hermetic tests.
-- **Required next action:** independent authenticated DGX Claude + AGY review
-  of the same implementation correction set, then CI. Keep merge and
-  deployment separately authorized.
+- **Required next action:** run CI for the reviewed correction set. Keep merge
+  and deployment separately authorized.
 
 ### Other ticket state
 

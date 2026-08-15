@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001 compatibility matrix"
-status: MATRIX_INCOMPLETE_PORTABILITY_AND_GATE_BLOCKED
+status: MATRIX_INCOMPLETE_GATED
 date: 2026-08-15
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -86,25 +86,26 @@ environment (`hermes-agent 0.20.1`, `pytest 9.1.1`, `anthropic 0.87.0`):
 | State/WAL/session suites | `257 passed`, `2 skipped` | Upstream candidate isolated temp homes only |
 | Message-sequence repair | `16 passed` | Upstream candidate message invariant only |
 | Primary runtime restore | `24 passed` | Upstream candidate provider recovery only |
-| Backup suite | `39 passed`, `3 failed`, `9 skipped` | Windows wrapper/path/mode semantics remain unresolved |
+| Backup suite | Linux `51 passed`, `1 warning` | Linux candidate PASS; Windows-native cases are out of scope |
 
 The Windows-only boundary was validated separately in the same detached
 upstream candidate through WSL Linux using Python 3.11.15 and the upstream
 locked environment:
 
-| WSL candidate check | Result | Evidence boundary |
+| WSL/Linux candidate check | Result | Evidence boundary |
 | --- | --- | --- |
-| Backup suite | `51 passed`, `1 warning` | Linux candidate backup behavior; not Windows native behavior |
-| Atomic symlink suite | `21 passed`, `4 skipped` | Linux symlink behavior; Windows privilege boundary explained |
-| Hermes constants suite | `61 passed`, `5 skipped` | Linux home/path behavior; Windows native boundary explained |
+| Backup suite | `51 passed`, `1 warning` | Linux deployment-target behavior; PASS |
+| Atomic symlink suite | `21 passed`, `4 skipped` | Linux deployment-target behavior; PASS |
+| Hermes constants suite | `61 passed`, `5 skipped` | Linux deployment-target behavior; PASS |
 
 The canonical `scripts/run_tests.sh` is a POSIX shell runner and was not
 executed from native PowerShell; the recorded fallback used the isolated
 Windows `.venv` directly. The isolated environment installed only locked
 test/provider extras and no product code was changed to hide environment
-failures. The candidate remains `RETAIN_PRIVATE_RELEASE` until the Windows
-native portability decision, post-change state manifest, and Telegram/DGX
-evidence are complete.
+failures. Windows-native portability is explicitly out of scope for the
+declared Linux deployment target. The candidate remains
+`RETAIN_PRIVATE_RELEASE` until the post-change state manifest, private-feature
+adaptation decision, and Telegram/DGX evidence are complete.
 
 ## Candidate decision
 

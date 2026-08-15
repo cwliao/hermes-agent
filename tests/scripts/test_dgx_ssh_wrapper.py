@@ -41,6 +41,22 @@ def write_config(tmp_path: Path, config_text: str | None = None) -> None:
     (tmp_path / "config.yaml").write_text(config_text, encoding="utf-8", newline="\n")
 
 
+def resolver_stub_result(
+    config_text: str | None,
+    write_config_file: bool,
+) -> tuple[int, str]:
+    """Return the resolver result needed by the hermetic shell harness."""
+    if not write_config_file:
+        return 78, "CONFIG_ERROR:config_missing"
+    if config_text == "not: [valid":
+        return 78, "CONFIG_ERROR:config_malformed"
+    if config_text == "dgx_ssh:\n  host: review-host\n":
+        return 78, "CONFIG_ERROR:target_incomplete"
+    if config_text == "dgx_ssh:\n  host: review-host\n  user: bad user\n":
+        return 78, "CONFIG_ERROR:user_invalid"
+    return 0, "review_user@review-host"
+
+
 def run_shell_wrapper(
     tmp_path: Path,
     mode: str,
@@ -110,6 +126,30 @@ esac
             encoding="utf-8",
             newline="",
         )
+    if wsl is None:
+        resolver_status, resolver_output = resolver_stub_result(
+            config_text,
+            write_config_file,
+        )
+        resolver_script = tmp_path / "resolver-script"
+        resolver_script.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' '{resolver_output}' "
+            f"{'>&2' if resolver_status else ''}\n"
+            f"exit {resolver_status}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        resolver_script.chmod(0o755)
+        for interpreter in ("python3", "python"):
+            fake_python = tmp_path / interpreter
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                f'exec "{git_bash_path(resolver_script)}"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            fake_python.chmod(0o755)
     bash_env = tmp_path / "bash-env"
     bash_env.write_text(
         f'ssh() {{ bash "{git_bash_path(fake_ssh)}" "$@"; }}\n'
@@ -234,6 +274,7 @@ def test_windows_entrypoint_delegates_to_one_wsl_policy():
 
 
 def test_resolver_uses_configured_target(tmp_path):
+    pytest.importorskip("yaml")
     write_config(tmp_path)
     env = os.environ.copy()
     env["HERMES_HOME"] = str(tmp_path)
@@ -263,6 +304,7 @@ def test_resolver_uses_configured_target(tmp_path):
     ],
 )
 def test_resolver_fails_closed_for_invalid_config(tmp_path, config_text, reason):
+    pytest.importorskip("yaml")
     env = os.environ.copy()
     env["HERMES_HOME"] = str(tmp_path)
     if config_text is not None:

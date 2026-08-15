@@ -276,6 +276,29 @@ async def test_reconnect_continues_when_polling_pool_shutdown_hangs():
     await _complete_current_polling_generation(adapter)
 
 
+@pytest.mark.asyncio
+async def test_polling_pool_drain_remains_bounded_across_generations():
+    """A timed-out drain does not poison the next generation's pool reset."""
+    adapter = _make_adapter()
+    mock_app, mock_polling_req = _make_mock_app()
+    shutdown_calls = []
+
+    async def shutdown():
+        shutdown_calls.append(len(shutdown_calls) + 1)
+        if len(shutdown_calls) == 1:
+            await asyncio.Event().wait()
+
+    mock_polling_req.shutdown = shutdown
+    adapter._app = mock_app
+
+    with patch.object(tg_adapter, "_POLLING_REQUEST_OP_TIMEOUT", 0.01):
+        await adapter._drain_polling_connections()
+        await adapter._drain_polling_connections()
+
+    assert shutdown_calls == [1, 2]
+    assert mock_polling_req.initialize.await_count == 2
+
+
 def test_polling_progress_accepts_empty_success_and_rejects_stale_generation():
     """Only the current generation's successful getUpdates response heals it."""
     adapter = _make_adapter()

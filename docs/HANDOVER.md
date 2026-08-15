@@ -42,7 +42,8 @@
   reconnect warnings, so inbound polling is not claimed as healthy.
 - **Deferred or pending:** HERMES-MONITORING-001 remains `BLOCKED`;
   `HERMES-TELEGRAM-TRANSPORT-001` is `IMPLEMENTED_PENDING_REVIEW` with local
-  compile/diff checks passed and focused pytest blocked by missing `httpx`.
+  compile/diff checks passed and focused pytest passing in the disposable
+  pinned review venv (`51 passed`).
   Live skill synchronization, SkillClaw work, and unrelated DGX service
   changes remain separate work.
 

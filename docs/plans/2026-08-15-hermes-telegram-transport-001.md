@@ -196,10 +196,12 @@ and the implementation/test/deployment gate order.
   progress, and stale generation isolation.
 - `py -m py_compile` passed for both changed Python files.
 - `git diff --check` passed.
-- Focused pytest collection was blocked before test execution because the
-  available system Python lacks `httpx`; the isolated worktree and WSL
-  environment had no project venv. This is an environment blocker, not a test
-  pass.
+- Focused pytest initially could not collect because the available system
+  Python lacked `httpx`; a disposable `.review-venv` was then created with
+  the pinned test dependencies needed for this ticket. The focused command
+  `pytest -p no:cacheprovider tests/gateway/test_telegram_network_reconnect.py
+  tests/gateway/test_telegram_start_polling_timeout.py -q` passed: `51 passed
+  in 16.26s`, including the cross-generation pool-drain regression.
 - No CI, DGX deployment, service restart, live inbound verification, outbound
   verification, or rollback execution has been performed.
 

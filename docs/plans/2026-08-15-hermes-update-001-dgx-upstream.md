@@ -179,10 +179,11 @@ exit status, and final verdict. The final consensus pair must be DGX host
 ## Current status
 
 `MATRIX_INCOMPLETE_ENVIRONMENT_BLOCKED`: upstream and private fork are not a
-fast-forward update. Source-side inventory and matrix implementation review
-passed, but prompt-cache, gateway, state, browser, and upstream-candidate rows
-remain blocked or not run because the local fallback environment lacks required
-dependencies/Windows symlink privilege. The final Claude/AGY reviews remain
+fast-forward update. A locked isolated Windows environment now covers the
+prompt/cache, gateway, state/WAL, message-loop, plugin, and provider-recovery
+focused suites, but backup/portable symlink cases still have Windows-specific
+failures and the redacted state manifest, clean upstream-candidate run,
+Telegram, and DGX gates are not run. The final Claude/AGY reviews remain
 `PASS`; merge, deployment, restart, runtime health, and Telegram delivery
 remain separate gates.
 
@@ -238,13 +239,15 @@ remain separate gates.
   runtime state. The current inventory is 119 private-only commits, 7,420
   upstream-only commits, and 7,024 changed paths.
 - The compatibility matrix is recorded in
-  `docs/plans/2026-08-15-hermes-update-001-compatibility-matrix.md`; all
-  behavior rows remain `NOT_RUN`, so the candidate decision remains
-  `RETAIN_PRIVATE_RELEASE`.
+  `docs/plans/2026-08-15-hermes-update-001-compatibility-matrix.md`; several
+  focused rows now have partial baseline evidence, while protected-state,
+  upstream-candidate, Telegram, and DGX rows remain open, so the candidate
+  decision remains `RETAIN_PRIVATE_RELEASE`.
 - Focused fallback validation: `py -m pytest -q
-  tests/scripts/test_update_candidate.py` -> `2 passed`. The canonical
-  `scripts/run_tests.sh` could not run because no repo `.venv`/`venv` or shared
-  Hermes test venv is present; this is not claimed as CI-parity evidence.
+  tests/scripts/test_update_candidate.py` -> `2 passed`. A locked isolated
+  Windows `.venv` was subsequently used for the focused matrix suites; the
+  POSIX `scripts/run_tests.sh` runner was not invoked from native PowerShell,
+  so this is not claimed as CI-parity evidence.
 - Implementation packet SHA256:
   `601e222bff2aae4cc3f3c139b10d2e2ee4b52585e225a318611cc3ea64b11997`.
 - Post-implementation DGX AGY review: host `55-0940189-03`, user `cwliao`,
@@ -260,10 +263,13 @@ remain separate gates.
   neither is a correction request. The matrix has only partial baseline
   evidence; blocked/unrun rows keep `RETAIN_PRIVATE_RELEASE` and all
   merge/deploy/runtime gates in force.
-- Matrix execution evidence: cron profile isolation `4 passed`, general plugin
-  discovery `4 passed`, and candidate inventory `2 passed`. Prompt-cache and
-  gateway checks were blocked by missing `requests`/`httpx`; browser/web plugin
-  checks were partially blocked by the same missing dependencies; Hermes state
-  path checks also hit Windows symlink/HERMES_HOME environment limits. No
-  dependencies were installed and no DGX state, Telegram transport, or dirty
-  checkout was touched.
+- Matrix execution evidence: a locked isolated Windows `.venv` ran prompt/cache
+  `29 passed`, gateway access policy `71 passed`, browser plugin `31 passed`,
+  web plugin `50 passed`, state/WAL `382 passed`, message-loop `37 passed`,
+  runtime-restore `36 passed`, and the cron/provider/candidate baseline `10
+  passed`. Backup had `138 passed`, `4 failed`, `3 skipped`; Hermes constants
+  had `103 passed`, `5 failed`, `15 skipped`; atomic symlink tests had `6
+  passed`, `5 failed`, `6 skipped`. The failures are recorded as Windows
+  wrapper/path/mode or symlink-privilege boundaries, not suppressed. Only the
+  isolated test environment changed; no DGX state, Telegram transport, or
+  dirty checkout was touched.

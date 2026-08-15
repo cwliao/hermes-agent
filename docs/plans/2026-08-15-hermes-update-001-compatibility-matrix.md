@@ -40,41 +40,46 @@ release until every required row below is `PASS`.
 | --- | --- | --- | --- | --- |
 | Launcher identity | `systemctl --user` unit, immutable release path, exact cwd/PYTHONPATH, release marker | Candidate process/unit tuple matches the captured deployment tuple | PASS (baseline only) | Keep current release until deployment gate |
 | User state and credentials | `config.yaml`, `auth.json`, credential files, `state.db`/WAL, sessions, memories, skills, plugins, pairing, cron, logs | Redacted pre/post manifest; no secret or message content in artifacts | NOT_RUN | Block promotion |
-| SQLite/session continuity | WAL mode, schema identity, session readback, `PRAGMA integrity_check=ok` | Temp `HERMES_HOME` migration/readback and integrity evidence | NOT_RUN | Block promotion |
-| Prompt/cache invariants | Byte-stable system prompt and per-conversation cache prefix | Focused cache boundary tests plus real import path | NOT_RUN | Block promotion |
-| Message loop | Strict role alternation and no synthetic user insertion | Conversation-loop invariant tests | NOT_RUN | Block promotion |
-| Tool and skill discovery | Built-in tools, user skills, optional skills, skill command routing | Discovery/import matrix with missing/import-error failure | NOT_RUN | Block promotion |
+| SQLite/session continuity | WAL mode, schema identity, session readback, `PRAGMA integrity_check=ok` | Temp `HERMES_HOME` migration/readback and integrity evidence | PARTIAL_PASS: state/WAL suite 382 passed | Candidate comparison and redacted manifest still required |
+| Prompt/cache invariants | Byte-stable system prompt and per-conversation cache prefix | Focused cache boundary tests plus real import path | PARTIAL_PASS: 29 passed | Candidate comparison still required |
+| Message loop | Strict role alternation and no synthetic user insertion | Conversation-loop invariant tests | PARTIAL_PASS: 37 passed | Candidate comparison still required |
+| Tool and skill discovery | Built-in tools, user skills, optional skills, skill command routing | Discovery/import matrix with missing/import-error failure | PARTIAL_PASS: 4 general discovery tests passed | Candidate comparison still required |
 | Cron | Job parsing, scheduling, lock, catch-up, output and delivery isolation | Parse/load matrix and scheduler tests | PARTIAL_PASS: 4 passed | Candidate comparison still required |
-| Plugins | Memory, model/provider, platform and KLIB/KMDaily plugin registration | Import/registration matrix; no credential reads | PARTIAL_PASS: 4 passed; browser/web blocked by missing requests/httpx | Block promotion |
+| Plugins | Memory, model/provider, platform and KLIB/KMDaily plugin registration | Import/registration matrix; no credential reads | PARTIAL_PASS: general 4, browser 31, web 50 passed | Candidate comparison still required |
 | Telegram transport | Pairing/authz, polling progress, reconnect, inbound dispatch, outbound send | Authorized inbound/outbound evidence and recovery test | NOT_RUN | Block promotion |
 | DGX SSH/config resolution | `140.96.58.171`, hostname `55-0940189-03`, WSL authenticated SSH path | Resolver tests and metadata-only DGX probe | NOT_RUN | Block promotion |
 | Release/rollback | Immutable release marker and prior-release selection | Clean candidate snapshot, quantitative rollback checklist | PASS (plan only) | Separate rollback authorization |
 | Calendar/reliability guards | Calendar guard, gateway recovery, tool-loop/artifact truth, CI baseline | Private-fork feature tests and explicit port/adapt decision | NOT_RUN | Block promotion |
-| Terminal/browser surfaces | Existing tool safety and browser/terminal resolution | Focused smoke tests in isolated candidate | BLOCKED_ENVIRONMENT: missing requests/httpx | Block promotion |
+| Terminal/browser surfaces | Existing tool safety and browser/terminal resolution | Focused smoke tests in isolated candidate | PARTIAL_PASS: browser/web suites 81 passed | Candidate comparison still required |
 
 ## Execution evidence
 
-The following checks ran against the isolated private-fork worktree using the
-Windows fallback Python. They are source-level baseline evidence only; they do
+The following checks ran against the isolated private-fork worktree using a
+locked Windows `.venv` created with the repository's `uv.lock` and the `dev`
+plus `anthropic` extras. They are source-level baseline evidence only; they do
 not prove upstream compatibility or DGX readiness:
 
 | Check | Result | Evidence boundary |
 | --- | --- | --- |
-| `tests/cron/test_cron_profile_isolation.py` | `4 passed` | Cron profile/lock-path behavior only |
-| `tests/providers/test_plugin_discovery.py` | `4 passed` | General plugin discovery only |
-| `tests/scripts/test_update_candidate.py` | `2 passed` | Candidate inventory behavior only |
-| `tests/run_agent/test_anthropic_prompt_cache_policy.py` | `BLOCKED` during collection | `requests` missing while importing `run_agent.py` |
-| `tests/gateway/test_config_driven_access_policy.py` | `BLOCKED` during runtime/import | `httpx` missing while importing gateway/account usage |
-| `tests/plugins/browser/test_browser_provider_plugins.py` | `6 passed`, `25 blocked` | plugin imports require missing `requests`/`httpx` |
-| `tests/plugins/web/test_web_search_provider_plugins.py` | `45 passed`, `5 blocked` | blocked cases require missing `httpx` |
-| `tests/test_hermes_constants.py` | `BLOCKED` cases | Windows `HERMES_HOME`/symlink privilege mismatch |
+| `tests/cron/test_cron_profile_isolation.py` + provider/candidate suites | `10 passed` | Cron, general discovery, and inventory behavior only |
+| `tests/run_agent/test_anthropic_prompt_cache_policy.py` | `29 passed` | Prompt/cache policy import and focused invariants only |
+| `tests/gateway/test_config_driven_access_policy.py` | `71 passed` | Gateway access-policy behavior only |
+| `tests/plugins/browser/test_browser_provider_plugins.py` | `31 passed` | Browser plugin import/registration behavior only |
+| `tests/plugins/web/test_web_search_provider_plugins.py` | `50 passed` | Web plugin import/registration behavior only |
+| `tests/test_hermes_state.py` + `tests/test_hermes_state_wal_fallback.py` | `382 passed` | State/WAL/session behavior in isolated temp homes only |
+| `tests/run_agent/test_message_sequence_repair.py` | `37 passed` | Message-sequence invariant behavior only |
+| `tests/run_agent/test_primary_runtime_restore.py` | `36 passed` | Provider recovery behavior after installing locked `anthropic` extra |
+| `tests/hermes_cli/test_backup.py` | `138 passed`, `4 failed`, `3 skipped` | Windows wrapper/path/permission semantics remain unresolved |
+| `tests/test_hermes_constants.py` | `103 passed`, `15 skipped`, `5 failed` | Windows `HERMES_HOME`/symlink privilege semantics remain unresolved |
+| `tests/test_atomic_replace_symlinks.py` | `6 passed`, `5 failed`, `6 skipped` | Five symlink cases require Windows symlink privilege |
 
-The canonical `scripts/run_tests.sh` could not run because this worktree has
-no `.venv`/`venv` and the shared Hermes test venv is absent. No dependencies
-were installed and no product code was changed to hide environment failures.
-The candidate remains `RETAIN_PRIVATE_RELEASE` until a hermetic environment
-can run the blocked rows and the same checks are repeated against a clean
-upstream candidate.
+The canonical `scripts/run_tests.sh` is a POSIX shell runner and was not
+executed from native PowerShell; the recorded fallback used the isolated
+Windows `.venv` directly. The isolated environment installed only locked
+test/provider extras and no product code was changed to hide environment
+failures. The candidate remains `RETAIN_PRIVATE_RELEASE` until the unresolved
+Windows/portable rows, redacted state manifest, and the same checks against a
+clean upstream candidate are complete.
 
 ## Candidate decision
 

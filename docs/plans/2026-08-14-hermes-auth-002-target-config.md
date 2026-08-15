@@ -1,6 +1,6 @@
 ---
 title: "HERMES-AUTH-002: parameterize public DGX target metadata"
-status: IMPLEMENTATION_REVIEW_PASS
+status: READY_FOR_MERGE
 date: 2026-08-14
 type: security-hardening
 ticket: HERMES-AUTH-002
@@ -146,20 +146,23 @@ mode is documented and tested.
 On 2026-08-15, the same bounded packet and plan-only correction set were
 reviewed independently by authenticated DGX Claude Haiku and authenticated
 WSL AGY (`gemini-3.7-flash-low`). Both returned `PASS`; the AGY result required
-one bounded retry after a timeout. This is a plan-review PASS only. The
-resolver, wrapper changes, behavioral tests, CI, implementation review,
-merge, and deployment have not run and remain separate gates.
+one bounded retry after a timeout. This is plan-review evidence only; the
+implementation and deployment gates below remain separate.
 
 ## Evidence boundary
 
 ## Final implementation-review evidence
 
-On 2026-08-15, the implementation at `fa4feeb51` was independently reviewed
-by authenticated DGX Claude Haiku and authenticated WSL AGY
-(`gemini-3.7-flash-low`). Both returned `PASS`. The targeted wrapper suite
-passed 21 tests, resolver compilation and `git diff --check` passed, and the
-broader `tests/scripts` collection remains environment-blocked by missing
-`httpx` with no managed Windows venv in this worktree. GitHub CI, merge, and
+On 2026-08-15, the implementation at `5e8df81b6` was independently reviewed
+by authenticated DGX Claude Haiku and authenticated DGX AGY 1.1.13 using the
+same packet SHA-256
+`3b45f2035b2af543d4e5911615032aad1d031e6ff618b06266be19b6947637a2`.
+Both returned `VERDICT: PASS`; AGY recorded only an informational fixture
+note and Claude recorded no blocking finding. The targeted wrapper suite
+passed 21 tests, GitHub Actions run `31873607667` passed, and the Windows
+wrapper job `94985879064` passed. The broader `tests/scripts` collection
+remains environment-blocked by missing `httpx` with no managed Windows venv in
+this worktree. The implementation-review consensus is complete; merge and
 deployment remain separate gates.
 
 The current DGX deployment is the separately merged Calendar Guard release

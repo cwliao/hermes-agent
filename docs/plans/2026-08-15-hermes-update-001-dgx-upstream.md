@@ -181,9 +181,10 @@ exit status, and final verdict. The final consensus pair must be DGX host
 `MATRIX_INCOMPLETE_ENVIRONMENT_BLOCKED`: upstream and private fork are not a
 fast-forward update. A locked isolated Windows environment now covers the
 prompt/cache, gateway, state/WAL, message-loop, plugin, and provider-recovery
-focused suites, but backup/portable symlink cases still have Windows-specific
-failures and the redacted state manifest, clean upstream-candidate run,
-Telegram, and DGX gates are not run. The final Claude/AGY reviews remain
+focused suites for both the private baseline and clean upstream candidate.
+Backup/portable symlink cases still have Windows-specific failures; the DGX
+baseline manifest is captured, but post-change state, Telegram, and DGX
+promotion gates are not run. The final Claude/AGY reviews remain
 `PASS`; merge, deployment, restart, runtime health, and Telegram delivery
 remain separate gates.
 
@@ -240,9 +241,9 @@ remain separate gates.
   upstream-only commits, and 7,024 changed paths.
 - The compatibility matrix is recorded in
   `docs/plans/2026-08-15-hermes-update-001-compatibility-matrix.md`; several
-  focused rows now have partial baseline evidence, while protected-state,
-  upstream-candidate, Telegram, and DGX rows remain open, so the candidate
-  decision remains `RETAIN_PRIVATE_RELEASE`.
+  focused rows now have partial baseline evidence, while protected-state
+  post-check, candidate adoption, Telegram, and DGX rows remain open, so the
+  candidate decision remains `RETAIN_PRIVATE_RELEASE`.
 - Focused fallback validation: `py -m pytest -q
   tests/scripts/test_update_candidate.py` -> `2 passed`. A locked isolated
   Windows `.venv` was subsequently used for the focused matrix suites; the
@@ -273,3 +274,15 @@ remain separate gates.
   wrapper/path/mode or symlink-privilege boundaries, not suppressed. Only the
   isolated test environment changed; no DGX state, Telegram transport, or
   dirty checkout was touched.
+- Clean upstream candidate evidence: detached SHA
+  `45af7a71fcd420b4422d2c074b1ce58b9ce0d048` ran prompt/cache `40 passed`,
+  gateway `53 passed`, browser `23 passed`, web `28 passed`, state/WAL `257
+  passed` and `2 skipped`, message-loop `16 passed`, runtime-restore `24
+  passed`, and backup `39 passed`, `3 failed`, `9 skipped`. The upstream
+  candidate was never merged or deployed.
+- DGX protected-state baseline manifest:
+  `docs/plans/evidence/2026-08-15-hermes-update-001-dgx-protected-state-manifest.txt`.
+  It records host `55-0940189-03`, active service/MainPID `3504674`, release
+  process path, file modes, sizes, aggregate directory counts, and SHA256
+  hashes only. A post-change manifest remains not run because deployment is
+  separately unauthorized.

@@ -39,8 +39,8 @@ release until every required row below is `PASS`.
 | Area | Private/DGX contract to preserve | Candidate evidence required | Status | Decision |
 | --- | --- | --- | --- | --- |
 | Launcher identity | `systemctl --user` unit, immutable release path, exact cwd/PYTHONPATH, release marker | Candidate process/unit tuple matches the captured deployment tuple | PASS (baseline only) | Keep current release until deployment gate |
-| User state and credentials | `config.yaml`, `auth.json`, credential files, `state.db`/WAL, sessions, memories, skills, plugins, pairing, cron, logs | Redacted pre/post manifest; no secret or message content in artifacts | NOT_RUN | Block promotion |
-| SQLite/session continuity | WAL mode, schema identity, session readback, `PRAGMA integrity_check=ok` | Temp `HERMES_HOME` migration/readback and integrity evidence | PARTIAL_PASS: state/WAL suite 382 passed | Candidate comparison and redacted manifest still required |
+| User state and credentials | `config.yaml`, `auth.json`, credential files, `state.db`/WAL, sessions, memories, skills, plugins, pairing, cron, logs | Redacted pre/post manifest; no secret or message content in artifacts | PARTIAL_PASS: DGX baseline manifest captured | Post-change manifest remains not run; block promotion |
+| SQLite/session continuity | WAL mode, schema identity, session readback, `PRAGMA integrity_check=ok` | Temp `HERMES_HOME` migration/readback and integrity evidence | PARTIAL_PASS: private 382 passed; upstream 257 passed | Protected-state post-check and candidate decision still required |
 | Prompt/cache invariants | Byte-stable system prompt and per-conversation cache prefix | Focused cache boundary tests plus real import path | PARTIAL_PASS: 29 passed | Candidate comparison still required |
 | Message loop | Strict role alternation and no synthetic user insertion | Conversation-loop invariant tests | PARTIAL_PASS: 37 passed | Candidate comparison still required |
 | Tool and skill discovery | Built-in tools, user skills, optional skills, skill command routing | Discovery/import matrix with missing/import-error failure | PARTIAL_PASS: 4 general discovery tests passed | Candidate comparison still required |
@@ -73,17 +73,33 @@ not prove upstream compatibility or DGX readiness:
 | `tests/test_hermes_constants.py` | `103 passed`, `15 skipped`, `5 failed` | Windows `HERMES_HOME`/symlink privilege semantics remain unresolved |
 | `tests/test_atomic_replace_symlinks.py` | `6 passed`, `5 failed`, `6 skipped` | Five symlink cases require Windows symlink privilege |
 
+The same focused suites were then run against the clean detached upstream
+candidate at `45af7a71fcd420b4422d2c074b1ce58b9ce0d048` using its own locked
+environment (`hermes-agent 0.20.1`, `pytest 9.1.1`, `anthropic 0.87.0`):
+
+| Candidate check | Result | Evidence boundary |
+| --- | --- | --- |
+| Prompt/cache policy | `40 passed` | Upstream candidate source behavior only |
+| Gateway access policy | `53 passed` | Upstream candidate gateway policy only |
+| Browser provider plugins | `23 passed` | Upstream candidate plugin behavior only |
+| Web search provider plugins | `28 passed` | Upstream candidate plugin behavior only |
+| State/WAL/session suites | `257 passed`, `2 skipped` | Upstream candidate isolated temp homes only |
+| Message-sequence repair | `16 passed` | Upstream candidate message invariant only |
+| Primary runtime restore | `24 passed` | Upstream candidate provider recovery only |
+| Backup suite | `39 passed`, `3 failed`, `9 skipped` | Windows wrapper/path/mode semantics remain unresolved |
+
 The canonical `scripts/run_tests.sh` is a POSIX shell runner and was not
 executed from native PowerShell; the recorded fallback used the isolated
 Windows `.venv` directly. The isolated environment installed only locked
 test/provider extras and no product code was changed to hide environment
 failures. The candidate remains `RETAIN_PRIVATE_RELEASE` until the unresolved
-Windows/portable rows, redacted state manifest, and the same checks against a
-clean upstream candidate are complete.
+Windows/portable rows, post-change state manifest, and Telegram/DGX evidence
+are complete.
 
 ## Candidate decision
 
-The selected decision is `RETAIN_PRIVATE_RELEASE`. Upstream adoption and a
+The selected decision is `RETAIN_PRIVATE_RELEASE`. The clean upstream
+candidate focused suites are recorded, but upstream adoption and a
 private-fork merge/cherry-pick remain unevaluated until the matrix is complete.
 No update target may be the dirty DGX checkout. The candidate must be built
 from a clean isolated source ref and carry a full 40-character source SHA.

@@ -1,6 +1,6 @@
 ---
 title: "HERMES-AUTH-002: parameterize public DGX target metadata"
-status: IMPLEMENTATION_PENDING_REVIEW
+status: IMPLEMENTATION_REVIEW_PASS
 date: 2026-08-14
 type: security-hardening
 ticket: HERMES-AUTH-002
@@ -151,6 +151,16 @@ resolver, wrapper changes, behavioral tests, CI, implementation review,
 merge, and deployment have not run and remain separate gates.
 
 ## Evidence boundary
+
+## Final implementation-review evidence
+
+On 2026-08-15, the implementation at `fa4feeb51` was independently reviewed
+by authenticated DGX Claude Haiku and authenticated WSL AGY
+(`gemini-3.7-flash-low`). Both returned `PASS`. The targeted wrapper suite
+passed 21 tests, resolver compilation and `git diff --check` passed, and the
+broader `tests/scripts` collection remains environment-blocked by missing
+`httpx` with no managed Windows venv in this worktree. GitHub CI, merge, and
+deployment remain separate gates.
 
 The current DGX deployment is the separately merged Calendar Guard release
 `v2026.8.15-hermes-calendar-guard-1b3d444955` from main SHA

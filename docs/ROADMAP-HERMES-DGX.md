@@ -92,7 +92,7 @@ docs/plans/2026-08-10-hermes-skills-roadmap.md.
 | HERMES-INTAKE-001 | deferred | Record DGX HermesHub and Drive-watch artifact boundaries in a separate reviewed ticket. |
 | HERMES-SKILLS-004 | proposed | Reconcile pinned HermesHub skill bytes, scanner evidence, and HH-005 installed-state mismatch. |
 | HERMES-SKILLS-002 to HERMES-SKILLCLAW-001 | proposed | Select only after the relevant contract and evidence gates are reviewed. |
-| HERMES-AUTH-002 | IMPLEMENTATION_PENDING_REVIEW | Target-config implementation present; targeted tests pass, full scripts suite is environment-blocked; re-review before CI/merge. |
+| HERMES-AUTH-002 | IMPLEMENTATION_REVIEW_PASS | Target-config implementation and independent Claude/AGY review passed; targeted tests pass, full scripts suite is environment-blocked; CI next before merge. |
 | HERMES-CALENDAR-GUARD-001 | MERGED_DEPLOYED | PR #17/#18 merged; immutable DGX release and recovery timer verified. |
 
 ## Runtime and deployment boundary

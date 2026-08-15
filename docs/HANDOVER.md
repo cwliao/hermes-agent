@@ -15,7 +15,7 @@
 - **Canonical mainline:** `origin/main` at
   `1b3d4449553433100038f38e7b58f2f2dc489fa7`.
 - **Current checkout branch:** `ticket/hermes-auth-002-target-config`.
-- **Current checkout HEAD at plan-review handoff:** `f9c113b62`
+- **Current checkout HEAD at implementation-review handoff:** `fa4feeb51`
   (`docs: pin auth-002 validation and evidence contract`).
 - **DGX runtime:** configured target, checkout
   `/home/cwliao/.hermes/hermes-agent`, service `hermes-gateway.service`.
@@ -27,10 +27,9 @@
 
 ## 2. Goal and roadmap
 
-- **Current goal:** Implement the reconciled, independently approved
-  plan-review correction set for `HERMES-AUTH-002`: move public DGX target
-  metadata into user-owned Hermes configuration without weakening the
-  fail-closed SSH path.
+- **Current goal:** Run the GitHub CI gate for the independently reviewed
+  `HERMES-AUTH-002` implementation; keep merge and deployment separately
+  authorized.
 - **Completed and verified:** HERMES-AUTH-001 merged as PR #14 at
   `63bcd7ac` after main CI run `31791195033` passed all required checks,
   including the Windows wrapper job.
@@ -43,8 +42,7 @@
   the configured SPARK target. Gateway polling still reports network timeout /
   reconnect warnings, so inbound polling is not claimed as healthy.
 - **Deferred or pending:** HERMES-MONITORING-001 remains `BLOCKED`;
-  HERMES-AUTH-002 is `IMPLEMENTATION_PENDING_REVIEW`; implementation is
-  present, targeted tests pass, and implementation review is next, while
+  HERMES-AUTH-002 is `IMPLEMENTATION_REVIEW_PASS`; GitHub CI is next, while
   merge/deployment remain separately gated. Live skill synchronization,
   SkillClaw work, and unrelated DGX service changes remain separate work.
 
@@ -70,13 +68,12 @@
 ### Current ticket: HERMES-AUTH-002
 
 - **Plan:** `docs/plans/2026-08-14-hermes-auth-002-target-config.md`
-- **Status:** `IMPLEMENTATION_PENDING_REVIEW`.
+- **Status:** `IMPLEMENTATION_REVIEW_PASS`.
 - **Scope:** parameterize public DGX SSH host/user metadata through existing
   Hermes user configuration; preserve strict host-key and fail-closed auth
   behavior.
-- **Required next action:** route the implementation to authenticated DGX
-  Claude and WSL AGY for independent review, resolve any correction set, then
-  run GitHub CI. Keep
+- **Required next action:** run GitHub CI and verify the wrapper Windows job and
+  required checks. Keep
   merge/deployment separately authorized.
 
 ### Other ticket state
@@ -97,9 +94,8 @@
 Ticket implementation, local tests, independent cross-review, reconciliation,
 CI, merge, DGX deployment, runtime health, and Telegram delivery are separate
 gates. A pass at one gate cannot be reported as a pass at another. The
-AUTH-002 plan-review gate is complete; implementation, tests, CI, merge, and
-deployment are not complete. Telegram readiness and future ticket gates remain
-separate.
+AUTH-002 implementation-review gate is complete; CI, merge, and deployment are
+not complete. Telegram readiness and future ticket gates remain separate.
 
 ## 5. Safe continuation instructions
 

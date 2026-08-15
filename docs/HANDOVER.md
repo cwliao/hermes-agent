@@ -15,7 +15,7 @@
 - **Canonical mainline:** `origin/main` at
   `1b3d4449553433100038f38e7b58f2f2dc489fa7`.
 - **Current checkout branch:** `ticket/hermes-auth-002-target-config`.
-- **Current checkout HEAD:** `1c0a5f10c`
+- **Current checkout HEAD at plan-review handoff:** `f9c113b62`
   (`docs: pin auth-002 validation and evidence contract`).
 - **DGX runtime:** configured target, checkout
   `/home/cwliao/.hermes/hermes-agent`, service `hermes-gateway.service`.

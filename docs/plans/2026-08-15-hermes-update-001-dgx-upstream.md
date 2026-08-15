@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001: safely update DGX Spark from upstream"
-status: READY_FOR_IMPLEMENTATION_REVIEW_PASS
+status: IMPLEMENTATION_IN_PROGRESS_REVIEW_REQUIRED
 date: 2026-08-15
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -11,10 +11,11 @@ target_repo: hermes-agent
 
 ## Ticket boundary
 
-This is a planning and review ticket for evaluating an upstream update. It does
-not authorize implementation, merge, deployment, service restart, or any DGX
-mutation. GitHub Issues are disabled in this repository, so this repo-local
-plan is the ticket source of truth.
+This is the planning, review, and source-side implementation ticket for
+evaluating an upstream update. The user separately authorized source-side
+implementation in the current turn. It still does not authorize merge,
+deployment, service restart, or any DGX mutation. GitHub Issues are disabled
+in this repository, so this repo-local plan is the ticket source of truth.
 
 ## Verified source state
 
@@ -94,6 +95,12 @@ plan is the ticket source of truth.
    CLI/gateway/cron/memory/skills/plugins/Telegram inbound and outbound
    separately, and retain a tested rollback path.
 
+The source-side implementation now provides the metadata-only ref inventory in
+`scripts/update_candidate.py` and the protected-behavior matrix in
+`docs/plans/2026-08-15-hermes-update-001-compatibility-matrix.md`. The
+inventory does not fetch, merge, reset, create a worktree, read `.hermes`, or
+contact DGX.
+
 ## Concrete rollback gate (plan only)
 
 Before any separately authorized restart, capture the effective unit/drop-ins,
@@ -135,7 +142,8 @@ and protected-state boundary. No rollback action is executed by this ticket.
 - [ ] Dirty checkout and `~/.hermes` state protected by metadata/backup
   evidence without exposing secrets.
 - [ ] Upstream/private compatibility matrix covers all protected behaviors.
-- [ ] Candidate update strategy and rollback plan are explicitly selected.
+- [x] Candidate update strategy and rollback plan are explicitly selected;
+  current strategy is `RETAIN_PRIVATE_RELEASE` until the matrix passes.
 - [ ] Tests and CI pass for the selected strategy.
 - [x] Exactly one authenticated Claude and one authenticated AGY independently
   review the same packet and reach `PASS` consensus.
@@ -170,11 +178,12 @@ exit status, and final verdict. The final consensus pair must be DGX host
 
 ## Current status
 
-`READY_FOR_IMPLEMENTATION_REVIEW_PASS`: upstream and private fork are not a
-fast-forward update; the DGX runtime identity is resolved, and the final
-same-packet authenticated Claude/AGY review reached consensus `PASS`. This is
-the plan/review gate only: implementation, merge, deployment, restart, runtime
-health, and Telegram delivery remain separately authorized gates.
+`IMPLEMENTATION_IN_PROGRESS_REVIEW_REQUIRED`: upstream and private fork are
+not a fast-forward update. The source-side inventory and matrix are added, but
+the matrix rows are still `NOT_RUN`; focused fallback tests pass, while the
+canonical test runner lacks a repo or shared Hermes virtualenv. The final
+Claude/AGY plan review remains `PASS`, but merge, deployment, restart, runtime
+health, and Telegram delivery remain separate gates.
 
 ## Review evidence
 
@@ -222,3 +231,16 @@ health, and Telegram delivery remain separately authorized gates.
 - Both final reviewers inspected the identical packet SHA256 above;
   independent review consensus is `PASS`. No implementation, merge,
   deployment, restart, or DGX mutation was performed by this ticket.
+- Source-side implementation started after separate user authorization:
+  `scripts/update_candidate.py` reports the two refs, merge base, symmetric
+  commit counts, changed-file count, and path categories without touching
+  runtime state. The current inventory is 119 private-only commits, 7,420
+  upstream-only commits, and 7,024 changed paths.
+- The compatibility matrix is recorded in
+  `docs/plans/2026-08-15-hermes-update-001-compatibility-matrix.md`; all
+  behavior rows remain `NOT_RUN`, so the candidate decision remains
+  `RETAIN_PRIVATE_RELEASE`.
+- Focused fallback validation: `py -m pytest -q
+  tests/scripts/test_update_candidate.py` -> `2 passed`. The canonical
+  `scripts/run_tests.sh` could not run because no repo `.venv`/`venv` or shared
+  Hermes test venv is present; this is not claimed as CI-parity evidence.

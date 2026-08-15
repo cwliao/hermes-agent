@@ -111,13 +111,21 @@ the existing fail-closed safety boundaries.
    max-retry escalation, and inbound/outbound health separation without real
    Telegram calls or credentials. Existing regression tests are identified as
    baseline or explicitly extended; neither is treated as deployed-path proof.
-5. Relevant GitHub CI checks pass, and exactly one authenticated Claude
-   reviewer plus exactly one authenticated AGY reviewer independently review
-   the same packet/correction set and return a traceable final `PASS`. AGY
-   means the Antigravity CLI at `/home/cwliao/.local/bin/agy`, running in a
-   uniquely addressable authenticated DGX session; the binary, authenticated
-   config/session, packet hash, and final verdict must be recorded. Claude and
-   AGY each use no implementation tools, and their findings are reconciled
+5. Relevant GitHub CI checks pass, and exactly two independent authenticated
+   CLI-agent review sessions independently review the same packet/correction
+   set and return a traceable final `PASS`: one Claude session using the
+   Claude Code remote binary at `/home/cwliao/.claude/remote/ccd-cli/2.1.229`,
+   and one AGY session using the Antigravity CLI at
+   `/home/cwliao/.local/bin/agy`. “Reviewer” here means the independently
+   invoked authenticated agent session, not an additional human or an
+   unverified process. Qualification requires a real response from the
+   named binary in the named host/OS session, with authentication/config
+   presence verified without exposing credentials. Record only host, cwd,
+   binary/version, non-secret auth/session preflight result, packet hash,
+   bounded command mode, final output, and verdict. The packet-only review
+   may not invoke tools or inspect other files; “no implementation tools”
+   specifically excludes edit/write/patch, test or lint execution, deploy,
+   restart, credential access, and network mutation. Findings are reconciled
    before implementation or deployment.
 6. A deployment/rollback checklist is present before implementation approval,
    covering immutable release identity, effective `systemctl --user` unit,
@@ -126,6 +134,13 @@ the existing fail-closed safety boundaries.
    Telegram verification, outbound verification, and rollback remain
    separately authorized and recorded. A green unit/CI result is not live
    health evidence.
+
+7. Gate order is explicit: dual reviewer `PASS` on this plan permits
+   implementation to begin; implementation then requires the pre-
+   implementation test audit, focused hermetic tests, and relevant CI; only
+   after those evidence gates and a separate deployment authorization may the
+   deployment/rollback checklist be executed or live Telegram evidence be
+   collected. No implementation or live action is implied by reviewer `PASS`.
 
 ## Review questions
 
@@ -154,7 +169,7 @@ the existing fail-closed safety boundaries.
 
 ## Re-review correction set
 
-The first two independent review rounds identified clarifications rather than
+The independent review rounds identified clarifications rather than
 an implementation defect. The plan now explicitly defines empty successful
 poll responses as valid low-traffic progress, requires bounded jittered
 backoff, separates baseline tests from new contract tests, names

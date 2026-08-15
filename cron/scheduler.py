@@ -2070,7 +2070,14 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     scripts_dir_resolved = scripts_dir.resolve()
 
-    raw = Path(script_path).expanduser()
+    # Reject invalid script paths before any Path/resolve call so cron
+    # execution fails closed without raising on embedded NUL or bad HOME.
+    if "\x00" in script_path:
+        return False, f"Blocked: script path contains a NUL byte: {script_path!r}"
+    try:
+        raw = Path(script_path).expanduser()
+    except (ValueError, RuntimeError, OSError):
+        return False, f"Blocked: script path is not a valid filesystem path: {script_path!r}"
     if raw.is_absolute():
         path = raw.resolve()
     else:

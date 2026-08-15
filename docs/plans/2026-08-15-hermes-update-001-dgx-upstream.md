@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001: safely update DGX Spark from upstream"
-status: IMPLEMENTATION_IN_PROGRESS_REVIEW_REQUIRED
+status: IMPLEMENTATION_REVIEW_PASS_MATRIX_INCOMPLETE
 date: 2026-08-15
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -229,8 +229,8 @@ health, and Telegram delivery remain separate gates.
   binary `/home/cwliao/.claude/remote/ccd-cli/2.1.229`, version `2.1.229`,
   packet-only mode with disallowed tools, exit `0`, final verdict `PASS`.
 - Both final reviewers inspected the identical packet SHA256 above;
-  independent review consensus is `PASS`. No implementation, merge,
-  deployment, restart, or DGX mutation was performed by this ticket.
+  independent review consensus is `PASS`. No merge, deployment, restart, or
+  DGX mutation was performed by this ticket.
 - Source-side implementation started after separate user authorization:
   `scripts/update_candidate.py` reports the two refs, merge base, symmetric
   commit counts, changed-file count, and path categories without touching
@@ -244,3 +244,17 @@ health, and Telegram delivery remain separate gates.
   tests/scripts/test_update_candidate.py` -> `2 passed`. The canonical
   `scripts/run_tests.sh` could not run because no repo `.venv`/`venv` or shared
   Hermes test venv is present; this is not claimed as CI-parity evidence.
+- Implementation packet SHA256:
+  `601e222bff2aae4cc3f3c139b10d2e2ee4b52585e225a318611cc3ea64b11997`.
+- Post-implementation DGX AGY review: host `55-0940189-03`, user `cwliao`,
+  absolute binary `/home/cwliao/.local/bin/agy`, version `1.1.13`, packet-only
+  mode, exit `0`, final verdict `PASS`.
+- Post-implementation DGX Claude review: host `55-0940189-03`, user `cwliao`,
+  absolute binary `/home/cwliao/.claude/remote/ccd-cli/2.1.229`, version
+  `2.1.229`, packet-only mode with tools disabled/disallowed, exit `0`, final
+  verdict `PASS`.
+- Both implementation reviewers inspected the identical packet digest and
+  reached independent consensus `PASS`. Claude noted only minor optional test
+  gaps for invalid refs/non-repo input and a non-mutating-subcommand property;
+  neither is a correction request. Matrix behavior rows remain `NOT_RUN`, so
+  `RETAIN_PRIVATE_RELEASE` and all merge/deploy/runtime gates remain in force.

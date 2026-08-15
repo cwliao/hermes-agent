@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import html as _html
+import random
 import re
 import time
 from contextvars import ContextVar
@@ -358,7 +359,25 @@ _POLLING_STALL_TIMEOUT = 150.0
 # sendVideo transcodes before answering, outlasting the 20s read timeout; also how long a user waits
 # to hear the attachment failed, so kept modest.
 _MEDIA_SEND_READ_TIMEOUT = 60.0
-_POLLING_GENERATION_CONTEXT: ContextVar[Optional[int]] = ContextVar("telegram_polling_generation", default=None)
+_POLLING_GENERATION_CONTEXT: ContextVar[Optional[int]] = ContextVar(
+    "telegram_polling_generation", default=None
+)
+_POLLING_RETRY_BASE_DELAY = 5.0
+_POLLING_RETRY_MAX_DELAY = 60.0
+_POLLING_RETRY_JITTER_RATIO = 0.20
+
+
+def _polling_retry_delay(attempt: int) -> float:
+    """Return a bounded exponential reconnect delay with multiplicative jitter."""
+    exponential = min(
+        _POLLING_RETRY_BASE_DELAY * (2 ** max(attempt - 1, 0)),
+        _POLLING_RETRY_MAX_DELAY,
+    )
+    jitter = random.uniform(
+        1.0 - _POLLING_RETRY_JITTER_RATIO,
+        1.0 + _POLLING_RETRY_JITTER_RATIO,
+    )
+    return min(_POLLING_RETRY_MAX_DELAY, exponential * jitter)
 
 
 class _PollingLifecycleAbort(RuntimeError):
@@ -1916,13 +1935,11 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _handle_polling_network_error(self, error: Exception) -> None:
         """Reconnect polling after a transient network interruption (NetworkError/TimedOut).
 
-        Host connectivity loss (sleep, WiFi switch, VPN) kills the long-poll silently. Exponential back-off (5s→60s
+        Host connectivity loss (sleep, WiFi switch, VPN) kills the long-poll silently. Jittered exponential back-off (5s→60s
         cap) up to MAX_NETWORK_RETRIES, then retryable-fatal so the supervisor restarts the gateway."""
         if self._teardown_started or self.has_fatal_error:
             return
         MAX_NETWORK_RETRIES = 10
-        BASE_DELAY = 5
-        MAX_DELAY = 60
         self._polling_network_error_count += 1
         self._send_path_degraded = True
         attempt = self._polling_network_error_count
@@ -1932,9 +1949,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 "Escalating to gateway recovery." % MAX_NETWORK_RETRIES)
             await self._go_fatal_network(message, "[%s] %s Last error: %s", self.name, message, _redact_telegram_error_text(error))
             return
-        delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
+        delay = _polling_retry_delay(attempt)
         logger.warning(
-            "[%s] Telegram network error (attempt %d/%d), reconnecting in %ds. Error: %s", self.name, attempt,
+            "[%s] Telegram network error (attempt %d/%d), reconnecting in %.1fs. Error: %s", self.name, attempt,
             MAX_NETWORK_RETRIES, delay, _redact_telegram_error_text(error))
         await asyncio.sleep(delay)
         if self._teardown_started:

@@ -28,6 +28,10 @@ from hermes_cli.update_channel import (  # noqa: E402
 )
 from scripts.releases.authors import resolve_author  # noqa: E402
 
+# GitHub release publication remains here; isolated filesystem snapshots and
+# their canonical .hermes-release-sha marker are built by
+# scripts/release_snapshot.py.
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 

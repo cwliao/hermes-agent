@@ -262,7 +262,7 @@ async def test_reconnect_continues_when_polling_pool_shutdown_hangs():
     mock_app, mock_polling_req = _make_mock_app()
 
     async def hang_shutdown():
-        await asyncio.sleep(3600)
+        await asyncio.Event().wait()
 
     mock_polling_req.shutdown = hang_shutdown
     adapter._app = mock_app

@@ -2072,7 +2072,7 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
 
     # Reject invalid script paths before any Path/resolve call so cron
     # execution fails closed without raising on embedded NUL or bad HOME.
-    if "\x00" in script_path:
+    if "\x00" in str(script_path):
         return False, f"Blocked: script path contains a NUL byte: {script_path!r}"
     try:
         raw = Path(script_path).expanduser()

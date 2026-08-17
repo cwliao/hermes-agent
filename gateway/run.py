@@ -23864,6 +23864,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     metadata.setdefault("user_id", str(user_id))
         return metadata
 
+    def _thread_metadata_for_event(
+        self,
+        event: MessageEvent,
+        reply_to_message_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Build reply metadata while preserving event-scoped audit data."""
+        metadata = self._thread_metadata_for_source(
+            event.source,
+            reply_to_message_id,
+        )
+        event_metadata = getattr(event, "metadata", None)
+        correlation_id = (
+            event_metadata.get("telegram_delivery_correlation_id")
+            if isinstance(event_metadata, dict)
+            else None
+        )
+        if correlation_id:
+            metadata = dict(metadata) if metadata else {}
+            metadata["telegram_delivery_correlation_id"] = str(correlation_id)
+            correlation_ids = event_metadata.get("telegram_delivery_correlation_ids")
+            if isinstance(correlation_ids, (list, tuple)):
+                metadata["telegram_delivery_correlation_ids"] = [
+                    str(value) for value in correlation_ids if value
+                ]
+        return metadata
+
     def _thread_metadata_for_target(
         self,
         platform: Optional[Platform],
@@ -29510,17 +29536,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             and not source.thread_id
             else None
         )
-        _progress_metadata = (
-            self._thread_metadata_for_source(source, event_message_id)
-            if _progress_thread_id == source.thread_id
-            else self._thread_metadata_for_target(
-                source.platform,
-                source.chat_id,
-                _progress_thread_id,
-                chat_type=getattr(source, "chat_type", None),
-                reply_to_message_id=event_message_id,
+        _progress_metadata = None
+        if _progress_thread_id:
+            _progress_metadata = self._thread_metadata_for_event(
+                event,
+                event_message_id,
             )
-        ) if _progress_thread_id else None
+            if _progress_thread_id != source.thread_id:
+                _progress_metadata = dict(_progress_metadata or {})
+                _progress_metadata["thread_id"] = _progress_thread_id
         if _progress_metadata is None and _relay_prospective_thread_id:
             # No real thread yet, but the connector will auto-thread on the
             # reply anchor; carry it so progress joins that thread.
@@ -29653,23 +29677,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             }
         else:
             _status_thread_metadata = (
-                self._thread_metadata_for_source(source, event_message_id)
-                if _progress_thread_id == source.thread_id
-                else self._thread_metadata_for_target(
-                    source.platform,
-                    source.chat_id,
-                    _progress_thread_id,
-                    chat_type=getattr(source, "chat_type", None),
-                    reply_to_message_id=event_message_id,
-                )
-            ) if _progress_thread_id else None
-            if _status_thread_metadata is None and _relay_prospective_thread_id:
-                # Relay Discord auto-thread lane (see _progress_metadata above):
-                # carry the reply anchor so status/interim bubbles route into
-                # the same connector-created thread as the final reply.
-                _status_thread_metadata = {
-                    "reply_to_message_id": event_message_id
-                }
+                self._thread_metadata_for_event(event, event_message_id)
+                if _progress_thread_id
+                else None
+            )
+        if _status_thread_metadata is None and _relay_prospective_thread_id:
+            # Relay Discord auto-thread lane (see _progress_metadata above):
+            # carry the reply anchor so status/interim bubbles route into
+            # the same connector-created thread as the final reply.
+            _status_thread_metadata = {
+                "reply_to_message_id": event_message_id
+            }
 
         # Bridge extracted to TurnRunner._status_callback_sync; publish the
         # status wiring computed above onto the shared TurnContext at the

@@ -1,6 +1,6 @@
 ---
 title: "HERMES-UPDATE-001 upstream refresh: selective security and feature port"
-status: PORT_SELECTION_REVIEW_PASS
+status: IMPLEMENTATION_REVIEW_BLOCKED
 date: 2026-08-17
 type: operations/reliability
 ticket: HERMES-UPDATE-001
@@ -51,12 +51,12 @@ isolated candidate worktree:
 
 ### P1 — user-visible Telegram and gateway behavior
 
-- Keep `/loop` and synthetic sends in the active Telegram DM topic:
-  `25fabcf8eb`.
+- Keep supported Telegram synthetic sends in the active DM topic:
+  `25fabcf8eb`; the absent `/loop` base feature is not ported by this ticket.
 - Enforce `group_allowed_chats` during early auth under multiplex profiles:
   `9ca11399c0`.
-- Preserve streamed/already-sent response delivery and loop ticks:
-  `fccf2b718e`, `2f6bbfbcbc`.
+- Preserve applicable streamed/already-sent response handling:
+  `2f6bbfbcbc`; the dependent `/loop` tick patch `fccf2b718e` was excluded.
 - Isolate post-turn gateway failures and surface the response path:
   `9219cd3944`, `b7936c892d`.
 - Reconcile routed profile model configuration and persisted model routes:
@@ -237,3 +237,30 @@ collision at plan scope.
   or message-content access occurred.
 
 Current decision: **UPDATE THE PORT PLAN; RETAIN THE CURRENT DGX RELEASE.**
+
+## Implementation evidence and review status
+
+- Isolated implementation head: `3ecbc6329` on
+  `ticket/hermes-update-001-dgx-upstream`; no push, merge, deploy, restart, or
+  DGX mutation was performed.
+- The upstream streamed `/loop` patch was found to depend on absent base commit
+  `f79440e0f` (`hermes_cli/loops.py` and its cross-surface feature set). It was
+  reverted by `4e4a9d646`; the unsupported `/loop` test file was removed, and a
+  static impact check found no remaining `LoopManager`/`hermes_cli.loops`
+  references in retained implementation or tests. Private `/goal` remains.
+- Applicable canonical focused suite on the Windows shim: `128/128 PASS`
+  across terminal hints, verification evidence, Telegram auth, and Telegram
+  reply mode. The cron suite reached 44 passing tests before a Windows-only
+  `C:\...` path tokenization failure; this is not Linux/DGX evidence.
+- WSL target-Linux setup is `BLOCKED`: available Python is `3.14.4`, while the
+  package requires `>=3.11,<3.14`. No Linux cron result is claimed.
+- DGX Claude implementation review: `BLOCKED`; the reviewer would not attest
+  to implementation correctness from metadata-only evidence without an
+  inspectable diff.
+- WSL AGY re-review of the same updated packet: `BLOCKED`; requested supported
+  Linux test evidence, CI, impact analysis, and later DGX runtime/delivery
+  evidence remain unavailable.
+
+Current implementation decision: **BLOCKED pending supported-Linux test/CI
+evidence and the separate DGX runtime/delivery gates.** Do not merge, deploy,
+or modify DGX until these gates are separately authorized and pass.

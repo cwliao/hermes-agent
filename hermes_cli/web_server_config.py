@@ -168,6 +168,9 @@ _CATEGORY_MERGE: Dict[str, str] = {
     "privacy": "security",
     "context": "agent",
     "skills": "agent",
+    # Relay exposes one disabled-by-default egress control; keep it with
+    # security settings instead of creating a one-field dashboard tab.
+    "relay": "security",
     "cron": "agent",
     "network": "agent",
     "models_dev": "agent",

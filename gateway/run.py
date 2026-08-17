@@ -4063,6 +4063,21 @@ class GatewayRunner(
             metadata["hermes_profile"] = profile
         return metadata
 
+    def _thread_metadata_for_event(
+        self, event: MessageEvent, reply_to_message_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Build reply metadata while preserving event-scoped audit data."""
+        metadata = self._thread_metadata_for_source(event.source, reply_to_message_id)
+        event_metadata = getattr(event, "metadata", None)
+        correlation_id = event_metadata.get("telegram_delivery_correlation_id") if isinstance(event_metadata, dict) else None
+        if correlation_id:
+            metadata = dict(metadata) if metadata else {}
+            metadata["telegram_delivery_correlation_id"] = str(correlation_id)
+            correlation_ids = event_metadata.get("telegram_delivery_correlation_ids")
+            if isinstance(correlation_ids, (list, tuple)):
+                metadata["telegram_delivery_correlation_ids"] = [str(value) for value in correlation_ids if value]
+        return metadata
+
     def _thread_metadata_for_target(
         self, platform: Optional[Platform], chat_id: Optional[str], thread_id: Optional[str], *,
         chat_type: Optional[str] = None, reply_to_message_id: Optional[str] = None,

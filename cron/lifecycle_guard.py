@@ -109,6 +109,31 @@ _MAX_REFERENCED_SCRIPT_BYTES = 1024 * 1024
 _MAX_REFERENCED_SCRIPT_DEPTH = 8
 _CONTROL_CHARS = frozenset(";&|()")
 
+# Directory names that sit directly under a `Library` path component and
+# mark a FileProvider-backed subtree: `Mobile Documents` is iCloud Drive;
+# `CloudStorage` hosts every third-party FileProvider domain (Dropbox,
+# OneDrive, Google Drive, Box, ...) on modern macOS.
+_CLOUD_PLACEHOLDER_MARKERS = frozenset({"Mobile Documents", "CloudStorage"})
+
+
+def _is_cloud_placeholder_path(path: Path) -> bool:
+    """Return True for paths inside a macOS FileProvider-backed subtree.
+
+    ``O_NONBLOCK`` does not make regular-file reads non-blocking.  Opening an
+    evicted FileProvider placeholder below ``~/Library/Mobile Documents``
+    (iCloud Drive) or ``~/Library/CloudStorage`` (Dropbox / OneDrive /
+    Google Drive and other third-party providers) can therefore wait
+    indefinitely for hydration.  The lifecycle guard runs before a terminal
+    command's timeout starts, so it must identify this boundary from path
+    metadata and fail closed without opening the file.
+    """
+    parts = path.parts
+    return any(
+        parts[index - 1] == "Library" and part in _CLOUD_PLACEHOLDER_MARKERS
+        for index, part in enumerate(parts)
+        if index
+    )
+
 # Executables whose arguments are DATA, not commands: search patterns, SQL
 # statements, log filters. None of these can execute their argument text, so
 # a lifecycle-shaped string inside their arguments (a grep pattern hunting
@@ -426,7 +451,28 @@ def _resolve_script_directory(script_path: str) -> Optional[str]:
 
 
 def _read_referenced_script(path: Path) -> tuple[Optional[str], bool]:
-    """Return ``(text, unsafe)`` using bounded, regular-file-only reads."""
+    """Return ``(text, unsafe)`` using bounded, regular-file-only reads.
+
+    This is the shared choke point for every local script read the guard
+    performs (the terminal walk in ``_contains_unsafe_gateway_action`` AND
+    the cron-script scan in ``_read_script_for_scanning``), so the
+    cloud-placeholder refusal lives here: a FileProvider path must never be
+    opened — not even to discover whether the file is hydrated — because an
+    evicted placeholder's ``open()`` can hang preflight indefinitely
+    (#88052). The lexical check covers direct cloud paths; the resolved
+    check covers local launchers that are symlinks into a cloud subtree.
+    """
+    if _is_cloud_placeholder_path(path):
+        return None, True
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, ValueError):
+        # OSError: unreadable/long paths. ValueError: embedded NUL byte
+        # from a binary's decoded contents tokenized as a path — a
+        # guarded path must never crash the guard (#76762).
+        resolved = path
+    if _is_cloud_placeholder_path(resolved):
+        return None, True
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)
@@ -532,6 +578,14 @@ def _contains_unsafe_gateway_action(
             return True
 
     for script_path in _iter_referenced_shell_scripts(command, cwd=cwd):
+        # Do not touch a FileProvider path even to discover whether the file
+        # is hydrated. The lexical check covers direct cloud paths; the
+        # resolved check below covers local launchers that are symlinks into
+        # a cloud subtree. _read_referenced_script repeats both checks as the
+        # shared choke point, so every caller stays covered even if this
+        # walk-level short-circuit is bypassed.
+        if _is_cloud_placeholder_path(script_path):
+            return True
         try:
             resolved = script_path.resolve(strict=False)
         except (OSError, ValueError):
@@ -539,6 +593,8 @@ def _contains_unsafe_gateway_action(
             # from a binary's decoded contents tokenized as a path — a
             # guarded path must never crash the guard (#76762).
             resolved = script_path
+        if _is_cloud_placeholder_path(resolved):
+            return True
         if resolved in visited:
             continue
         visited.add(resolved)

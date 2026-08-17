@@ -594,8 +594,13 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
     def _log_inbound_accepted(self, event: MessageEvent) -> None:
-        self._log_delivery_audit(phase="inbound", status="accepted", metadata=event.metadata,
-                                 update_id=event.platform_update_id)
+        """Record that an authorized, processable Telegram event was accepted."""
+        self._log_delivery_audit(
+            phase="inbound",
+            status="accepted",
+            metadata=getattr(event, "metadata", None),
+            update_id=getattr(event, "platform_update_id", None),
+        )
 
     def _audit_send_result(self, result: SendResult, metadata: Optional[Dict[str, Any]]) -> SendResult:
         self._log_delivery_audit(

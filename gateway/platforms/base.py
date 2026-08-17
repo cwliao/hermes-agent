@@ -127,9 +127,18 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     return metadata
 
 
-def _thread_metadata_for_event(event) -> dict | None:
-    """``_thread_metadata_for_source`` for an event, anchored on its reply id."""
-    return _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
+def _thread_metadata_for_event(event, reply_to_message_id: str | None = None) -> dict | None:
+    """Build outbound metadata while preserving per-event observability data."""
+    metadata = _thread_metadata_for_source(event.source, reply_to_message_id or _reply_anchor_for_event(event))
+    event_metadata = getattr(event, "metadata", None)
+    correlation_id = event_metadata.get("telegram_delivery_correlation_id") if isinstance(event_metadata, dict) else None
+    if correlation_id:
+        metadata = dict(metadata) if metadata else {}
+        metadata["telegram_delivery_correlation_id"] = str(correlation_id)
+        correlation_ids = event_metadata.get("telegram_delivery_correlation_ids")
+        if isinstance(correlation_ids, (list, tuple)):
+            metadata["telegram_delivery_correlation_ids"] = [str(value) for value in correlation_ids if value]
+    return metadata
 
 
 def _mark_notify_metadata(metadata: dict | None) -> dict:

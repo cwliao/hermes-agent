@@ -11,12 +11,16 @@ import html as _html
 import random
 import re
 import time
+import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set
 from hermes_cli import setup_platforms
 
 logger = logging.getLogger(__name__)
+
+_DELIVERY_CORRELATION_KEY = "telegram_delivery_correlation_id"
+_DELIVERY_CORRELATION_IDS_KEY = "telegram_delivery_correlation_ids"
 
 from agent.deadline import run_bounded_async
 
@@ -554,6 +558,57 @@ class TelegramAdapter(BasePlatformAdapter):
         # Last truncated mid-stream preview per (chat_id, message_id): past the 4096 cap every edit
         # truncates to the SAME text, and resending burns flood budget. Dropped on finalize.
         self._last_overflow_preview: Dict[tuple, str] = {}
+
+    @staticmethod
+    def _delivery_correlation_ids(metadata: Optional[Dict[str, Any]]) -> List[str]:
+        """Return unique opaque correlation ids carried by an event or batch."""
+        if not isinstance(metadata, dict):
+            return []
+        values = metadata.get(_DELIVERY_CORRELATION_IDS_KEY, [])
+        if isinstance(values, str):
+            values = [values]
+        ids = [str(value) for value in values if value]
+        value = metadata.get(_DELIVERY_CORRELATION_KEY)
+        if value:
+            ids.insert(0, str(value))
+        return list(dict.fromkeys(ids))
+
+    def _merge_delivery_correlation_metadata(self, target: MessageEvent, source: MessageEvent) -> None:
+        ids = self._delivery_correlation_ids(target.metadata)
+        ids.extend(value for value in self._delivery_correlation_ids(source.metadata) if value not in ids)
+        if ids:
+            metadata = dict(target.metadata)
+            metadata[_DELIVERY_CORRELATION_KEY] = ids[0]
+            if len(ids) > 1:
+                metadata[_DELIVERY_CORRELATION_IDS_KEY] = ids
+            target.metadata = metadata
+
+    def _log_delivery_audit(self, *, phase: str, status: str, metadata: Optional[Dict[str, Any]] = None,
+                            update_id: Optional[int] = None, message_id: Optional[str] = None,
+                            error_kind: Optional[str] = None) -> None:
+        for correlation_id in self._delivery_correlation_ids(metadata):
+            logger.info(
+                "[Telegram] delivery_audit phase=%s status=%s correlation_id=%s update_id=%s message_id=%s error_kind=%s",
+                phase, status, correlation_id, update_id if update_id is not None else "-",
+                str(message_id)[:64] if message_id is not None else "-", error_kind or "-",
+            )
+
+    def _log_inbound_accepted(self, event: MessageEvent) -> None:
+        self._log_delivery_audit(phase="inbound", status="accepted", metadata=event.metadata,
+                                 update_id=event.platform_update_id)
+
+    def _audit_send_result(self, result: SendResult, metadata: Optional[Dict[str, Any]]) -> SendResult:
+        self._log_delivery_audit(
+            phase="outbound", status="delivered" if result.success else "failed", metadata=metadata,
+            message_id=result.message_id, error_kind=result.error_kind,
+        )
+        return result
+
+    def _audit_media_response(self, response: Any, metadata: Optional[Dict[str, Any]]) -> None:
+        messages = response if isinstance(response, (list, tuple)) else [response]
+        ids = [str(getattr(message, "message_id")) for message in messages if getattr(message, "message_id", None) is not None]
+        self._log_delivery_audit(phase="outbound", status="delivered", metadata=metadata,
+                                 message_id=ids[-1] if ids else None)
 
     @property
     def send_path_degraded(self) -> bool:
@@ -3403,18 +3458,18 @@ class TelegramAdapter(BasePlatformAdapter):
             if live is not None:
                 return await live.send(chat_id, content, reply_to, metadata, reply_markup=reply_markup)
             if self._is_permanent_fatal() or not await self._wait_for_reconnection():
-                return SendResult(success=False, error="Not connected", retryable=not self._is_permanent_fatal())
+                return self._audit_send_result(SendResult(success=False, error="Not connected", retryable=not self._is_permanent_fatal()), metadata)
             live = self._replacement_telegram_adapter()
             if not self._bot and live is not None:
                 return await live.send(chat_id, content, reply_to, metadata, reply_markup=reply_markup)
             if not self._bot:
-                return SendResult(success=False, error="Not connected", retryable=True)
+                return self._audit_send_result(SendResult(success=False, error="Not connected", retryable=True), metadata)
         # getattr() — tests build adapters via object.__new__() (no __init__).
         if getattr(self, "_send_path_degraded", False):
-            return SendResult(success=False, error="send_path_degraded", retryable=True)
+            return self._audit_send_result(SendResult(success=False, error="send_path_degraded", retryable=True), metadata)
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
-            return SendResult(success=True, message_id=None)
+            return self._audit_send_result(SendResult(success=True, message_id=None), metadata)
         error_types = self._telegram_error_types()
         try:
             # Bot API 10.1 rich fast-path; falls through to legacy MarkdownV2 on permanent/capability
@@ -3424,7 +3479,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 if rich_result is not None:
                     if rich_result.success:
                         await self._retrigger_typing(chat_id, metadata)
-                    return rich_result
+                    return self._audit_send_result(rich_result, metadata)
             chunks = self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
             if len(chunks) > 1:
                 # truncate_message appends a raw " (1/2)" suffix; escape the MarkdownV2-special parentheses.
@@ -3445,10 +3500,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 msg, used_thread_fallback = outcome
                 message_ids.append(str(msg.message_id))
             await self._retrigger_typing(chat_id, metadata)
-            return SendResult(
+            return self._audit_send_result(SendResult(
                 success=True, message_id=message_ids[0] if message_ids else None,
                 raw_response={
-                    "message_ids": message_ids, "requested_thread_id": requested_thread_id, "thread_fallback": used_thread_fallback})
+                    "message_ids": message_ids, "requested_thread_id": requested_thread_id, "thread_fallback": used_thread_fallback}), metadata)
         except Exception as e:
             safe_error = _redact_telegram_error_text(e)
             logger.error("[%s] Failed to send Telegram message: %s", self.name, safe_error)
@@ -3457,15 +3512,15 @@ class TelegramAdapter(BasePlatformAdapter):
             # Content exceeded 4096 chars: fail so the stream consumer enters fallback mode.
             if "message_too_long" in err_str or "too long" in err_str:
                 logger.debug("[%s] send() content too long, falling back to new-message continuation", self.name)
-                return SendResult(success=False, error="message_too_long", error_kind="too_long")
+                return self._audit_send_result(SendResult(success=False, error="message_too_long", error_kind="too_long"), metadata)
             # TimedOut may have reached Telegram — non-retryable so _send_with_retry() doesn't re-send,
             # except a wrapped ConnectTimeout or an httpx pool timeout (safe to re-send).
             _to = error_types[2]
             is_timeout = (_to and isinstance(e, _to)) or "timed out" in err_str
-            return SendResult(
+            return self._audit_send_result(SendResult(
                 success=False, error=safe_error,
                 retryable=(self._looks_like_connect_timeout(e) or self._looks_like_pool_timeout(e) or not is_timeout),
-                error_kind=error_kind)
+                error_kind=error_kind), metadata)
 
     async def send_or_update_status(
         self, chat_id: str, status_key: str, content: str, *, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
@@ -3510,6 +3565,15 @@ class TelegramAdapter(BasePlatformAdapter):
         return False
 
     async def edit_message(
+        self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        result = await self._edit_message_impl(
+            chat_id, message_id, content, finalize=finalize, metadata=metadata,
+        )
+        return self._audit_send_result(result, metadata)
+
+    async def _edit_message_impl(
         self, chat_id: str, message_id: str, content: str, *, finalize: bool = False, metadata: Optional[Dict[str, Any]] = None,
    ) -> SendResult:
         """Edit a previously sent Telegram message.
@@ -4683,7 +4747,7 @@ class TelegramAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
         """Send audio as a native Telegram voice message or audio file."""
         if not self._bot:
-            return SendResult(success=False, error="Not connected")
+            return self._audit_send_result(SendResult(success=False, error="Not connected"), metadata)
         _transcoded_voice_path: Optional[str] = None
         try:
             if not os.path.exists(audio_path):
@@ -4712,7 +4776,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 else:  # formats Telegram can't play natively (.wav, .flac, ...)
                     return await self.send_document(
                         chat_id=chat_id, file_path=audio_path, caption=caption, reply_to=reply_to, metadata=metadata)
-            return SendResult(success=True, message_id=str(msg.message_id))
+            return self._audit_send_result(SendResult(success=True, message_id=str(msg.message_id)), metadata)
         except Exception as e:
             logger.error(
                 "[%s] Failed to send Telegram voice/audio, falling back to base adapter: %s", self.name,
@@ -4771,9 +4835,10 @@ class TelegramAdapter(BasePlatformAdapter):
                         with contextlib.suppress(Exception):
                             fh.seek(0)
 
-                await self._send_with_dm_topic_reply_anchor_retry(
+                media_response = await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_media_group, {**send_kwargs, "media": media}, metadata, reply_to_id,
                     "media group", reset_media=_reset_opened_files)
+                self._audit_media_response(media_response, metadata)
             except Exception as e:
                 logger.warning(
                     "[%s] send_media_group failed (chunk %d/%d), falling back to per-image: %s", self.name,
@@ -4817,15 +4882,15 @@ class TelegramAdapter(BasePlatformAdapter):
         """Shared shell for native local-file sends: existence check, open, send with routing, then
         ``await on_error(exc)`` on any failure. ``build_kwargs(f)`` supplies the media kwargs."""
         if not self._bot:
-            return SendResult(success=False, error="Not connected")
+            return self._audit_send_result(SendResult(success=False, error="Not connected"), metadata)
         try:
             if not os.path.exists(path):
-                return SendResult(success=False, error=self._missing_media_path_error(label, path))
+                return self._audit_send_result(SendResult(success=False, error=self._missing_media_path_error(label, path)), metadata)
             with open(path, "rb") as f:
                 msg = await self._send_media(
                     getattr(self._bot, f"send_{media_key}"), chat_id, reply_to, metadata, media_key,
                     reset_media=lambda: f.seek(0), **build_kwargs(f))
-            return SendResult(success=True, message_id=str(msg.message_id))
+            return self._audit_send_result(SendResult(success=True, message_id=str(msg.message_id)), metadata)
         except Exception as e:
             return await on_error(e)
 
@@ -4861,7 +4926,7 @@ class TelegramAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Send a URL image as a Telegram photo: URL send (<5MB) → download+upload (≤10MB) → base text."""
         if not self._bot:
-            return SendResult(success=False, error="Not connected")
+            return self._audit_send_result(SendResult(success=False, error="Not connected"), metadata)
         from tools.url_safety import is_safe_url
         if not is_safe_url(image_url):
             logger.warning("[%s] Blocked unsafe image URL (SSRF protection)", self.name)
@@ -4870,7 +4935,7 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             msg = await self._send_media(
                 self._bot.send_photo, chat_id, reply_to, metadata, "URL photo", photo=image_url, caption=photo_caption)
-            return SendResult(success=True, message_id=str(msg.message_id))
+            return self._audit_send_result(SendResult(success=True, message_id=str(msg.message_id)), metadata)
         except Exception as e:
             logger.warning(
                 "[%s] URL-based send_photo failed, trying file upload: %s", self.name, _redact_telegram_error_text(e), exc_info=True)
@@ -4883,7 +4948,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     image_data = resp.content
                 msg = await self._send_media(
                     self._bot.send_photo, chat_id, reply_to, metadata, "uploaded photo", photo=image_data, caption=photo_caption)
-                return SendResult(success=True, message_id=str(msg.message_id))
+                return self._audit_send_result(SendResult(success=True, message_id=str(msg.message_id)), metadata)
             except Exception as e2:
                 logger.error("[%s] File upload send_photo also failed: %s", self.name, e2, exc_info=True)
                 return await super().send_image(chat_id, image_url, caption, reply_to, metadata=metadata)
@@ -4893,12 +4958,12 @@ class TelegramAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Send an animated GIF natively as a Telegram animation (auto-plays inline)."""
         if not self._bot:
-            return SendResult(success=False, error="Not connected")
+            return self._audit_send_result(SendResult(success=False, error="Not connected"), metadata)
         try:
             msg = await self._send_media(
                 self._bot.send_animation, chat_id, reply_to, metadata, "animation", animation=animation_url,
                 caption=self._caption_1024(caption))
-            return SendResult(success=True, message_id=str(msg.message_id))
+            return self._audit_send_result(SendResult(success=True, message_id=str(msg.message_id)), metadata)
         except Exception as e:
             logger.error(
                 "[%s] Failed to send Telegram animation, falling back to photo: %s", self.name,
@@ -5915,6 +5980,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         existing.media_urls.extend(event.media_urls)
         existing.media_types.extend(event.media_types)
+        self._merge_delivery_correlation_metadata(existing, event)
         if event.text:
             existing.text = self._merge_caption(existing.text, event.text)
 
@@ -6393,12 +6459,16 @@ class TelegramAdapter(BasePlatformAdapter):
         reply_to_id, reply_to_text = self._reply_context(message)
         from gateway.platforms.base import resolve_channel_prompt  # per-channel/topic ephemeral prompt
         _chat_id_str = str(chat.id)
-        return MessageEvent(
+        event = MessageEvent(
             text=message.text or "", message_type=msg_type, source=source, raw_message=message,
             message_id=str(message.message_id), platform_update_id=update_id,
             reply_to_message_id=reply_to_id, reply_to_text=reply_to_text, auto_skill=topic_skill,
             channel_prompt=resolve_channel_prompt(self.config.extra, thread_id_str or _chat_id_str, _chat_id_str if thread_id_str else None),
-            timestamp=message.date)
+            timestamp=message.date,
+            metadata={_DELIVERY_CORRELATION_KEY: uuid.uuid4().hex[:16]},
+        )
+        self._log_inbound_accepted(event)
+        return event
 
     # -- Message reactions (processing lifecycle) --
 

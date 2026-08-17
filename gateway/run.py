@@ -29560,7 +29560,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             else None
         )
         _progress_metadata = None
-        if _progress_thread_id:
+        if _progress_thread_id or event_metadata:
             _progress_metadata = self._thread_metadata_for_event_data(
                 source,
                 event_metadata,
@@ -29706,7 +29706,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event_metadata,
                     event_message_id,
                 )
-                if _progress_thread_id
+                if (_progress_thread_id or event_metadata)
                 else None
             )
         if _status_thread_metadata is None and _relay_prospective_thread_id:

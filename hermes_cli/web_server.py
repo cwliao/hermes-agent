@@ -1232,6 +1232,9 @@ _CATEGORY_MERGE: Dict[str, str] = {
     # `session.terminal_continue` is the only schema-surfaced session field —
     # fold it into general rather than spawning a one-field orphan category.
     "session": "general",
+    # Relay exposes one disabled-by-default egress control; keep it with
+    # security settings instead of creating a one-field dashboard tab.
+    "relay": "security",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.

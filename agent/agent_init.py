@@ -1179,6 +1179,15 @@ def _apply_display_config(agent, _agent_cfg, platform):
             _model_section.get("streaming"),
         )
 
+    _relay_cfg = _agent_cfg.get("relay", {}) if isinstance(_agent_cfg, dict) else {}
+    _relay_tool_cfg = _relay_cfg.get("tool_execution", {}) if isinstance(_relay_cfg, dict) else {}
+    # Immutable per-agent snapshot. Relay remains disabled unless the
+    # explicit config.yaml gate is enabled; no behavioral env override exists.
+    agent._relay_tool_execution_enabled = bool(
+        _relay_tool_cfg.get("enabled", False)
+        if isinstance(_relay_tool_cfg, dict)
+        else False
+    )
     try:
         agent._tool_guardrails = ToolCallGuardrailController(
             ToolCallGuardrailConfig.from_mapping(

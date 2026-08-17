@@ -518,6 +518,14 @@ DEFAULT_CONFIG = {
         },
     },
 
+    # Optional Relay argument-proposal boundary. Disabled for every surface
+    # by default; Relay never becomes a model tool and never owns dispatch.
+    "relay": {
+        "tool_execution": {
+            "enabled": False,
+        },
+    },
+
     "compression": {
         "enabled": True,
         # checkpoint_required: fail closed before lossy compaction unless an active memory provider

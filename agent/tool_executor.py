@@ -693,12 +693,13 @@ def _run_agent_tool_execution_middleware(
     authorization_gate: _ConcurrentToolAuthorizationGate | None = None,
 ) -> _ManagedToolResult:
     """Run Relay rewrites before Hermes policy and dispatch exactly once."""
-    from agent import relay_tools
+    from agent import relay_egress_gate, relay_tools
     from hermes_cli.middleware import (
         apply_tool_request_middleware,
         run_tool_execution_middleware,
     )
 
+    relay_enabled = bool(getattr(agent, "_relay_tool_execution_enabled", False))
     trace = middleware_trace if middleware_trace is not None else []
     state = _ManagedToolResult(result=None, args=function_args, middleware_trace=trace, blocked=False, dispatched=False)
     dispatch_lock = threading.Lock()
@@ -731,27 +732,68 @@ def _run_agent_tool_execution_middleware(
         request_args = request_result.payload if isinstance(request_result.payload, dict) else relay_args
         trace.clear()
         trace.extend(request_result.trace)
+
+        # Fork's own fail-closed egress-revalidation boundary, layered
+        # underneath NousResearch's Relay adapter above (which already wraps
+        # this whole pipeline as its callback): re-validates the candidate
+        # args once more at "prepare" time against an allowlisted schema,
+        # then again at "dispatch" time behind a short-lived execution
+        # claim, so a stale or tampered candidate can never reach real tool
+        # execution. Pure passthrough (no-op) unless the operator opts in
+        # via config.yaml's relay.tool_execution.enabled.
+        _prepare_result, request_args = relay_egress_gate.execute(
+            function_name,
+            request_args,
+            lambda candidate: candidate,
+            session_id=getattr(agent, "session_id", "") or "",
+            task_id=effective_task_id or "",
+            tool_call_id=tool_call_id or "",
+            enabled=relay_enabled,
+            phase="prepare",
+        )
+
+        def _dispatch_with_egress_gate(next_args: dict[str, Any]) -> Any:
+            candidate_args = next_args if isinstance(next_args, dict) else request_args
+            gate_result, _validated_args = relay_egress_gate.execute(
+                function_name,
+                candidate_args,
+                _authorized_dispatch,
+                session_id=getattr(agent, "session_id", "") or "",
+                task_id=effective_task_id or "",
+                tool_call_id=tool_call_id or "",
+                enabled=relay_enabled,
+                phase="dispatch",
+                prevalidated=True,
+            )
+            return gate_result
+
         return run_tool_execution_middleware(
             function_name,
             request_args,
-            lambda next_args: _authorized_dispatch(next_args if isinstance(next_args, dict) else request_args),
+            _dispatch_with_egress_gate,
             original_args=function_args,
             **tool_hook_ids(agent, effective_task_id, tool_call_id),
         )
 
-    state.result, _relay_args = relay_tools.execute(
-        function_name,
-        function_args,
-        _hermes_pipeline,
-        session_id=str(getattr(agent, "session_id", "") or ""),
-        tool_call_id=tool_call_id or None,
-        metadata={
-            "task_id": effective_task_id or "",
-            "turn_id": getattr(agent, "_current_turn_id", "") or "",
-            "api_request_id": getattr(agent, "_current_api_request_id", "") or "",
-            "tool_call_id": tool_call_id or "",
-        },
-    )
+    try:
+        state.result, _relay_args = relay_tools.execute(
+            function_name,
+            function_args,
+            _hermes_pipeline,
+            session_id=str(getattr(agent, "session_id", "") or ""),
+            tool_call_id=tool_call_id or None,
+            metadata={
+                "task_id": effective_task_id or "",
+                "turn_id": getattr(agent, "_current_turn_id", "") or "",
+                "api_request_id": getattr(agent, "_current_api_request_id", "") or "",
+                "tool_call_id": tool_call_id or "",
+            },
+        )
+    except relay_egress_gate.RelayBlockedError as exc:
+        state.result = json.dumps(
+            {"error": f"Relay blocked: {exc.reason}"}, ensure_ascii=False
+        )
+        state.blocked = True
     return state
 
 

@@ -2465,6 +2465,7 @@ class GatewayTurnMixin:
         self, message: str, context_prompt: str, history: List[Dict[str, Any]],
         source: "SessionSource", session_id: str, session_key: str = None,
         run_generation: Optional[int] = None, event_message_id: Optional[str] = None,
+        event_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Forward the message to a remote Hermes API server instead of running a local AIAgent.
 
@@ -2521,7 +2522,11 @@ class GatewayTurnMixin:
             headers["X-Hermes-Session-Id"] = session_id
         body = {"model": "hermes-agent", "messages": api_messages, "stream": True}
 
-        _thread_metadata: Optional[Dict[str, Any]] = self._thread_metadata_for_source(source, event_message_id)
+        _thread_metadata: Optional[Dict[str, Any]] = self._thread_metadata_for_event_data(
+            source,
+            event_metadata,
+            event_message_id,
+        )
         _stream_consumer = self._proxy_stream_consumer(source, event_message_id, _thread_metadata, _run_still_current)
         stream_task = asyncio.create_task(_stream_consumer.run()) if _stream_consumer else None
 
@@ -3834,7 +3839,7 @@ class GatewayTurnMixin:
             return await self._run_agent_via_proxy(
                 message=message, context_prompt=context_prompt, history=history, source=source,
                 session_id=session_id, session_key=session_key, run_generation=run_generation,
-                event_message_id=event_message_id,
+                event_message_id=event_message_id, event_metadata=event_metadata,
             )
 
         from run_agent import AIAgent

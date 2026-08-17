@@ -770,6 +770,377 @@ DGX changes, deployment, repair, or event-sourcing. The corrected plan must
 return to the same authenticated Claude reviewer family and then to AGY on the
 identical packet.
 
+## Implementation-plan review reconciliation v34
+
+The v34 authenticated Claude Opus review returned `REVISE` with two bounded
+plan-text corrections. The corrections are incorporated above:
+
+1. A baseline without a valid current origin is consistently owned by
+   `BASELINE_INVALID`; `LEGACY_ORIGIN_MISSING` applies only when no invalid
+   baseline is present and no current-origin candidate exists.
+2. Stale-identifier or structurally invalid baselines strictly before the
+   selected replay start are ignored; at or after that start they return
+   `DIGEST_PARAMETER_MISMATCH` or `BASELINE_INVALID`. The per-baseline
+   digest code is included in structural precedence and Gate 4 bindings remain
+   explicit.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
+
+## Implementation-plan review reconciliation v35
+
+The v35 authenticated Claude Opus review returned `REVISE` with two blocking
+and two cleanup corrections. The corrections are incorporated above:
+
+1. Named maintenance-lock acquisition timeout and ordinary SQLite busy-timeout
+   exhaustion both return `LOCK_TIMEOUT`; `WRITE_ABORT` is reserved for
+   continuity, downgrade, journal, and other mutation failures.
+2. `MATERIALIZED_STATE_ASYMMETRY` is reachable only for history without a
+   materialized row; a materialized row without history is `EMPTY_HISTORY`.
+3. The duplicate materialized-column declaration and duplicate pre-start
+   baseline rule were folded into single normative locations.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
+
+## Implementation-plan review reconciliation v36
+
+The v36 authenticated Claude Opus review returned `REVISE` with one blocking
+and one cleanup correction. The corrections are incorporated above:
+
+1. Row creation uses before-counter `0`, but the trigger-produced after-counter
+   read-back at commit is normative and may exceed `1` for a multi-statement
+   create; Gate 4 covers that path.
+2. The mutation-side reason-code subset explicitly covers ordinary mutations,
+   startup transition/mode-set, and privileged maintenance write contracts.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
+
+## Implementation-plan review reconciliation v37
+
+The v37 authenticated Claude Opus review returned `PASS`, and the
+authenticated DGX Spark AGY review returned `PASS`, using the identical
+metadata-only packet:
+
+- plan commit: `d74d9499fb878864569e08051b911ef4af284a63`;
+- packet SHA-256:
+  `1745c07d94bdf0f7419e304a6bee7d7e705d0e210a36a167a90e627e6d4e5ead`.
+
+The consensus is plan-level only. It authorizes neither implementation,
+migration, tests, source edits, DGX mutation, deployment, repair, nor
+event-sourcing. Claude recorded two non-blocking implementation/editorial
+notes: treat a row marker newer than `current_generation` as `UNKNOWN`,
+and collapse the remaining compatible trigger-wording duplication during
+implementation review.
+
+## Final implementation-plan review consensus
+
+Status: `IMPLEMENTATION_PLAN_PASS`.
+Claude Opus and AGY independently passed the same correction set. The next
+gate is separate user authorization for implementation and Gate 0 preflight.
+No source, primary dirty worktree, or DGX runtime state was changed.
+
+## Implementation gate authorization and current delivery state
+
+On 2026-08-17 the user explicitly authorized implementation and the complete
+delivery sequence. The implementation was performed in an isolated checkout;
+the primary dirty worktree and DGX runtime were not modified.
+
+Current status: `MERGED_DEPLOYED`.
+
+Implementation review evidence:
+
+- authenticated AGY review: `PASS`, correction set empty;
+- fresh authenticated WSL Claude review in the isolated Hermes checkout:
+  `CLAUDE_REVIEW=PASS`, correction set empty;
+- both reviewers inspected the same nine changed source/test files and the
+  same metadata-only correction scope.
+
+Focused test evidence:
+
+- canonical `scripts/run_tests.sh` executed 24 ARCH-003 tests successfully;
+  its gateway integration file could not collect because the borrowed KLIB
+  venv lacks `yaml`; this is an environment limitation, not an assertion
+  failure;
+- the same focused paths with the complete Windows Python dependency set
+  passed `29 passed`.
+
+The delivery gates below are now complete and recorded in the project
+handover and roadmap.
+
+## Delivery evidence
+
+- commit/push: implementation commit `9b777c0b1` pushed on
+  `codex/arch-003-implementation`;
+- CI: run `31981532693` completed `success` after rerunning the unrelated
+  pre-existing stream-consumer slice;
+- merge: PR #30 merged to `main` as
+  `e8cdfd1e65191b68423afd7e12248d3c6e728e00`;
+- DGX release: immutable release
+  `/home/cwliao/.hermes/releases/v2026.8.17-hermes-arch-003-e8cdfd1e` with
+  marker matching the merge SHA;
+- rollback: prior ARCH-002 drop-in and release retained, with deployment
+  metadata under `/home/cwliao/.hermes/deploy-backups/hermes-arch-003-e8cdfd1e`;
+- runtime: `hermes-gateway.service` active/running, MainPID `1419906`,
+  `NRestarts=0`, `ExecMainStatus=0`, and effective WorkingDirectory set to
+  the ARCH-003 release;
+- cleanup: temporary staging directory removed and verified absent; primary
+  dirty worktree remained untouched.
+
+ARCH-003 is complete. The next ticket is ARCH-004, which requires its own
+ticket-design review and separate implementation authorization.
+
+## Acceptance criteria
+
+The following acceptance criteria were used for the ARCH-003 delivery gate:
+
+- every committed replay-tuple mutation emits exactly one metadata-only event;
+- journal failure cannot commit a materialized mutation;
+- the writer model, snapshot mechanism, write-lock-first/no-retry defensive
+  abort discipline, baseline/genesis schema, digest rotation behavior, rollback
+  posture, and key handling are explicit in the Gates 0-4 bodies;
+- profile/entity sequences are contiguous and race-safe;
+- legacy rows have explicit `UNKNOWN` behavior;
+- baselines are verifiable; digest rotation starts a marked post-rotation
+  genesis epoch, while all pre-rotation history remains `UNKNOWN` with no
+  in-ticket bridge or recovery path; rollback downgrade windows are detected
+  by the generation marker and remain `UNKNOWN` until the first subsequent
+  marked genesis re-originates the entity; a plain mutation cannot recover it;
+- verifier reads are snapshot-consistent and read-only;
+- `DRIFT` is never produced from incomplete or ambiguous history;
+- verifier mutation and prompt-cache/gateway isolation tests pass;
+- incremental mutation-path overhead target is at most 5 ms p95 in the focused
+  benchmark; the authoritative enforcement point is the local-preflight
+  benchmark arm, where exceeding 5 ms p95 blocks delivery and requires plan
+  revision; CI records the result but does not gate on host-noise variance;
+- journal growth is one bounded metadata row per committed replay-tuple
+  mutation, plus one row per out-of-band baseline event and one row per
+  explicitly authorized out-of-band re-originating genesis, with no automatic
+  retention job; entities beyond the replay limit remain UNKNOWN in this ticket,
+  and the 100,000-event/100 MiB per-profile threshold is a documented follow-up
+  operational review, not an in-ticket operator gate;
+- reconciliation v1 and v5-v37 items are incorporated into the normative
+  Gates 0-4 text (with v2-v4 explicitly folded into the v1/v4 text), and this
+  merged plan revision receives the same-family re-review;
+- all focused and relevant tests pass;
+- authenticated Claude + AGY implementation review reaches consensus;
+- no unrelated dirty worktree or DGX runtime state was changed.
+
+## Reconciliation changelog index
+
+- v1: writer model, snapshot mechanism, baseline/genesis fields, rotation and
+  rollback semantics, overhead/growth expectations, and direct safety tests.
+- v2-v4: folded into v1 and v4 normative Gate 0-4 text; revision commits are
+  retained in GitHub history.
+- v5: post-rotation genesis, current-sequence baseline checks, write-lock-first
+  discipline, fixed lock ordering, benchmark protocol, and WAL preconditions.
+- v6: cross-process maintenance-RW-lock granularity, immutable-open removal,
+  current-origin baseline requirement, successive-baseline conflict semantics.
+- v7: generation continuity for downgrade windows, current-epoch replay start,
+  key-check binding, lock timeout/stale-holder behavior, retry removal, and
+  distributed benchmark shape.
+- v8: durable current-generation record, explicit no-delete policy, baseline
+  generation checks, HMAC key-check parameters, and authoritative benchmark
+  wording.
+- v9: post-migration creation genesis, genesis-only generation recovery,
+  closed reason-code enumeration, fixed SQLite busy timeout, no-retry acceptance
+  wording, benchmark enforcement point, and baseline-inclusive growth accounting.
+- v10: durable writer-epoch advancement trigger, bounded origin-epoch metadata
+  for verifier start selection, reason-code surface partition, and corrected
+  reconciliation count.
+- v11: same-epoch continuity counter, UNKNOWN-versus-DRIFT discriminator,
+  complete reconciliation coverage, and explicit reason-code test bindings.
+- v12: event-to-event counter continuity, permanent counter-gap UNKNOWN,
+  explicit WRITE_ABORT recovery boundary, and deduplicated schema contract.
+- v13: later-start selection for baseline/genesis re-origination, shared
+  mutation-time KEY_UNAVAILABLE semantics, and complete acceptance coverage.
+- v14: replay-tuple-only counter scope, in-transaction gap refusal, explicit
+  newer-epoch genesis exception, and merged replay-start validation.
+- v15: genesis continuity starting counters, rollback-preserved counter
+  mechanism, LEGACY_ORIGIN_MISSING binding, and corrected coverage.
+- v16: authorized same-epoch re-origin remediation, baseline gap refusal,
+  and singular counter increment mechanism.
+- v17: complete re-originating genesis event-only contract, exclusive-lock
+  bypass allowance, and mandatory database-level counter guard.
+- v18: bounded WRITE_ABORT caller behavior, explicit no-CLI operational
+  consequence, and atomic counter migration initialization.
+- v19: global downgrade-unsafe scope and exit, startup compare-and-set,
+  pre-lock key check, and complete coverage.
+- v20: trigger counter read-back, multi-statement mutation coverage, and
+  deduplicated startup/downgrade tests.
+- v21: bidirectional counter-gap detection, event-only writer blocking during
+  downgrade-unsafe mode, and equal-epoch exit coverage.
+- v22: origin-marker closed enum, bidirectional Gate 3 wording, deterministic
+  EMPTY_HISTORY versus LEGACY_ORIGIN_MISSING precedence, and complete coverage.
+- v23: generation-mismatch reason precedence, startup timeout fail-closed
+  posture, and complete coverage.
+- v24: startup sentence repair, NEW_ENTITY_GENESIS and marker precedence,
+  total verifier reason precedence, Gate 4 deduplication, and pre-update
+  no-op determination.
+- v25: reason-code spelling alignment, complete bypass allowance, and
+  consolidated counter-gap test coverage.
+- v26: post-terminal classification separation, asymmetry-direction wording,
+  and STARTUP_LOCKED versus DOWNGRADE_UNSAFE state separation.
+- v27: precedence/index alignment and explicit post-terminal reason coverage.
+- v28: counter-field scope, re-origin growth accounting,
+  reason-code domain binding, equal-epoch durable mode clearing, and no-op
+  test deduplication.
+- v29: durable DOWNGRADE_UNSAFE mode-set lock/timeout,
+  STARTUP_LOCKED exit trigger, and complete coverage.
+- v30: STARTUP_LOCKED write abort contract, counter/journal transaction
+  atomicity, and key/digest precondition ordering.
+- v31: snapshot-failure precedence, deterministic pre-replay reason order,
+  and bounded caller contracts for all mutation-surface refusal codes.
+- v32: maintenance RW-lock applicability in both writer branches and explicit
+  INSERT/NEW_ENTITY_GENESIS counter semantics.
+- v33: materialized generation-marker migration contract and non-skippable
+  baseline-invalid diagnostics.
+- v34: deterministic baseline-origin ownership, pre-start invalid-baseline
+  handling, and structural digest-mismatch precedence.
+- v35: deterministic timeout-code mapping, reachable asymmetry direction, and
+  removal of duplicate normative rules.
+- v36: normative row-create counter read-back and explicit startup/mode write
+  surface coverage.
+- v37: Claude and AGY consensus on the identical plan-only packet.
+
+
+## Non-goals
+
+- No automatic drift repair.
+- No full event-sourcing rewrite.
+- No migration of legacy conversation/session storage.
+- No Telegram, gateway, provider, UI, or prompt-loop changes.
+- No new user-facing `HERMES_*` configuration variables.
+- No cloud storage, inference, OCR, embedding, telemetry, or external service.
+- No DGX migration or deployment as part of plan creation.
+
+## Implementation-plan review reconciliation v27
+
+The v27 authenticated Claude Opus review returned `REVISE` with three bounded
+plan-text corrections. The corrections are incorporated above:
+
+1. `POST_TERMINAL_EVENT` is above `HISTORY_MALFORMED` in total precedence,
+   and post-terminal Gate 4 coverage names the code.
+2. The changelog index includes v26.
+3. Acceptance coverage now includes v26.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
+
+## Implementation-plan review reconciliation v28
+
+The v28 authenticated Claude Opus review returned `REVISE` with five bounded
+plan-text corrections. The corrections are incorporated above:
+
+1. The schema counter field is limited to replay-tuple-changing mutations.
+2. Growth accounting includes authorized re-originating genesis rows.
+3. Sequence and malformed-history conditions bind to explicit reason codes.
+4. Equal-epoch startup durably clears downgrade mode without advancing the
+   generation.
+5. The redundant Gate 2 no-op bullet is removed.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
+
+## Implementation-plan review reconciliation v29
+
+The v29 authenticated Claude Opus review returned `REVISE` with three bounded
+plan-text corrections. The corrections are incorporated above:
+
+1. Durable `DOWNGRADE_UNSAFE` mode-setting uses the exclusive maintenance lock
+   and one `BEGIN IMMEDIATE` transaction; timeout falls back to process-local
+   `STARTUP_LOCKED` without writing durable mode.
+2. `STARTUP_LOCKED` exits only on a later explicit startup transition attempt;
+   mutation entry does not retry or clear it.
+3. The changelog index includes v28 and acceptance coverage includes v28.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
+
+## Implementation-plan review reconciliation v30
+
+The v30 authenticated Claude Opus review returned `REVISE` with three bounded
+plan-text corrections. The corrections are incorporated above:
+
+1. `STARTUP_LOCKED` ordinary and event-only write entry has an explicit
+   mutation-side `WRITE_ABORT` contract, with Gate 4 coverage.
+2. The new-writer counter trigger/read-back and journal emission share
+   transaction atomicity, while prior/unaware writers remain observable when
+   they emit no event.
+3. Gate 3 validates key/digest preconditions before replay; only then does the
+   structural diagnostic precedence apply.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
+
+## Implementation-plan review reconciliation v31
+
+The v31 authenticated Claude Opus review returned `REVISE` with three bounded
+plan-text corrections. The corrections are incorporated above:
+
+1. Snapshot establishment failure is the highest-precedence verifier result;
+   snapshot-dependent digest/key checks are not attempted when it fails.
+2. The pre-replay mutation-independent reason order is explicit:
+   `KEY_UNAVAILABLE` -> `DIGEST_PARAMETER_MISMATCH` ->
+   `KEY_CHECK_MISMATCH`, followed only after success by structural precedence.
+3. Mutation-surface `LOCK_TIMEOUT`, `KEY_UNAVAILABLE`, and `WRITE_ABORT`
+   share the bounded no-retry and unaffected-loop caller contract, with Gate 4
+   coverage.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
+
+## Implementation-plan review reconciliation v32
+
+The v32 authenticated Claude Opus review returned `REVISE` with two bounded
+plan-text corrections. The corrections are incorporated above:
+
+1. The named maintenance RW lock is mandatory in both single-writer and
+   multi-writer branches; the branch-specific difference is the ordinary
+   connection/coordination invariant, not lock applicability.
+2. The INSERT trigger/write-guard behavior and `NEW_ENTITY_GENESIS`
+   counter semantics are explicit: before-counter `0`, after-counter `1`,
+   with a row-creation exemption from existing-row gap comparison and
+   prior/unaware INSERT observability.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
+
+## Implementation-plan review reconciliation v33
+
+The v33 authenticated Claude Opus review returned `REVISE` with two bounded
+plan-text corrections. The corrections are incorporated above:
+
+1. The materialized writer-generation marker is explicitly named,
+   non-null, defaulted and backfilled to `0` in the same migration transaction
+   as the counter, with compatibility coverage.
+2. Structurally invalid baselines return `BASELINE_INVALID` and are never
+   skipped for a lower baseline; non-current digest identifiers return
+   `DIGEST_PARAMETER_MISMATCH`, with Gate 4 bindings.
+
+These remain plan-only corrections and do not authorize source edits, tests,
+DGX changes, deployment, repair, or event-sourcing. The corrected plan must
+return to the same authenticated Claude reviewer family and then to AGY on the
+identical packet.
 ## Implementation-plan review reconciliation v10
 
 The v10 authenticated Claude Opus review returned `REVISE` with four bounded
@@ -1077,375 +1448,3 @@ These remain plan-only corrections and do not authorize source edits, tests,
 DGX changes, deployment, repair, or event-sourcing. The corrected plan must
 return to the same authenticated Claude reviewer family and then to AGY on the
 identical packet.
-
-## Implementation-plan review reconciliation v27
-
-The v27 authenticated Claude Opus review returned `REVISE` with three bounded
-plan-text corrections. The corrections are incorporated above:
-
-1. `POST_TERMINAL_EVENT` is above `HISTORY_MALFORMED` in total precedence,
-   and post-terminal Gate 4 coverage names the code.
-2. The changelog index includes v26.
-3. Acceptance coverage now includes v26.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v28
-
-The v28 authenticated Claude Opus review returned `REVISE` with five bounded
-plan-text corrections. The corrections are incorporated above:
-
-1. The schema counter field is limited to replay-tuple-changing mutations.
-2. Growth accounting includes authorized re-originating genesis rows.
-3. Sequence and malformed-history conditions bind to explicit reason codes.
-4. Equal-epoch startup durably clears downgrade mode without advancing the
-   generation.
-5. The redundant Gate 2 no-op bullet is removed.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v29
-
-The v29 authenticated Claude Opus review returned `REVISE` with three bounded
-plan-text corrections. The corrections are incorporated above:
-
-1. Durable `DOWNGRADE_UNSAFE` mode-setting uses the exclusive maintenance lock
-   and one `BEGIN IMMEDIATE` transaction; timeout falls back to process-local
-   `STARTUP_LOCKED` without writing durable mode.
-2. `STARTUP_LOCKED` exits only on a later explicit startup transition attempt;
-   mutation entry does not retry or clear it.
-3. The changelog index includes v28 and acceptance coverage includes v28.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v30
-
-The v30 authenticated Claude Opus review returned `REVISE` with three bounded
-plan-text corrections. The corrections are incorporated above:
-
-1. `STARTUP_LOCKED` ordinary and event-only write entry has an explicit
-   mutation-side `WRITE_ABORT` contract, with Gate 4 coverage.
-2. The new-writer counter trigger/read-back and journal emission share
-   transaction atomicity, while prior/unaware writers remain observable when
-   they emit no event.
-3. Gate 3 validates key/digest preconditions before replay; only then does the
-   structural diagnostic precedence apply.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v31
-
-The v31 authenticated Claude Opus review returned `REVISE` with three bounded
-plan-text corrections. The corrections are incorporated above:
-
-1. Snapshot establishment failure is the highest-precedence verifier result;
-   snapshot-dependent digest/key checks are not attempted when it fails.
-2. The pre-replay mutation-independent reason order is explicit:
-   `KEY_UNAVAILABLE` -> `DIGEST_PARAMETER_MISMATCH` ->
-   `KEY_CHECK_MISMATCH`, followed only after success by structural precedence.
-3. Mutation-surface `LOCK_TIMEOUT`, `KEY_UNAVAILABLE`, and `WRITE_ABORT`
-   share the bounded no-retry and unaffected-loop caller contract, with Gate 4
-   coverage.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v32
-
-The v32 authenticated Claude Opus review returned `REVISE` with two bounded
-plan-text corrections. The corrections are incorporated above:
-
-1. The named maintenance RW lock is mandatory in both single-writer and
-   multi-writer branches; the branch-specific difference is the ordinary
-   connection/coordination invariant, not lock applicability.
-2. The INSERT trigger/write-guard behavior and `NEW_ENTITY_GENESIS`
-   counter semantics are explicit: before-counter `0`, after-counter `1`,
-   with a row-creation exemption from existing-row gap comparison and
-   prior/unaware INSERT observability.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v33
-
-The v33 authenticated Claude Opus review returned `REVISE` with two bounded
-plan-text corrections. The corrections are incorporated above:
-
-1. The materialized writer-generation marker is explicitly named,
-   non-null, defaulted and backfilled to `0` in the same migration transaction
-   as the counter, with compatibility coverage.
-2. Structurally invalid baselines return `BASELINE_INVALID` and are never
-   skipped for a lower baseline; non-current digest identifiers return
-   `DIGEST_PARAMETER_MISMATCH`, with Gate 4 bindings.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v34
-
-The v34 authenticated Claude Opus review returned `REVISE` with two bounded
-plan-text corrections. The corrections are incorporated above:
-
-1. A baseline without a valid current origin is consistently owned by
-   `BASELINE_INVALID`; `LEGACY_ORIGIN_MISSING` applies only when no invalid
-   baseline is present and no current-origin candidate exists.
-2. Stale-identifier or structurally invalid baselines strictly before the
-   selected replay start are ignored; at or after that start they return
-   `DIGEST_PARAMETER_MISMATCH` or `BASELINE_INVALID`. The per-baseline
-   digest code is included in structural precedence and Gate 4 bindings remain
-   explicit.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v35
-
-The v35 authenticated Claude Opus review returned `REVISE` with two blocking
-and two cleanup corrections. The corrections are incorporated above:
-
-1. Named maintenance-lock acquisition timeout and ordinary SQLite busy-timeout
-   exhaustion both return `LOCK_TIMEOUT`; `WRITE_ABORT` is reserved for
-   continuity, downgrade, journal, and other mutation failures.
-2. `MATERIALIZED_STATE_ASYMMETRY` is reachable only for history without a
-   materialized row; a materialized row without history is `EMPTY_HISTORY`.
-3. The duplicate materialized-column declaration and duplicate pre-start
-   baseline rule were folded into single normative locations.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v36
-
-The v36 authenticated Claude Opus review returned `REVISE` with one blocking
-and one cleanup correction. The corrections are incorporated above:
-
-1. Row creation uses before-counter `0`, but the trigger-produced after-counter
-   read-back at commit is normative and may exceed `1` for a multi-statement
-   create; Gate 4 covers that path.
-2. The mutation-side reason-code subset explicitly covers ordinary mutations,
-   startup transition/mode-set, and privileged maintenance write contracts.
-
-These remain plan-only corrections and do not authorize source edits, tests,
-DGX changes, deployment, repair, or event-sourcing. The corrected plan must
-return to the same authenticated Claude reviewer family and then to AGY on the
-identical packet.
-
-## Implementation-plan review reconciliation v37
-
-The v37 authenticated Claude Opus review returned `PASS`, and the
-authenticated DGX Spark AGY review returned `PASS`, using the identical
-metadata-only packet:
-
-- plan commit: `d74d9499fb878864569e08051b911ef4af284a63`;
-- packet SHA-256:
-  `1745c07d94bdf0f7419e304a6bee7d7e705d0e210a36a167a90e627e6d4e5ead`.
-
-The consensus is plan-level only. It authorizes neither implementation,
-migration, tests, source edits, DGX mutation, deployment, repair, nor
-event-sourcing. Claude recorded two non-blocking implementation/editorial
-notes: treat a row marker newer than `current_generation` as `UNKNOWN`,
-and collapse the remaining compatible trigger-wording duplication during
-implementation review.
-
-## Final implementation-plan review consensus
-
-Status: `IMPLEMENTATION_PLAN_PASS`.
-Claude Opus and AGY independently passed the same correction set. The next
-gate is separate user authorization for implementation and Gate 0 preflight.
-No source, primary dirty worktree, or DGX runtime state was changed.
-
-## Implementation gate authorization and current delivery state
-
-On 2026-08-17 the user explicitly authorized implementation and the complete
-delivery sequence. The implementation was performed in an isolated checkout;
-the primary dirty worktree and DGX runtime were not modified.
-
-Current status: `MERGED_DEPLOYED`.
-
-Implementation review evidence:
-
-- authenticated AGY review: `PASS`, correction set empty;
-- fresh authenticated WSL Claude review in the isolated Hermes checkout:
-  `CLAUDE_REVIEW=PASS`, correction set empty;
-- both reviewers inspected the same nine changed source/test files and the
-  same metadata-only correction scope.
-
-Focused test evidence:
-
-- canonical `scripts/run_tests.sh` executed 24 ARCH-003 tests successfully;
-  its gateway integration file could not collect because the borrowed KLIB
-  venv lacks `yaml`; this is an environment limitation, not an assertion
-  failure;
-- the same focused paths with the complete Windows Python dependency set
-  passed `29 passed`.
-
-The delivery gates below are now complete and recorded in the project
-handover and roadmap.
-
-## Delivery evidence
-
-- commit/push: implementation commit `9b777c0b1` pushed on
-  `codex/arch-003-implementation`;
-- CI: run `31981532693` completed `success` after rerunning the unrelated
-  pre-existing stream-consumer slice;
-- merge: PR #30 merged to `main` as
-  `e8cdfd1e65191b68423afd7e12248d3c6e728e00`;
-- DGX release: immutable release
-  `/home/cwliao/.hermes/releases/v2026.8.17-hermes-arch-003-e8cdfd1e` with
-  marker matching the merge SHA;
-- rollback: prior ARCH-002 drop-in and release retained, with deployment
-  metadata under `/home/cwliao/.hermes/deploy-backups/hermes-arch-003-e8cdfd1e`;
-- runtime: `hermes-gateway.service` active/running, MainPID `1419906`,
-  `NRestarts=0`, `ExecMainStatus=0`, and effective WorkingDirectory set to
-  the ARCH-003 release;
-- cleanup: temporary staging directory removed and verified absent; primary
-  dirty worktree remained untouched.
-
-ARCH-003 is complete. The next ticket is ARCH-004, which requires its own
-ticket-design review and separate implementation authorization.
-
-## Acceptance criteria
-
-The following acceptance criteria were used for the ARCH-003 delivery gate:
-
-- every committed replay-tuple mutation emits exactly one metadata-only event;
-- journal failure cannot commit a materialized mutation;
-- the writer model, snapshot mechanism, write-lock-first/no-retry defensive
-  abort discipline, baseline/genesis schema, digest rotation behavior, rollback
-  posture, and key handling are explicit in the Gates 0-4 bodies;
-- profile/entity sequences are contiguous and race-safe;
-- legacy rows have explicit `UNKNOWN` behavior;
-- baselines are verifiable; digest rotation starts a marked post-rotation
-  genesis epoch, while all pre-rotation history remains `UNKNOWN` with no
-  in-ticket bridge or recovery path; rollback downgrade windows are detected
-  by the generation marker and remain `UNKNOWN` until the first subsequent
-  marked genesis re-originates the entity; a plain mutation cannot recover it;
-- verifier reads are snapshot-consistent and read-only;
-- `DRIFT` is never produced from incomplete or ambiguous history;
-- verifier mutation and prompt-cache/gateway isolation tests pass;
-- incremental mutation-path overhead target is at most 5 ms p95 in the focused
-  benchmark; the authoritative enforcement point is the local-preflight
-  benchmark arm, where exceeding 5 ms p95 blocks delivery and requires plan
-  revision; CI records the result but does not gate on host-noise variance;
-- journal growth is one bounded metadata row per committed replay-tuple
-  mutation, plus one row per out-of-band baseline event and one row per
-  explicitly authorized out-of-band re-originating genesis, with no automatic
-  retention job; entities beyond the replay limit remain UNKNOWN in this ticket,
-  and the 100,000-event/100 MiB per-profile threshold is a documented follow-up
-  operational review, not an in-ticket operator gate;
-- reconciliation v1 and v5-v37 items are incorporated into the normative
-  Gates 0-4 text (with v2-v4 explicitly folded into the v1/v4 text), and this
-  merged plan revision receives the same-family re-review;
-- all focused and relevant tests pass;
-- authenticated Claude + AGY implementation review reaches consensus;
-- no unrelated dirty worktree or DGX runtime state was changed.
-
-## Reconciliation changelog index
-
-- v1: writer model, snapshot mechanism, baseline/genesis fields, rotation and
-  rollback semantics, overhead/growth expectations, and direct safety tests.
-- v2-v4: folded into v1 and v4 normative Gate 0-4 text; revision commits are
-  retained in GitHub history.
-- v5: post-rotation genesis, current-sequence baseline checks, write-lock-first
-  discipline, fixed lock ordering, benchmark protocol, and WAL preconditions.
-- v6: cross-process maintenance-RW-lock granularity, immutable-open removal,
-  current-origin baseline requirement, successive-baseline conflict semantics.
-- v7: generation continuity for downgrade windows, current-epoch replay start,
-  key-check binding, lock timeout/stale-holder behavior, retry removal, and
-  distributed benchmark shape.
-- v8: durable current-generation record, explicit no-delete policy, baseline
-  generation checks, HMAC key-check parameters, and authoritative benchmark
-  wording.
-- v9: post-migration creation genesis, genesis-only generation recovery,
-  closed reason-code enumeration, fixed SQLite busy timeout, no-retry acceptance
-  wording, benchmark enforcement point, and baseline-inclusive growth accounting.
-- v10: durable writer-epoch advancement trigger, bounded origin-epoch metadata
-  for verifier start selection, reason-code surface partition, and corrected
-  reconciliation count.
-- v11: same-epoch continuity counter, UNKNOWN-versus-DRIFT discriminator,
-  complete reconciliation coverage, and explicit reason-code test bindings.
-- v12: event-to-event counter continuity, permanent counter-gap UNKNOWN,
-  explicit WRITE_ABORT recovery boundary, and deduplicated schema contract.
-- v13: later-start selection for baseline/genesis re-origination, shared
-  mutation-time KEY_UNAVAILABLE semantics, and complete acceptance coverage.
-- v14: replay-tuple-only counter scope, in-transaction gap refusal, explicit
-  newer-epoch genesis exception, and merged replay-start validation.
-- v15: genesis continuity starting counters, rollback-preserved counter
-  mechanism, LEGACY_ORIGIN_MISSING binding, and corrected coverage.
-- v16: authorized same-epoch re-origin remediation, baseline gap refusal,
-  and singular counter increment mechanism.
-- v17: complete re-originating genesis event-only contract, exclusive-lock
-  bypass allowance, and mandatory database-level counter guard.
-- v18: bounded WRITE_ABORT caller behavior, explicit no-CLI operational
-  consequence, and atomic counter migration initialization.
-- v19: global downgrade-unsafe scope and exit, startup compare-and-set,
-  pre-lock key check, and complete coverage.
-- v20: trigger counter read-back, multi-statement mutation coverage, and
-  deduplicated startup/downgrade tests.
-- v21: bidirectional counter-gap detection, event-only writer blocking during
-  downgrade-unsafe mode, and equal-epoch exit coverage.
-- v22: origin-marker closed enum, bidirectional Gate 3 wording, deterministic
-  EMPTY_HISTORY versus LEGACY_ORIGIN_MISSING precedence, and complete coverage.
-- v23: generation-mismatch reason precedence, startup timeout fail-closed
-  posture, and complete coverage.
-- v24: startup sentence repair, NEW_ENTITY_GENESIS and marker precedence,
-  total verifier reason precedence, Gate 4 deduplication, and pre-update
-  no-op determination.
-- v25: reason-code spelling alignment, complete bypass allowance, and
-  consolidated counter-gap test coverage.
-- v26: post-terminal classification separation, asymmetry-direction wording,
-  and STARTUP_LOCKED versus DOWNGRADE_UNSAFE state separation.
-- v27: precedence/index alignment and explicit post-terminal reason coverage.
-- v28: counter-field scope, re-origin growth accounting,
-  reason-code domain binding, equal-epoch durable mode clearing, and no-op
-  test deduplication.
-- v29: durable DOWNGRADE_UNSAFE mode-set lock/timeout,
-  STARTUP_LOCKED exit trigger, and complete coverage.
-- v30: STARTUP_LOCKED write abort contract, counter/journal transaction
-  atomicity, and key/digest precondition ordering.
-- v31: snapshot-failure precedence, deterministic pre-replay reason order,
-  and bounded caller contracts for all mutation-surface refusal codes.
-- v32: maintenance RW-lock applicability in both writer branches and explicit
-  INSERT/NEW_ENTITY_GENESIS counter semantics.
-- v33: materialized generation-marker migration contract and non-skippable
-  baseline-invalid diagnostics.
-- v34: deterministic baseline-origin ownership, pre-start invalid-baseline
-  handling, and structural digest-mismatch precedence.
-- v35: deterministic timeout-code mapping, reachable asymmetry direction, and
-  removal of duplicate normative rules.
-- v36: normative row-create counter read-back and explicit startup/mode write
-  surface coverage.
-- v37: Claude and AGY consensus on the identical plan-only packet.
-
-
-## Non-goals
-
-- No automatic drift repair.
-- No full event-sourcing rewrite.
-- No migration of legacy conversation/session storage.
-- No Telegram, gateway, provider, UI, or prompt-loop changes.
-- No new user-facing `HERMES_*` configuration variables.
-- No cloud storage, inference, OCR, embedding, telemetry, or external service.
-- No DGX migration or deployment as part of plan creation.

@@ -1,0 +1,43 @@
+HERMES-UPDATE-001 DGX protected-state manifest
+
+This is a metadata-only baseline captured over authenticated WSL SSH. It
+contains paths, modes, sizes, aggregate directory counts, and SHA256 hashes
+only. It contains no config, credential, memory, session, log, or message
+content. A post-deployment manifest is intentionally NOT_RUN because this
+ticket does not authorize deployment or restart.
+
+manifest_version=1
+host=55-0940189-03
+user=cwliao
+timestamp_utc=2026-08-15T15:09:28Z
+hermes_home=/home/cwliao/.hermes
+service_begin
+ActiveState=active
+ExecMainStatus=0
+FragmentPath=/home/cwliao/.config/systemd/user/hermes-gateway.service
+MainPID=3504674
+NRestarts=0
+Result=success
+SubState=running
+service_end
+process_begin
+3504674    2859 Ssl  Sat Aug 15 20:21:41 2026 /home/cwliao/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run
+process_end
+entries_begin
+entry|config.yaml|file|mode=600|size=15291|sha256=46f9a8dedd36db72c96010149aef090fac07acbb3d8288447220e7e88e622c1e
+entry|auth.json|file|mode=600|size=2810|sha256=97cc0537e211d819acc7a01af1f4feaad30522c4ed701bc9b3fb18267be2ef1a
+entry|.env|file|mode=600|size=23792|sha256=14cc9e2f699f14bf731af6fe264b4cd5bfa1f039a4ce48c18af2ff8982dd8d17
+entry|state.db|file|mode=600|size=34062336|sha256=3c046697b30dc1265b77ffa548a6f4e5ea99bf06d3a8dfe1c54ccdf5166ad8ea
+entry|state.db-wal|file|mode=600|size=0|sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+entry|state.db-shm|file|mode=600|size=32768|sha256=b5c94a1fe61082033202d328f186e12adea9e7140c6ac3c03b5c7d911b944981
+entry|pairing|directory|mode=700|files=0|bytes=0
+entry|profiles|absent
+entry|sessions|directory|mode=700|files=6|bytes=974152
+entry|memories|directory|mode=700|files=6|bytes=7076
+entry|skills|directory|mode=700|files=774|bytes=26649936
+entry|plugins|directory|mode=775|files=2|bytes=6730
+entry|cron|directory|mode=700|files=324|bytes=355761
+entry|logs|directory|mode=700|files=29|bytes=23763817
+entry|gateway_state.json|file|mode=600|size=609|sha256=c197b5ba23b7215b68b4a9d92f3f8244d88c43777e3efb7ef1ff5f8dbe765fdb
+entries_end
+manifest_end

@@ -3052,6 +3052,55 @@ class TestConcurrentToolExecution:
         assert starts == [("c1", "web_search", {"query": "hello"})]
         assert completes == [("c1", "web_search", {"query": "hello"}, '{"success": true}')]
 
+    @pytest.mark.parametrize("quiet_mode", [True, False])
+    def test_sequential_registry_tool_forwards_request_middleware_trace(
+        self,
+        agent,
+        monkeypatch,
+        quiet_mode,
+    ):
+        from hermes_cli.middleware import RequestMiddlewareResult
+
+        trace = [{"source": "test-middleware"}]
+        observed = []
+        agent.quiet_mode = quiet_mode
+        tool_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"hello"}',
+            call_id="c1",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        monkeypatch.setattr(
+            "hermes_cli.middleware.apply_tool_request_middleware",
+            lambda _name, args, **_kwargs: RequestMiddlewareResult(
+                payload=args,
+                original_payload=args,
+                changed=True,
+                trace=trace,
+            ),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.middleware.run_tool_execution_middleware",
+            lambda _name, args, callback, **_kwargs: callback(args),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda *_args, **_kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            "agent.tool_executor._begin_tool_execution",
+            lambda *_args, **_kwargs: None,
+        )
+
+        def handle_function_call(*_args, **kwargs):
+            observed.append(kwargs)
+            return '{"success": true}'
+
+        with patch("run_agent.handle_function_call", side_effect=handle_function_call):
+            agent._execute_tool_calls_sequential(mock_msg, [], "task-1")
+
+        assert observed[0]["tool_request_middleware_trace"] == trace
+
     def test_sequential_browser_type_callbacks_redact_api_key(self, agent):
         secret = "sk-proj-ABCD1234567890EFGH"
         tool_call = _mock_tool_call(
@@ -3185,8 +3234,8 @@ class TestConcurrentToolExecution:
         messages = []
 
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda *args, **kwargs: "Blocked by policy",
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda *args, **kwargs: ("Blocked by policy", None),
         )
         agent._checkpoint_mgr.enabled = True
         agent._checkpoint_mgr.ensure_checkpoint = MagicMock(
@@ -3362,8 +3411,8 @@ class TestConcurrentToolExecution:
         """Blocked memory tool should not reset the nudge counter."""
         agent._turns_since_memory = 5
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda *args, **kwargs: "Blocked",
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda *args, **kwargs: ("Blocked", None),
         )
         with patch("tools.memory_tool.memory_tool", side_effect=AssertionError("should not run")):
             result = agent._invoke_tool(
@@ -3374,9 +3423,146 @@ class TestConcurrentToolExecution:
         assert agent._turns_since_memory == 5
 
     def test_invoke_tool_memory_remove_notifies_provider_with_old_text(self, agent, monkeypatch):
+    def test_managed_tool_pipeline_rejects_second_dispatch(self, agent, monkeypatch):
+        from agent import relay_tools, tool_executor
+
+        dispatched = []
+        duplicate_errors = []
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda *args, **kwargs: None,
+            "hermes_cli.middleware.apply_tool_request_middleware",
+            lambda _name, args, **_kwargs: SimpleNamespace(
+                payload=args,
+                trace=[],
+            ),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.middleware.run_tool_execution_middleware",
+            lambda _name, args, callback, **_kwargs: callback(args),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda *_args, **_kwargs: (None, None),
+        )
+        monkeypatch.setattr(tool_executor, "_begin_tool_execution", lambda *_a, **_k: None)
+
+        def invoke_twice(name, args, callback, **kwargs):
+            del name, kwargs
+            result = callback(args)
+            try:
+                callback(args)
+            except RuntimeError as exc:
+                duplicate_errors.append(str(exc))
+            return result, args
+
+        monkeypatch.setattr(relay_tools, "execute", invoke_twice)
+
+        outcome = tool_executor._run_agent_tool_execution_middleware(
+            agent,
+            function_name="terminal",
+            function_args={"command": "true"},
+            effective_task_id="task-1",
+            tool_call_id="call-1",
+            execute=lambda args: dispatched.append(args) or "ok",
+        )
+
+        assert outcome.result == "ok"
+        assert dispatched == [{"command": "true"}]
+        assert duplicate_errors == [
+            "Hermes tool execution callback invoked more than once"
+        ]
+        assert outcome.blocked is False
+
+    def test_managed_tool_pipeline_allows_one_concurrent_dispatch(
+        self,
+        agent,
+        monkeypatch,
+    ):
+        from agent import relay_tools, tool_executor
+
+        dispatched = []
+        results = []
+        errors = []
+        barrier = threading.Barrier(2)
+        monkeypatch.setattr(
+            "hermes_cli.middleware.apply_tool_request_middleware",
+            lambda _name, args, **_kwargs: SimpleNamespace(
+                payload=args,
+                trace=[],
+            ),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.middleware.run_tool_execution_middleware",
+            lambda _name, args, callback, **_kwargs: callback(args),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda *_args, **_kwargs: (None, None),
+        )
+        monkeypatch.setattr(tool_executor, "_begin_tool_execution", lambda *_a, **_k: None)
+
+        def invoke_concurrently(name, args, callback, **kwargs):
+            del name, kwargs
+
+            def invoke():
+                barrier.wait(timeout=2)
+                try:
+                    results.append(callback(args))
+                except RuntimeError as exc:
+                    errors.append(str(exc))
+
+            threads = [threading.Thread(target=invoke) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+            return results[0], args
+
+        monkeypatch.setattr(relay_tools, "execute", invoke_concurrently)
+
+        outcome = tool_executor._run_agent_tool_execution_middleware(
+            agent,
+            function_name="terminal",
+            function_args={"command": "true"},
+            effective_task_id="task-1",
+            tool_call_id="call-1",
+            execute=lambda args: dispatched.append(args) or "ok",
+        )
+
+        assert outcome.result == "ok"
+        assert dispatched == [{"command": "true"}]
+        assert errors == ["Hermes tool execution callback invoked more than once"]
+        assert outcome.blocked is False
+
+
+class TestAgentRuntimePostHookOwnershipSync:
+    """Exercise post-hook ownership through both agent-runtime tool paths."""
+
+    _CASES = (
+        ("todo", {"todos": []}),
+        ("session_search", {"query": "needle"}),
+        ("memory", {"action": "view", "target": "memory"}),
+        ("clarify", {"question": "Continue?"}),
+        ("read_terminal", {}),
+        ("read_preview", {}),
+        ("read_window_below", {}),
+        ("setup_mcp", {"server": "linear", "action": "install"}),
+        ("delegate_task", {"goal": "Check the child path"}),
+    )
+
+    @pytest.mark.parametrize(("tool_name", "tool_args"), _CASES)
+    def test_agent_runtime_tools_emit_once_per_executor_path(
+        self,
+        agent,
+        monkeypatch,
+        tool_name,
+        tool_args,
+    ):
+        from agent.agent_runtime_helpers import AGENT_RUNTIME_POST_HOOK_TOOL_NAMES
+
+        hook_calls = []
+        monkeypatch.setattr(
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda *args, **kwargs: (None, None),
         )
         calls = []
 

@@ -2794,7 +2794,7 @@ class GatewayTurnMixin:
 
         The connector will auto-thread on the reply anchor (thread is born on its FIRST send), so
         carrying it routes progress / status bubbles into the same thread as the final reply."""
-        if not _progress_thread_id:
+        if not _progress_thread_id and not event_metadata:
             metadata = None
         elif _progress_thread_id == source.thread_id:
             metadata = self._thread_metadata_for_event_data(source, event_metadata, event_message_id)

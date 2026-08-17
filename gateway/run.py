@@ -10546,14 +10546,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                         except Exception as _goal_exc:
                             logger.debug("goal continuation hook failed: %s", _goal_exc)
-                    try:
-                        await self._post_turn_loop_completion(
-                            session_entry=session_entry,
-                            source=source,
-                            final_response=_final_text,
-                        )
-                    except Exception as _loop_exc:
-                        logger.debug("loop completion hook failed: %s", _loop_exc)
             except Exception as _goal_exc:
                 logger.debug("post-turn hook failed: %s", _goal_exc)
             return _agent_result

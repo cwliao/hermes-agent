@@ -2276,8 +2276,10 @@ def terminal_tool(
         # hermes_cli/gateway.py and the cron-path guard in hermes_cli/cron.py,
         # but applies unconditionally (force=True cannot help here).
         if os.environ.get("_HERMES_GATEWAY") == "1":
-            from hermes_cli.cron import _contains_gateway_lifecycle_command
-            if _contains_gateway_lifecycle_command(command):
+            from cron.lifecycle_guard import (
+                contains_gateway_lifecycle_command_or_referenced_script,
+            )
+            if contains_gateway_lifecycle_command_or_referenced_script(command):
                 return json.dumps({
                     "output": "",
                     "exit_code": 1,

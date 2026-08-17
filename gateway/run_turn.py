@@ -1973,6 +1973,7 @@ class GatewayTurnMixin:
                 message=message_text, context_prompt=prepared.context_prompt, history=history, source=source,
                 session_id=_run_start_session_id, session_key=session_key,
                 run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
+                event_metadata=getattr(event, "metadata", None),
                 inbound_message_id=str(event.message_id) if event.message_id else None,
                 channel_prompt=event.channel_prompt, moa_config=getattr(event, "_moa_config", None),
                 persist_user_message=prepared.persist_user_message,
@@ -2782,7 +2783,7 @@ class GatewayTurnMixin:
 
     def _thread_metadata_for_progress(
         self, source: SessionSource, event_message_id: Optional[str], _progress_thread_id: Any,
-        _relay_prospective_thread_id: Optional[str],
+        _relay_prospective_thread_id: Optional[str], event_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Thread metadata for a progress-lane send; relay Discord auto-thread lane falls back to the reply anchor.
 
@@ -2791,7 +2792,7 @@ class GatewayTurnMixin:
         if not _progress_thread_id:
             metadata = None
         elif _progress_thread_id == source.thread_id:
-            metadata = self._thread_metadata_for_source(source, event_message_id)
+            metadata = self._thread_metadata_for_event_data(source, event_metadata, event_message_id)
         else:
             metadata = self._thread_metadata_for_target(
                 source.platform, source.chat_id, _progress_thread_id,
@@ -2802,7 +2803,8 @@ class GatewayTurnMixin:
         return metadata
 
     def _run_agent_progress_threading(
-        self, source: SessionSource, event_message_id: Optional[str], _native_slack_task_cards: bool
+        self, source: SessionSource, event_message_id: Optional[str], _native_slack_task_cards: bool,
+        event_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[dict], Optional[str], Optional[dict]]:
         """Resolve where progress bubbles are threaded (platform-specific).
 
@@ -2840,7 +2842,7 @@ class GatewayTurnMixin:
         )
         _progress_metadata = _non_conversational_metadata(
             self._thread_metadata_for_progress(
-                source, event_message_id, _progress_thread_id, _relay_prospective_thread_id,
+                source, event_message_id, _progress_thread_id, _relay_prospective_thread_id, event_metadata,
             ),
             # Freshness-gate stale resume_pending zombies (#46934) — but honor an explicit
             # ``session_reset.mode: none``: the user opted out of ALL automatic resets, so an expired resume
@@ -2868,7 +2870,7 @@ class GatewayTurnMixin:
             _status_thread_metadata = {"thread_id": _progress_thread_id, "reply_to_message_id": event_message_id}
         else:
             _status_thread_metadata = self._thread_metadata_for_progress(
-                source, event_message_id, _progress_thread_id, _relay_prospective_thread_id,
+                source, event_message_id, _progress_thread_id, _relay_prospective_thread_id, event_metadata,
             )
         return _progress_metadata, _progress_reply_to, _status_thread_metadata
 
@@ -3533,6 +3535,7 @@ class GatewayTurnMixin:
             source=next_source, session_id=session_id, session_key=next_session_key,
             run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
             event_message_id=next_message_id, channel_prompt=next_channel_prompt,
+            event_metadata=getattr(pending_event, "metadata", None) if pending_event is not None else None,
             message_type=next_message_type,
         )
         return _preserve_queued_followup_history_offset(result, followup_result)
@@ -3726,12 +3729,13 @@ class GatewayTurnMixin:
     def _run_agent_bind_turn_wiring(
         self, turn_ctx: TurnContext, turn_runner: TurnRunner, source: SessionSource,
         event_message_id: Optional[str], _native_slack_task_cards: bool,
+        event_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Resolve progress threading, then publish progress metadata and the sync→async bridges onto
         ``turn_ctx`` (the one-slot holders shared with run_sync's executor thread are TurnContext
         defaults). Returns ``_status_thread_metadata``."""
         turn_ctx._progress_metadata, turn_ctx._progress_reply_to, _status_thread_metadata = (
-            self._run_agent_progress_threading(source, event_message_id, _native_slack_task_cards)
+            self._run_agent_progress_threading(source, event_message_id, _native_slack_task_cards, event_metadata)
         )
         # Bridges: sync step/event/status callbacks → async hooks.emit and adapter.send.
         turn_ctx._loop_for_step = asyncio.get_running_loop()
@@ -3818,6 +3822,7 @@ class GatewayTurnMixin:
         source: SessionSource, session_id: str, session_key: str = None,
         run_generation: Optional[int] = None, _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None, inbound_message_id: Optional[str] = None,
+        event_metadata: Optional[Dict[str, Any]] = None,
         channel_prompt: Optional[str] = None, moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
@@ -3847,6 +3852,7 @@ class GatewayTurnMixin:
         )
         _status_thread_metadata = self._run_agent_bind_turn_wiring(
             turn_ctx, turn_runner, source, event_message_id, disp._native_slack_task_cards,
+            event_metadata,
         )
         self._run_agent_start_streaming_tts(
             source, message_type, _status_thread_metadata, turn_ctx.streaming_tts_consumer_holder,

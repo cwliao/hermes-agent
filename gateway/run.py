@@ -4067,8 +4067,13 @@ class GatewayRunner(
         self, event: MessageEvent, reply_to_message_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Build reply metadata while preserving event-scoped audit data."""
-        metadata = self._thread_metadata_for_source(event.source, reply_to_message_id)
-        event_metadata = getattr(event, "metadata", None)
+        return self._thread_metadata_for_event_data(event.source, getattr(event, "metadata", None), reply_to_message_id)
+
+    def _thread_metadata_for_event_data(
+        self, source, event_metadata: Optional[Dict[str, Any]], reply_to_message_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Build reply metadata from source plus event-scoped audit data."""
+        metadata = self._thread_metadata_for_source(source, reply_to_message_id)
         correlation_id = event_metadata.get("telegram_delivery_correlation_id") if isinstance(event_metadata, dict) else None
         if correlation_id:
             metadata = dict(metadata) if metadata else {}

@@ -562,6 +562,12 @@ def _handle_complete(args: dict, **kw) -> str:
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
+        from hermes_cli import kanban_swarm as _kanban_swarm
+        contract_error = _kanban_swarm.validate_completion(
+            task, metadata=metadata, result=result,
+        )
+        if contract_error:
+            return tool_error(contract_error)
         try:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,

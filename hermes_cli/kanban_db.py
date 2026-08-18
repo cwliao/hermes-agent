@@ -2043,6 +2043,52 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                 "WHERE l.child_id = ?", (task_id,),
             ).fetchall()
             if all(p["status"] in ("done", "archived") for p in parents):
+                # Lane-bound swarms add a lifecycle gate: a synthesizer may become ready
+                # only after its verifier persisted an explicit gate=pass handoff.
+                child_body = conn.execute(
+                    "SELECT body FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if child_body and (child_body["body"] or "").splitlines():
+                    from hermes_cli import kanban_swarm as _kanban_swarm
+                    contract = _kanban_swarm.extract_contract(child_body["body"])
+                    if contract and contract.get("role") == "synthesizer":
+                        expected_verifier = contract.get("verifier_id")
+                        verifier_ids = [
+                            str(p["id"]) for p in conn.execute(
+                                "SELECT parent_id AS id FROM task_links WHERE child_id = ?",
+                                (task_id,),
+                            ).fetchall()
+                        ]
+                        if verifier_ids != [str(expected_verifier)]:
+                            continue
+                        verifier_row = conn.execute(
+                            "SELECT body FROM tasks WHERE id = ?", (expected_verifier,)
+                        ).fetchone()
+                        verifier_contract = (
+                            _kanban_swarm.extract_contract(verifier_row["body"])
+                            if verifier_row else None
+                        )
+                        verifier_run = conn.execute(
+                            "SELECT metadata FROM task_runs WHERE task_id = ? "
+                            "AND outcome = 'completed' ORDER BY id DESC LIMIT 1",
+                            (expected_verifier,),
+                        ).fetchone()
+                        try:
+                            verifier_metadata = (
+                                json.loads(verifier_run["metadata"])
+                                if verifier_run and verifier_run["metadata"] else {}
+                            )
+                        except (TypeError, json.JSONDecodeError):
+                            verifier_metadata = {}
+                        if (
+                            not verifier_contract
+                            or verifier_contract.get("role") != "verifier"
+                            or verifier_contract.get("root_id") != contract.get("root_id")
+                            or verifier_metadata.get("role") != "verifier"
+                            or verifier_metadata.get("root_id") != contract.get("root_id")
+                            or verifier_metadata.get("gate") != "pass"
+                        ):
+                            continue
                 resume_status = _resume_status_from_events(conn, task_id)
                 if cur_status == "blocked":
                     # At the breaker limit, no auto-recovery (else block ->
@@ -2554,6 +2600,14 @@ def complete_task(
     if not _parents_satisfied(conn, task_id):
         return False
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
+    task_for_contract = get_task(conn, task_id)
+    if task_for_contract:
+        from hermes_cli import kanban_swarm as _kanban_swarm
+        contract_error = _kanban_swarm.validate_completion(
+            task_for_contract, metadata=metadata, result=result,
+        )
+        if contract_error:
+            raise ValueError(contract_error)
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )

@@ -391,12 +391,24 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
         return _err(f"kanban swarm: {exc}", 2)
     if not workers:
         return _err("kanban swarm: at least one --worker is required", 2)
+    lanes = list(getattr(args, "worker_lane", []) or [])
+    if lanes:
+        if len(lanes) != len(workers):
+            return _err("kanban swarm: --worker-lane count must match --worker count", 2)
+        workers = [
+            ks.SwarmWorkerSpec(**{**spec.__dict__, "lane_id": lane})
+            for spec, lane in zip(workers, lanes)
+        ]
     with kbc.connect_closing() as conn:
         created = ks.create_swarm(
             conn, goal=args.goal, workers=workers, verifier_assignee=args.verifier,
             synthesizer_assignee=args.synthesizer, tenant=args.tenant,
             created_by=args.created_by or _profile_author(), priority=args.priority,
             idempotency_key=getattr(args, "idempotency_key", None),
+            goal_max_turns=getattr(args, "goal_max_turns", ks.DEFAULT_GOAL_MAX_TURNS),
+            worker_max_runtime_seconds=getattr(
+                args, "worker_max_runtime", ks.DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
+            ),
         )
     if getattr(args, "json", False):
         _print_json(created.as_dict())

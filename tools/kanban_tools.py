@@ -1087,9 +1087,6 @@ def _handle_complete(args: dict, **kw) -> str:
                    attachments=[
                        _fields(a, _ATTACHMENT_FIELDS)
                        for a in kb.list_attachments(conn, tid)])
-
-
-
 @_kanban_handler("kanban_block")
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""

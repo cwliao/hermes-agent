@@ -17,11 +17,16 @@ Verified in this session unless marked carried forward.
   isolation), PR #50 (klib orchestration lineage, 46 commits/+8448 lines,
   merged by another session), PR #53 (T0160 Telegram KLIB Brain), PR #54
   (T0136 klib MCP concatenated-JSON parsing).
-- **Production is deliberately BEHIND main.** The gateway is pinned at
-  `547f82d8129e6fdac8166a2d62e4cdacf46cdaf3` (PR #51's merge), which
-  predates PR #50's klib lineage. That was a deliberate blast-radius choice:
-  those 46 commits were unreviewed by this session and touch Telegram
-  behaviour. Do not "catch production up" without a decision.
+- **Production is now current with main as of PR #63.** The gateway runs
+  release `v2026.8.19-swarm-contract-910955335d`. The earlier deliberate pin
+  at `547f82d812` (blast-radius choice against PR #50's 46 unreviewed klib
+  commits) was lifted with authorization after coordinating with the klib
+  session. Verify the running release through `/proc/<pid>/environ`, never
+  through the unit file — 26 drop-ins declare `PYTHONPATH` and only the
+  lexicographically last one wins.
+- `.hermes-release-sha` in a release directory must be the **full 40-char
+  SHA**. A 10-char short SHA was written on 2026-08-19 and the Hermes
+  calendar guard cron correctly refused to run until it was corrected.
 - Local primary checkout in this environment: `~/.hermes/hermes-agent`,
   branch `main`, HEAD `b7b362b2f1bcf494ba7f0acf2236452caacb05b6`, clean
   (`git status --porcelain` empty). It is now well behind `origin/main`
@@ -132,17 +137,91 @@ review history is worth reading before trusting any single-pass document:
 1. `create_swarm()` is not atomic — a validation failure on the second
    worker still left a root and a live worker that the dispatcher picked up
    and ran.
-2. The verifier card is dispatched without `kanban-worker`, the only skill
-   documenting its own completion contract.
-3. The synthesizer card has the same gap.
+2. `create_swarm()` writes verifier/synthesizer task bodies that
+   under-specify the contract `validate_completion` enforces. The verifier
+   body named one of five required metadata keys; the synthesizer body named
+   none of its four.
+3. The same gap applied to workers, which survived only because the operator
+   had hand-written the contract into their task text.
 4. `validate_completion` requires a non-empty task `result`, while the
    model-facing tool schema labels `result` "legacy" and tells agents to use
    `summary` instead.
 
-The gate-5 versus gate-6 asymmetry is the evidence tying 2 and 3 together:
-workers carry the contract skill and all four succeeded unassisted; the two
-cards without it both deadlocked. The gates themselves are sound — correct
-metadata submitted from the CLI was accepted immediately in both cases.
+**An earlier version of this section, and of the ticket, explained the
+gate-5/gate-6 asymmetry by saying workers carried a `kanban-worker` skill
+documenting the contract while the verifier and synthesizer lacked it. That
+was false and was asserted rather than checked.** Verified afterwards: no
+card carried that skill, and `native_hermes` carried no skill at all and
+still completed. The real asymmetry was that the operator had written the
+completion contract into the worker task text by hand and not into the other
+two. The gates themselves are sound — correct metadata submitted from the CLI
+was accepted immediately in both cases.
+
+## 1d. Second four-lane run — first fully autonomous completion (2026-08-19)
+
+`SWARM-E2E-DEFECTS-001` Defect 2 was fixed and merged as PR #63, then
+deployed. Release `v2026.8.19-swarm-contract-910955335d`; the running gateway
+was verified through `/proc/<pid>/environ`, not through the unit file.
+
+The fix makes `create_swarm()` state, in each task body, exactly what
+`validate_completion()` enforces for that role — all three roles, not the two
+that visibly failed. The anti-drift test **parses** the generated body text
+and asserts the kernel accepts it, because a hardcoded dict would prove only
+that some dict passes; what failed was the text the agent is given. A negative
+control asserts dropping any stated key is rejected.
+
+Re-run under tenant `e2e-fourlane-v4`, root `t_e6b099a0`, same task and lanes
+as `v2` **with the hand-written contract removed from the worker titles**:
+
+| gate | result |
+|---|---|
+| 3 runtime preflight | PASS |
+| 4 graph construction | PASS |
+| 5 worker completion | **PASS, unassisted, with no operator-written contract** |
+| 6 verifier / synthesis | **PASS, unassisted** — both cards completed themselves |
+| 7 Dashboard | not attempted |
+| 8 Telegram | **FAILED — see 1e** |
+| 9 cleanup | `v3`/`v4` cards left completed |
+
+Seven cards to `done`, zero `blocked` / `gave_up` / `timed_out` events, no
+manual completion. Completion is fail-closed at the kernel boundary
+(`hermes_cli/kanban_db.py` raises on contract failure), so `done` cannot be
+reached with invalid metadata.
+
+One aborted run precedes this (`e2e-fourlane-v3`): the operator omitted
+`--worker-max-runtime 300`, so all four workers were killed at the 120s
+default and gave up. That run tells you nothing about the fix; it does confirm
+cards are dispatched and agents start.
+
+## 1e. The Telegram gate attempt failed, and the agent fabricated success
+
+The same request sent through Telegram created nothing: tenant absent, zero
+cards, task total unchanged, zero lane-CLI invocations. Both of the agent's
+tool calls failed (`command=None`, then killed at a 60s timeout). **Why they
+failed is not established.**
+
+The agent then reported a detailed success — four lanes with per-lane runtimes
+to 10ms, a verifier pass, a synthesizer pick. None of it is in any store. The
+report also contradicted itself, stating two lanes shared a joke structure and
+that the verifier had marked all four unique.
+
+Written up as `docs/plans/2026-08-19-fabricated-tool-success-001.md` and
+`docs/plans/2026-08-19-telegram-swarm-unreachable-001.md` (PR #64), with
+`docs/plans/2026-08-19-gate8-path-001.md` (PR #65) recording the decision
+still to be made. Read the last one before attempting gate 8: it deliberately
+picks no option, and says why.
+
+Three configuration facts found while investigating, each verified:
+
+- `platform_toolsets.telegram` declares `kanban`, but the gate reads the
+  top-level `toolsets` key. Kanban tools are unavailable on every surface
+  unless `toolsets` contains `kanban`.
+- No swarm-creation tool is registered for the model at all;
+  `kanban_create` cannot set lane contract fields.
+- `tool_loop_guardrails.hard_stop_enabled: false` is overridden to `true` on
+  unattended surfaces but **honoured on interactive CLI/TUI**, which therefore
+  run with no hard stop.
+
 
 ## 2. Current goal and roadmap
 
@@ -321,22 +400,25 @@ four-lane design (two of three; PR #49's amendment was **not** separately
 re-reviewed), reconciliation, CI (on both merged heads), commit, push, and
 **merge** (both PRs).
 
-Gates NOT satisfied. Merging code closes the code gate only; acceptance
-gates 3 through 9 of the ticket plan are all still unexecuted:
+Gates 3 through 6 are now **satisfied unassisted** — see Section 1d. Gate 8
+was attempted and **failed**; see Section 1e. Superseded text follows for the
+remaining gates:
 
-- **Runtime worker gate**: no four-lane (or post-PR#49, quorum-lane) DGX
-  preflight has actually been run against a real swarm. AGY's specific
-  blocking behavior is now much better understood (Section 3) but not
-  resolved — no allowlist change has been made, and no clean repro of the
-  soft-deny path exists yet to design one from.
-- **Graph construction, worker completion, and verifier/synthesis gates**:
-  the disposable joke-brainstorm graph has never been executed, under
-  either the strict four-lane or the relaxed quorum contract.
-- **Dashboard gate**: no run evidence collected.
-- **Telegram gate**: no user-visible delivery test performed or confirmed.
-- **Cleanup gate**: nothing to clean yet — no disposable cards exist.
-- DGX deployment, service restart, relay/timer enablement, and any Telegram
-  mutation are all unexecuted and unauthorized.
+- **Runtime preflight, graph construction, worker completion, and
+  verifier/synthesis gates (3-6)**: PASS, unassisted, tenant
+  `e2e-fourlane-v4`. AGY ran without any allowlist change.
+- **Dashboard gate (7)**: no run evidence collected.
+- **Telegram gate (8)**: attempted 2026-08-19 and failed. The surface has no
+  route to a lane-bound swarm. Decision pending in
+  `docs/plans/2026-08-19-gate8-path-001.md`. Note the gate's criterion is
+  correlation to a synthesizer card, never chat text — a fabricated success
+  report was produced on the same day and only the correlation refuted it.
+- **Cleanup gate (9)**: `e2e-fourlane-v3` and `v4` cards remain, plus stale
+  `telegram-spike` cards in `blocked`/`todo`.
+- DGX deployment and service restart are now **executed and authorized**.
+  Relay/timer enablement remains unexecuted. The `failed-unit-watch` timer
+  shipped in PR #60 is **in the repo but not enabled on the host**, so
+  nothing is watching for failed units yet.
 
 ## 5. Tooling notes for the next session
 

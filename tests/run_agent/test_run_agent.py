@@ -4192,6 +4192,65 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
+    def test_malformed_tool_errors_reach_model_and_reserved_empty_is_retried(self, agent):
+        """Tool errors remain in context and a model-emitted ``(empty)`` is retried.
+
+        This mirrors the observed local-model sequence: malformed but parseable
+        arguments are rejected by the tool handlers, then the model emits the
+        seven-character Hermes sentinel instead of an answer.
+        """
+        self._setup_agent(agent)
+        process_call = _mock_tool_call(
+            name="process", arguments='{"action": ""}', call_id="process-1"
+        )
+        terminal_call = _mock_tool_call(
+            name="terminal", arguments='{"command": null}', call_id="terminal-1"
+        )
+        agent.valid_tool_names = {"process", "terminal"}
+        agent.tools = _make_tool_defs("process", "terminal")
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[process_call, terminal_call],
+            ),
+            _mock_response(content="(empty)", finish_reason="stop"),
+            _mock_response(content="Recovered after tool errors.", finish_reason="stop"),
+        ]
+
+        def _dispatch(name, args, *positional, **kwargs):
+            if name == "process":
+                return (
+                    '{"error": "Unknown process action: . Use: list, poll, log, '
+                    'wait, kill, write, submit, close"}'
+                )
+            return (
+                '{"output": "", "exit_code": -1, "error": "Invalid command: '
+                'expected string, got NoneType", "status": "error"}'
+            )
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=_dispatch),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("answer the uploaded document")
+
+        assert result["final_response"] == "Recovered after tool errors."
+        assert result["api_calls"] == 3
+        second_messages = agent.client.chat.completions.create.call_args_list[1].kwargs[
+            "messages"
+        ]
+        tool_messages = [m for m in second_messages if m.get("role") == "tool"]
+        assert [m["tool_call_id"] for m in tool_messages] == ["process-1", "terminal-1"]
+        assert "Unknown process action" in tool_messages[0]["content"]
+        assert "NoneType" in tool_messages[1]["content"]
+        third_messages = agent.client.chat.completions.create.call_args_list[2].kwargs[
+            "messages"
+        ]
+        assert "Please process the tool results above" in third_messages[-1]["content"]
+
     def test_tool_call_none_args_verbose_logging_does_not_crash(self, agent):
         self._setup_agent(agent)
         agent.verbose_logging = True

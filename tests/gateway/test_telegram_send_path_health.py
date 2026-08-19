@@ -5,6 +5,7 @@ can enter a wedged state where ``bot.send_message()`` returns a valid Message
 but nothing reaches the recipient.  ``_send_path_degraded`` short-circuits
 ``send()`` so cron's live-adapter branch falls through to standalone HTTP.
 """
+import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -118,3 +119,53 @@ async def test_successful_reconnect_waits_for_get_updates_progress(monkeypatch):
     assert adapter._polling_network_error_count == 0
     result = await adapter.send("123", "hello")
     assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_wait_until_send_path_ready_returns_immediately_when_healthy():
+    adapter = _make_adapter()
+    assert await adapter.wait_until_send_path_ready(timeout=0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_wait_until_send_path_ready_waits_for_current_polling_progress():
+    adapter = _make_adapter()
+    generation, _progress = adapter._begin_polling_generation()
+    wait_task = asyncio.create_task(
+        adapter.wait_until_send_path_ready(timeout=0.1)
+    )
+    await asyncio.sleep(0)
+    adapter._record_polling_progress(generation)
+    assert await wait_task is True
+
+
+@pytest.mark.asyncio
+async def test_wait_until_send_path_ready_returns_false_on_timeout():
+    adapter = _make_adapter()
+    adapter._begin_polling_generation()
+    assert await adapter.wait_until_send_path_ready(timeout=0.01) is False
+
+
+@pytest.mark.asyncio
+async def test_wait_until_send_path_ready_rejects_stale_polling_generation():
+    adapter = _make_adapter()
+    _old_generation, old_progress = adapter._begin_polling_generation()
+    adapter._begin_polling_generation()
+    old_progress.set()
+    assert await adapter.wait_until_send_path_ready(timeout=0.01) is False
+
+
+@pytest.mark.asyncio
+async def test_wait_until_send_path_ready_rejects_teardown():
+    adapter = _make_adapter()
+    adapter._begin_polling_generation()
+    adapter._polling_teardown_started = True
+    assert await adapter.wait_until_send_path_ready(timeout=0.01) is False
+
+
+@pytest.mark.asyncio
+async def test_wait_until_send_path_ready_rejects_fatal_error():
+    adapter = _make_adapter()
+    adapter._begin_polling_generation()
+    adapter._set_fatal_error("test", "fatal", retryable=False)
+    assert await adapter.wait_until_send_path_ready(timeout=0.01) is False

@@ -24,6 +24,11 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
 
+from plugins.klib import _handle_klib
+from plugins.platforms.telegram.docubot_mcp_gateway import (
+    ingest_document_to_docubot,
+)
+
 logger = logging.getLogger(__name__)
 
 _DELIVERY_CORRELATION_KEY = "telegram_delivery_correlation_id"
@@ -2084,6 +2089,31 @@ class TelegramAdapter(BasePlatformAdapter):
                 "[%s] Polling request re-initialize failed (non-fatal)",
                 self.name, exc_info=True,
             )
+
+    async def wait_until_send_path_ready(self, timeout: float = 60.0) -> bool:
+        """Wait for successful polling progress before sending startup traffic."""
+        if getattr(self, "_polling_teardown_started", False):
+            return False
+        if self.has_fatal_error:
+            return False
+        if not self._send_path_degraded:
+            return True
+
+        generation = self._polling_generation
+        progress = self._polling_progress_event
+        try:
+            await asyncio.wait_for(progress.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+
+        return (
+            not getattr(self, "_polling_teardown_started", False)
+            and not self.has_fatal_error
+            and generation == self._polling_generation
+            and progress is self._polling_progress_event
+            and progress.is_set()
+            and not self._send_path_degraded
+        )
 
     def _begin_polling_generation(self) -> tuple[int, asyncio.Event]:
         """Start accepting progress for a new getUpdates polling generation."""
@@ -8187,6 +8217,38 @@ class TelegramAdapter(BasePlatformAdapter):
 
         event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
+        clean_text = (event.text or "").strip()
+
+        if clean_text.startswith("/"):
+            parts = clean_text.split(None, 1)
+            command = parts[0].lstrip("/").lower()
+            if command.startswith("query"):
+                query_text = parts[1] if len(parts) > 1 else ""
+                result = await _handle_klib(
+                    query_text.strip(),
+                    chat_id=getattr(msg.chat, "id", None),
+                )
+                reply_markup = None
+                if (
+                    isinstance(result, tuple)
+                    and len(result) == 2
+                    and isinstance(result[0], str)
+                ):
+                    response, reply_markup = result
+                else:
+                    response = str(result) if result else ""
+
+                thread_id = self._effective_message_thread_id(msg)
+                metadata = {"thread_id": str(thread_id)} if thread_id else None
+                await self.send(
+                    str(msg.chat.id),
+                    response or "KLIB query completed with no output.",
+                    reply_to=str(msg.message_id),
+                    metadata=metadata,
+                    reply_markup=reply_markup,
+                )
+                return
+
         await self._cache_replied_media(msg, event)
         event = self._apply_telegram_group_observe_attribution(event)
         self._log_inbound_accepted(event)
@@ -8542,6 +8604,66 @@ class TelegramAdapter(BasePlatformAdapter):
         elif msg.document:
             doc = msg.document
             try:
+                async def _ingest_cached_doc(cached_path: str, *, fallback_name: str) -> None:
+                    try:
+                        ingest_result = ingest_document_to_docubot(
+                            source="telegram",
+                            action="document_review",
+                            metadata={
+                                "platform": "telegram",
+                                "chat_id": str(getattr(getattr(msg, "chat", None), "id", "")),
+                                "message_id": str(msg.message_id),
+                                "file_id": getattr(doc, "file_id", ""),
+                                "file_unique_id": getattr(doc, "file_unique_id", ""),
+                                "file_name": fallback_name,
+                                "mime_type": doc_mime or "",
+                            },
+                            local_path=cached_path,
+                            stable_key=getattr(doc, "file_unique_id", None),
+                            multipart=True,
+                        )
+                        # Preserve the per-document result for gateway context
+                        # construction. A dict keyed by cached path supports
+                        # multiple attachments on a merged event without
+                        # allowing one result to overwrite another.
+                        result_status = str(ingest_result.get("status", "")).lower() if isinstance(ingest_result, dict) else ""
+                        ingest_succeeded = (
+                            isinstance(ingest_result, dict)
+                            and not ingest_result.get("error")
+                            and ingest_result.get("ok") is not False
+                            and result_status not in {"error", "failed", "failure", "skipped", "rejected"}
+                            and (
+                                result_status in {
+                                    "accepted",
+                                    "queued",
+                                    "processing",
+                                    "ingested",
+                                    "success",
+                                    "succeeded",
+                                    "complete",
+                                    "completed",
+                                    "ok",
+                                }
+                                or ingest_result.get("ok") is True
+                                or (
+                                    isinstance(ingest_result.get("http_status"), int)
+                                    and 200 <= ingest_result["http_status"] < 300
+                                )
+                            )
+                        )
+                        event.metadata.setdefault("docubot_ingest_results", {})[cached_path] = {
+                            "result": ingest_result,
+                            "succeeded": ingest_succeeded,
+                        }
+                        logger.info("[Telegram] DocuBot ingest response for document %s: %s", doc.file_unique_id, ingest_result)
+                    except Exception as e:
+                        logger.warning(
+                            "[Telegram] DocuBot ingest call failed for document %s: %s",
+                            getattr(doc, "file_id", ""),
+                            e,
+                            exc_info=True,
+                        )
+
                 # Determine file extension
                 ext = ""
                 original_filename = doc.file_name or ""
@@ -8601,6 +8723,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     else:
                         batch_key = self._photo_batch_key(event, msg)
                         self._enqueue_photo_event(batch_key, event)
+                    await _ingest_cached_doc(cached_path, fallback_name=original_filename or doc_mime or "document")
                     return
 
                 if not ext and doc.mime_type:
@@ -8623,6 +8746,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     event.media_types = [SUPPORTED_VIDEO_TYPES[ext]]
                     event.message_type = MessageType.VIDEO
                     logger.info("[Telegram] Cached user video document at %s", cached_path)
+                    await _ingest_cached_doc(cached_path, fallback_name=original_filename or f"document{ext}")
                     await self.handle_message(event)
                     return
 
@@ -8644,6 +8768,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_urls = [cached_path]
                 event.media_types = [mime_type]
                 logger.info("[Telegram] Cached user document at %s (%s)", cached_path, mime_type)
+                await _ingest_cached_doc(cached_path, fallback_name=original_filename or f"document{ext or '.bin'}")
 
                 # For text-readable files, inject content into event.text (capped
                 # at 100 KB). Gate on a text-like extension/MIME — NOT a blind

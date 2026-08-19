@@ -2069,6 +2069,26 @@ def terminal_tool(
         # Note: force parameter is internal only, not exposed to model API
     """
     try:
+        # JSON Schema validation is not guaranteed for every caller (for
+        # example, direct dispatch from a gateway), so defend this boundary at
+        # runtime. Reject malformed values instead of coercing them: timeout
+        # is declared as an integer, and coercion could silently accept or
+        # truncate ambiguous values such as "60.5".
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int)):
+            logger.warning(
+                "Rejected invalid terminal timeout value: %s",
+                type(timeout).__name__,
+            )
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": (
+                    "Invalid timeout: expected integer or null, got "
+                    f"{type(timeout).__name__}"
+                ),
+                "status": "error",
+            }, ensure_ascii=False)
+
         if not isinstance(command, str):
             logger.warning(
                 "Rejected invalid terminal command value: %s",

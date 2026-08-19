@@ -99,6 +99,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -4020,6 +4021,111 @@ def _mark_server_call_started(server: Any) -> None:
         mark_tool_call()
 
 
+def _drive_link_for_path(path: str) -> str | None:
+    """Return a Google Drive link for a wiki-relative klib path.
+
+    Drive-link generation is best-effort: it must never prevent the primary
+    MCP reply from being returned when rclone is unavailable or fails.
+    """
+    normalized = path.strip() if isinstance(path, str) else ""
+    if normalized.startswith("wiki/"):
+        normalized = normalized[len("wiki/"):]
+
+    try:
+        completed = subprocess.run(
+            ["rclone", "link", f"gdrive:klib-wiki/{normalized}"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        link = completed.stdout.strip()
+        if completed.returncode == 0 and link:
+            return link
+        logger.warning(
+            "klib Drive link lookup failed for %r (returncode=%s)",
+            normalized,
+            completed.returncode,
+        )
+    except Exception as exc:
+        logger.warning("klib Drive link lookup failed for %r: %s", normalized, exc)
+    return None
+
+
+def _klib_result_path(item: dict) -> str:
+    """Return the path identity used by the shared klib result formatter."""
+    for key in ("path", "file", "title"):
+        value = item.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _format_klib_page_result(tool_name: str, path: str, payload: Any) -> str:
+    """Format a klib page-shaped response without interpreting ``status``."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("raw"), str):
+        return f"klib: unexpected response for '{path}'."
+
+    raw = payload["raw"]
+    if not raw.strip():
+        return f"klib: '{path}' has no content."
+
+    from plugins.klib import _MAX_REPLY_LENGTH, _truncate_reply
+
+    body = f"klib: {path}\n{_truncate_reply(raw, _MAX_REPLY_LENGTH)}"
+    link = _drive_link_for_path(path)
+    if link:
+        body += f"\n\n🔗 {link}"
+    return body
+
+
+def _format_klib_mcp_result(tool_name: str, args: dict, raw_json: str) -> str:
+    """Format a klib MCP result using the slash-command line formatter.
+
+    Formatting is best-effort so an unexpected MCP response can never block
+    or otherwise alter the underlying tool call.
+    """
+    try:
+        results = json.loads(raw_json)
+    except Exception:
+        return raw_json
+
+    if tool_name in ("read_page", "list_index"):
+        if tool_name == "read_page":
+            path = args.get("path", "") if isinstance(args, dict) else ""
+            if not isinstance(path, str):
+                path = ""
+        else:
+            path = "index.md"
+        return _format_klib_page_result(tool_name, path, results)
+
+    if tool_name not in ("search", "semantic_search") or not isinstance(results, list):
+        return raw_json
+
+    try:
+        if not all(isinstance(item, dict) for item in results):
+            return raw_json
+        query = args.get("query", "") if isinstance(args, dict) else ""
+        if not isinstance(query, str):
+            query = ""
+        from plugins.klib import (
+            _RESULT_LIMIT,
+            _deduplicate_results,
+            _format_result_lines,
+        )
+
+        # The MCP path may overfetch, but only the first five distinct files
+        # are displayed and therefore eligible for Drive-link lookup.
+        displayed_results = _deduplicate_results(results)[:_RESULT_LIMIT]
+        lines = _format_result_lines(query, displayed_results, start_index=1)
+        for index, item in enumerate(displayed_results, start=1):
+            link = _drive_link_for_path(_klib_result_path(item))
+            if link:
+                lines[index] += f"\n🔗 {link}"
+        return "\n".join(lines)
+    except Exception:
+        return raw_json
+
+
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -4174,6 +4280,10 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                         server_name, block_type,
                     )
             text_result = "\n".join(parts) if parts else ""
+            if server_name == "klib" and tool_name in (
+                "search", "semantic_search", "read_page", "list_index",
+            ):
+                text_result = _format_klib_mcp_result(tool_name, args, text_result)
 
             # Combine content + structuredContent when both are present.
             # MCP spec: content is model-oriented (text), structuredContent

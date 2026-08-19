@@ -34,6 +34,8 @@ from agent.model_metadata import (
 from agent.process_bootstrap import _install_safe_stdio
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.think_scrubber import StreamingThinkScrubber
+from dataclasses import replace
+
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig, ToolCallGuardrailController
 )
@@ -1189,11 +1191,28 @@ def _apply_display_config(agent, _agent_cfg, platform):
         else False
     )
     try:
-        agent._tool_guardrails = ToolCallGuardrailController(
-            ToolCallGuardrailConfig.from_mapping(
-                _agent_cfg.get("tool_loop_guardrails", {}), platform=platform,
-            )
+        # Gateway and cron turns have no operator continuously watching the
+        # tool loop. Keep the interactive CLI/TUI soft-warning default, but
+        # circuit-break repeated failures for unattended runtimes. An explicit
+        # config value still wins inside ToolCallGuardrailConfig.from_mapping.
+        _platform_name = str(agent.platform or "").strip().lower()
+        _unattended_platform = _platform_name == "cron" or _platform_name not in {
+            "",
+            "cli",
+            "local",
+            "tui",
+            "desktop",
+            "acp",
+        }
+        _guardrail_cfg = ToolCallGuardrailConfig.from_mapping(
+            _agent_cfg.get("tool_loop_guardrails", {}),
+            platform=platform,
+            default_hard_stop_enabled=_unattended_platform,
         )
+        # Reuse the same platform classification for the tool-outcome footer
+        # so "unattended" has one definition rather than two that can drift.
+        _guardrail_cfg = replace(_guardrail_cfg, unattended=_unattended_platform)
+        agent._tool_guardrails = ToolCallGuardrailController(_guardrail_cfg)
         if agent._tool_guardrails.config.configuration_warning:
             _ra().logger.warning(
                 "Tool loop guardrail configuration: %s",

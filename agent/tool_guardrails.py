@@ -134,6 +134,10 @@ class ToolCallGuardrailConfig:
     cross_turn_ledger_max_entries: int = 128
     cross_turn_ttl_seconds: int = 1800
     unattended_soft_mode: bool = False
+    # True on surfaces where nobody watches the tool trace scroll by -- the
+    # tool-outcome footer is only useful there. Set by the caller, not from
+    # config.yaml, so there is one definition of "unattended".
+    unattended: bool = False
     configuration_warning: str = ""
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
     mutating_tools: frozenset[str] = field(default_factory=lambda: MUTATING_TOOL_NAMES)
@@ -395,6 +399,12 @@ class ToolCallGuardrailController:
         self._persisted_result_paths: dict[str, str] = {}
         self._turn_web_search_count = 0
         self._turn_subagent_count = 0
+        # Per-turn tally for FABRICATION-REMEDY-001. The existing counters
+        # measure repetition; these measure this turn's outcome, which is a
+        # different property and the one that went unguarded on 2026-08-19.
+        self._turn_calls_attempted = 0
+        self._turn_calls_failed = 0
+        self._turn_failed_tools: list[str] = []
 
     def reset_for_session(self) -> None:
         """Clear all state when the agent session identity changes."""
@@ -405,6 +415,14 @@ class ToolCallGuardrailController:
     @property
     def halt_decision(self) -> ToolGuardrailDecision | None:
         return self._halt_decision
+
+    def turn_tool_outcome(self) -> "TurnToolOutcome":
+        """This turn's tool-call tally, for the outcome footer."""
+        return TurnToolOutcome(
+            attempted=self._turn_calls_attempted,
+            failed=self._turn_calls_failed,
+            failed_tools=tuple(self._turn_failed_tools),
+        )
 
     def _decide(
         self, action: str, code: str, tool_name: str, count: int, signature: ToolCallSignature,
@@ -460,6 +478,12 @@ class ToolCallGuardrailController:
         if failed is None:
             failed, _ = classify_tool_failure(tool_name, result)
         warnings = self.config.warnings_enabled
+
+        self._turn_calls_attempted += 1
+        if failed:
+            self._turn_calls_failed += 1
+            if tool_name not in self._turn_failed_tools:
+                self._turn_failed_tools.append(tool_name)
 
         if failed:
             # An identical failing call is only a REPLAY if nothing landed in between;
@@ -618,6 +642,76 @@ class ToolCallGuardrailController:
             oldest = sorted(self._cross_turn_failures.items(), key=lambda item: item[1][1])[:overflow]
             for key, _value in oldest:
                 self._cross_turn_failures.pop(key, None)
+
+
+@dataclass(frozen=True)
+class TurnToolOutcome:
+    """What this turn's tool calls actually did."""
+
+    attempted: int
+    failed: int
+    failed_tools: tuple[str, ...]
+
+    @property
+    def all_failed(self) -> bool:
+        return self.attempted > 0 and self.failed == self.attempted
+
+
+def format_tool_outcome_footer(
+    outcome: "TurnToolOutcome", *, unattended: bool
+) -> str:
+    """Footer stating what the tool calls did, or "" when nothing is owed.
+
+    FABRICATION-REMEDY-001. On 2026-08-19 an agent's two tool calls both
+    failed and it reported a detailed success -- four lanes, per-lane runtimes
+    to 10ms, a verifier pass -- that no store recorded. Nothing in the loop
+    compared the response against what the tools returned.
+
+    Two behaviours, deliberately separated:
+
+    A1 -- every call this turn failed. The response cannot be reporting work
+    that happened, so say so unconditionally, on every surface. This is a
+    counter comparison, not a judgement about the response text: reading the
+    prose to decide whether it "claims success" is the general problem
+    (option A2 in the ticket) and is not solved here.
+
+    B -- some calls failed. State the counts on unattended surfaces only.
+    An interactive user watched the tool calls scroll past; a Telegram reader
+    saw only the prose and cannot tell a real result from a fabricated one.
+
+    Silent when no call failed. Always-on was considered and rejected as
+    noise; the cost is that absence now carries meaning, so a bug that stops
+    the footer rendering would read as success.
+
+    Two gaps, both deliberate and neither closed here:
+
+    - **One success defeats A1.** Three failures and one trivial success make
+      ``all_failed`` false, so on an attended surface that turn gets no footer
+      at all and can still report a fabricated success. A1 is the
+      all-or-nothing case by construction; the mixed case is B's, and B is
+      unattended-only.
+    - **Nothing reads the response.** A turn whose calls all succeeded can
+      still describe results they did not produce. That is A2 in the ticket
+      and is not solved here.
+    """
+
+    if outcome.attempted == 0 or outcome.failed == 0:
+        return ""
+
+    tools = ", ".join(outcome.failed_tools)
+    if outcome.all_failed:
+        n = outcome.attempted
+        calls = "tool call" if n == 1 else "tool calls"
+        return (
+            f"[tool outcome] All {n} {calls} this turn failed ({tools}). "
+            "Nothing above that depends on their results is confirmed."
+        )
+    if not unattended:
+        return ""
+    return (
+        f"[tool outcome] {outcome.failed} of {outcome.attempted} tool calls "
+        f"this turn failed ({tools})."
+    )
 
 
 def toolguard_synthetic_result(decision: ToolGuardrailDecision) -> str:

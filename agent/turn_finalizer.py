@@ -92,7 +92,6 @@ def _clone_background_review_messages(messages):
     """Copy the review input without aliasing the live transcript."""
     # Lazy: conversation_loop imports this module (cycle).
     from agent.conversation_loop import _clone_message_for_send
-
     return [_clone_message_for_send(message) for message in messages]
 
 
@@ -438,6 +437,7 @@ def finalize_turn(
 ):
     """Run the post-loop finalization and return the turn ``result`` dict."""
     from agent.conversation_loop import logger
+    from agent.tool_guardrails import format_tool_outcome_footer
 
     final_response, _turn_exit_reason, preserved_verification_fallback = _resolve_budget_fallback(
         agent, final_response=final_response, api_call_count=api_call_count,
@@ -495,6 +495,20 @@ def finalize_turn(
     # Response transforms apply only to real, uninterrupted responses.
     if final_response and not interrupted:
         final_response = _append_file_mutation_footer(agent, final_response, logger)
+        # Tool-outcome footer (FABRICATION-REMEDY-001). A guardrail halt already
+        # explains repeated failures, so do not append a duplicate notice.
+        if _turn_exit_reason != "guardrail_halt":
+            try:
+                _guardrails = getattr(agent, "_tool_guardrails", None)
+                if _guardrails is not None:
+                    _footer = format_tool_outcome_footer(
+                        _guardrails.turn_tool_outcome(),
+                        unattended=_guardrails.config.unattended,
+                    )
+                    if _footer:
+                        final_response = final_response.rstrip() + "\n\n" + _footer
+            except Exception as _out_err:
+                logger.debug("tool-outcome footer failed: %s", _out_err)
     if not interrupted:
         final_response = _explain_abnormal_exit(
             agent, final_response, _turn_exit_reason, preserved_verification_fallback, logger,

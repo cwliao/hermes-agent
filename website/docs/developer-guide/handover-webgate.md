@@ -193,13 +193,13 @@ Config/security health baseline：
 
 Telegram channel note：
 
-- Hermes has successfully used Telegram chat id `-1003954447810`.
+- Hermes has successfully used Telegram chat id `<ITRIGEL_CHAT_ID>`.
 - Previous startup notification failed because `TELEGRAM_HOME_CHANNEL` was
-  `-3954447810`, missing the `-100` supergroup/channel prefix.
+  `<ITRIGEL_CHAT_ID_WITHOUT_PREFIX>`, missing the `-100` supergroup/channel prefix.
 - Intended home-channel value should be:
 
 ```env
-TELEGRAM_HOME_CHANNEL=-1003954447810
+TELEGRAM_HOME_CHANNEL=<ITRIGEL_CHAT_ID>
 ```
 
 Do not change Telegram token/user allowlist values unless explicitly requested.

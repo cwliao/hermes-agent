@@ -435,3 +435,88 @@ def test_completion_requirements_reject_a_subset(tmp_path):
                 )
     finally:
         conn.close()
+
+
+class TestNoPartialGraphOnValidationFailure:
+    """SWARM-E2E-DEFECTS-001 Defect 1.
+
+    The per-worker skill check used to run inside the creation loop, so an
+    invalid later worker left a root and the earlier workers behind. Those
+    cards were `ready`, so the dispatcher claimed and ran them -- work whose
+    output no verifier would consume, because no verifier had been created.
+
+    Observed in production on 2026-08-19: an agent's first `kanban swarm`
+    invocation left root t_6109f004 and two workers, and they ran.
+    """
+
+    @staticmethod
+    def _specs(bad_index):
+        specs = []
+        for i, lane in enumerate(MULTI_AGENT_LANE_IDS):
+            skills = [] if lane == "native_hermes" else ["kanban-worker"]
+            if i == bad_index:
+                skills = []  # external lane with no skill -- the invalid case
+            specs.append(
+                SwarmWorkerSpec(
+                    profile=lane, title=f"{lane} joke", body="Return one joke.",
+                    skills=skills, lane_id=lane,
+                )
+            )
+        return specs
+
+    def _attempt(self, conn, bad_index):
+        with pytest.raises(ValueError, match="requires a preflight skill id"):
+            create_swarm(
+                conn,
+                goal="Ask four agents for one joke.",
+                workers=self._specs(bad_index),
+                verifier_assignee="verifier",
+                synthesizer_assignee="synthesizer",
+                tenant="atomicity-test",
+            )
+
+    def test_an_invalid_last_worker_leaves_no_cards(self, tmp_path):
+        """The worst case: everything before it is valid, so under the old
+        code the root and three workers were already committed."""
+        conn = kb.connect(tmp_path / "kanban.db")
+        try:
+            self._attempt(conn, bad_index=len(MULTI_AGENT_LANE_IDS) - 1)
+            rows = conn.execute("select count(*) from tasks").fetchone()[0]
+            assert rows == 0, f"{rows} card(s) survived a rejected swarm"
+        finally:
+            conn.close()
+
+    def test_an_invalid_middle_worker_leaves_no_cards(self, tmp_path):
+        conn = kb.connect(tmp_path / "kanban.db")
+        try:
+            self._attempt(conn, bad_index=1)
+            assert conn.execute("select count(*) from tasks").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_a_valid_swarm_is_unaffected(self, tmp_path):
+        """The check must still let a correct graph through -- moving a
+        validation earlier is only safe if it did not become stricter."""
+        conn = kb.connect(tmp_path / "kanban.db")
+        try:
+            specs = [
+                SwarmWorkerSpec(
+                    profile=lane, title=f"{lane} joke", body="Return one joke.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"],
+                    lane_id=lane,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ]
+            created = create_swarm(
+                conn,
+                goal="Ask four agents for one joke.",
+                workers=specs,
+                verifier_assignee="verifier",
+                synthesizer_assignee="synthesizer",
+                tenant="atomicity-test",
+            )
+            assert len(created.worker_ids) == len(MULTI_AGENT_LANE_IDS)
+            assert kb.get_task(conn, created.verifier_id) is not None
+            assert kb.get_task(conn, created.synthesizer_id) is not None
+        finally:
+            conn.close()

@@ -4237,7 +4237,14 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("answer the uploaded document")
 
-        assert result["final_response"] == "Recovered after tool errors."
+        # Both tool calls failed, so the tool-outcome footer is appended
+        # (FABRICATION-REMEDY-001). The model's own "Recovered" wording is not
+        # evidence that anything recovered -- that is what the footer states
+        # from the tally rather than from the prose.
+        assert result["final_response"].startswith("Recovered after tool errors.")
+        assert (
+            "All 2 tool calls this turn failed" in result["final_response"]
+        )
         assert result["api_calls"] == 3
         second_messages = agent.client.chat.completions.create.call_args_list[1].kwargs[
             "messages"

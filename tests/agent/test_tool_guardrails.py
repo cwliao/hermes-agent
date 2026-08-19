@@ -10,6 +10,7 @@ from agent.tool_guardrails import (
     ToolCallSignature,
     canonical_tool_args,
     classify_tool_failure,
+    format_tool_outcome_footer,
 )
 
 
@@ -432,3 +433,125 @@ def test_cross_turn_ledger_evicts_oldest_entry_when_bounded():
 
     assert len(controller._cross_turn_failures) == 2
     assert controller.before_call("write_file", first).action == "allow"
+
+
+# --- FABRICATION-REMEDY-001: turn tool-outcome tally and footer ---------------
+#
+# The 2026-08-19 incident: two tool calls, both failed, and the response
+# asserted a detailed success -- four lanes, per-lane runtimes to 10ms, a
+# verifier pass -- that no store recorded. The existing counters measure
+# repetition and correctly stayed silent at two failures. These cover the
+# property that went unguarded: what this turn's calls actually did.
+
+
+def _controller(*, unattended=False):
+    return ToolCallGuardrailController(
+        ToolCallGuardrailConfig(unattended=unattended)
+    )
+
+
+def _record(controller, tool_name, *, failed):
+    controller.after_call(tool_name, {"command": "x"}, "result", failed=failed)
+
+
+def test_all_calls_failed_is_reported_on_every_surface():
+    """A1. The incident shape, and the reason this is not gated on
+    `unattended`: if no tool call succeeded, nothing the response says about
+    their results can be true, wherever it is read."""
+    for unattended in (True, False):
+        c = _controller(unattended=unattended)
+        _record(c, "terminal", failed=True)
+        _record(c, "terminal", failed=True)
+        outcome = c.turn_tool_outcome()
+        assert outcome.all_failed
+        footer = format_tool_outcome_footer(outcome, unattended=unattended)
+        assert "All 2 tool calls this turn failed" in footer
+        assert "terminal" in footer
+
+
+def test_partial_failure_is_reported_only_where_nobody_watched():
+    """B. An interactive user saw the calls scroll past; a Telegram reader
+    saw only the prose."""
+    for unattended, expected in ((True, True), (False, False)):
+        c = _controller(unattended=unattended)
+        _record(c, "terminal", failed=True)
+        _record(c, "read_file", failed=False)
+        _record(c, "read_file", failed=False)
+        footer = format_tool_outcome_footer(
+            c.turn_tool_outcome(), unattended=unattended
+        )
+        assert bool(footer) is expected
+        if expected:
+            assert "1 of 3 tool calls" in footer
+
+
+def test_no_failure_and_no_calls_are_both_silent():
+    c = _controller(unattended=True)
+    assert format_tool_outcome_footer(c.turn_tool_outcome(), unattended=True) == ""
+    _record(c, "read_file", failed=False)
+    assert format_tool_outcome_footer(c.turn_tool_outcome(), unattended=True) == ""
+
+
+def test_a_single_failed_call_is_all_failed():
+    """Boundary: one call, failed. `all_failed` must not require a plural."""
+    c = _controller()
+    _record(c, "terminal", failed=True)
+    footer = format_tool_outcome_footer(c.turn_tool_outcome(), unattended=False)
+    assert "All 1 tool call this turn failed" in footer
+
+
+def test_failed_tools_are_deduplicated_in_order():
+    c = _controller(unattended=True)
+    _record(c, "terminal", failed=True)
+    _record(c, "read_file", failed=True)
+    _record(c, "terminal", failed=True)
+    assert c.turn_tool_outcome().failed_tools == ("terminal", "read_file")
+
+
+def test_tally_resets_between_turns():
+    """Without this the footer would accuse a clean turn of the previous
+    turn's failures."""
+    c = _controller(unattended=True)
+    _record(c, "terminal", failed=True)
+    c.reset_for_turn()
+    _record(c, "read_file", failed=False)
+    outcome = c.turn_tool_outcome()
+    assert (outcome.attempted, outcome.failed) == (1, 0)
+    assert format_tool_outcome_footer(outcome, unattended=True) == ""
+
+
+def test_tally_is_independent_of_the_repetition_thresholds():
+    """The incident's two failures are below every warn/halt threshold. The
+    footer must not inherit that gating -- that is the whole point."""
+    c = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            unattended=True,
+            warnings_enabled=False,
+            hard_stop_enabled=False,
+        )
+    )
+    _record(c, "terminal", failed=True)
+    _record(c, "terminal", failed=True)
+    assert c.halt_decision is None
+    footer = format_tool_outcome_footer(c.turn_tool_outcome(), unattended=True)
+    assert "All 2 tool calls this turn failed" in footer
+
+
+def test_one_success_defeats_a1_on_an_attended_surface():
+    """Pins the acknowledged gap rather than leaving it to the docstring.
+
+    Three failures and one success: `all_failed` is false, so A1 does not
+    fire, and B is unattended-only -- an attended turn gets nothing. If this
+    ever starts producing a footer, the scoping changed and the docstring is
+    stale.
+    """
+    c = _controller(unattended=False)
+    _record(c, "terminal", failed=True)
+    _record(c, "terminal", failed=True)
+    _record(c, "terminal", failed=True)
+    _record(c, "read_file", failed=False)
+    outcome = c.turn_tool_outcome()
+    assert not outcome.all_failed
+    assert format_tool_outcome_footer(outcome, unattended=False) == ""
+    # The same turn on an unattended surface is covered by B.
+    assert "3 of 4 tool calls" in format_tool_outcome_footer(outcome, unattended=True)

@@ -171,7 +171,12 @@ def test_housekeeping_only_turn_still_sets_fallback():
     ):
         result = agent.run_conversation("save this")
 
-    assert result["final_response"] == "You're welcome!", (
+    # The memory call failed and the response is recycled prior-turn content,
+    # so the tool-outcome footer (FABRICATION-REMEDY-001) is appended. That is
+    # the point here, not an artifact: the user said "save this", the save
+    # failed, and "You're welcome!" would otherwise read as confirmation.
+    assert "All 1 tool call this turn failed (memory)" in result["final_response"]
+    assert result["final_response"].startswith("You're welcome!"), (
         f"Expected housekeeping fallback content, got: {result['final_response']}. "
         f"Pure housekeeping turns should still set the fallback."
     )

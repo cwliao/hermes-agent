@@ -1,7 +1,7 @@
 # Project Handover - hermes-agent
 
 Plan key: `hermes-agent`
-Last verified: 2026-08-18 (Asia/Taipei), Claude continuation session
+Last verified: 2026-08-19 (Asia/Taipei), Claude continuation session
 Authoritative roadmap: `docs/ROADMAP-HERMES-DGX.md`
 
 ## 1. Project identity and boundary
@@ -11,12 +11,17 @@ Verified in this session unless marked carried forward.
 - Repository: `https://github.com/cwliao/hermes-agent`
 - `origin` = `git@github.com:cwliao/hermes-agent.git`; `upstream` fetch is
   `NousResearch/hermes-agent` with push set to `DISABLE`.
-- PR #49's merge commit `1b5d75a8838b9eab5c4ec47c1588cbdb76fc9114` landed on
-  `main`; the pre-merge base was `10314ad04d...` (itself PR #48's merge plus
-  two docs-only commits). This handover update is the docs-only commit
-  sitting directly on top of that merge commit, so the current `origin/main`
-  is this commit. Re-read `origin/main` rather than trusting a SHA quoted
-  inside the file it names.
+- Re-read `origin/main` directly; do not trust a SHA quoted inside the file
+  that names it. As of this update, main carried (oldest first): PR #48
+  (four-lane contract), PR #49 (lane quorum 2-of-3), PR #51 (test log
+  isolation), PR #50 (klib orchestration lineage, 46 commits/+8448 lines,
+  merged by another session), PR #53 (T0160 Telegram KLIB Brain), PR #54
+  (T0136 klib MCP concatenated-JSON parsing).
+- **Production is deliberately BEHIND main.** The gateway is pinned at
+  `547f82d8129e6fdac8166a2d62e4cdacf46cdaf3` (PR #51's merge), which
+  predates PR #50's klib lineage. That was a deliberate blast-radius choice:
+  those 46 commits were unreviewed by this session and touch Telegram
+  behaviour. Do not "catch production up" without a decision.
 - Local primary checkout in this environment: `~/.hermes/hermes-agent`,
   branch `main`, HEAD `b7b362b2f1bcf494ba7f0acf2236452caacb05b6`, clean
   (`git status --porcelain` empty). It is now well behind `origin/main`
@@ -57,6 +62,87 @@ Verified in this session unless marked carried forward.
 
 This handover covers the four-lane Kanban worker correction ticket. It does
 not claim that the current PR is deployed or Telegram user-visible.
+
+## 1b. 2026-08-19 session: what actually happened
+
+Six PRs merged, one deploy, and the four-lane end-to-end test run for the
+first time. In order:
+
+- **PR #51** — test log isolation. `pytest` was writing into the operator's
+  real `~/.hermes/logs/agent.log` (61 records in one 2-second window),
+  tripping the hourly secret-audit cron with 62 false positives. Fixed in
+  `tests/conftest.py` only. Reviewed under the two-of-three rule across
+  three rounds (AGY and Grok each caught a real design flaw; Claude rejected
+  the first shape on throughput grounds).
+- **PR #52** — AGY lane root cause. Not a permissions problem: a globally
+  installed `slave-mode` skill forces every AGY reply into an ASCII dashboard
+  whose fields require shell reconnaissance, which is auto-denied headless.
+  The fix is a bounded no-tool instruction in the AGY *CLI prompt*, not an
+  allowlist and not a settings change.
+- **PR #53 / #54** — inherited from the klib session (T0160, T0136). Merged,
+  then **retrospectively cross-reviewed** after the operator pointed out the
+  process violation. Verified safe; see Section 5's note on why that was luck
+  rather than method.
+- **PR #56** — closed, not merged. Superseded: `main` already solves T0140
+  via `gateway_identity.identity_from_project`, whose `LEGACY_MARKERS`
+  covers the `RELEASE_COMMIT` marker the patch keyed on.
+- **PR #57** — the gateway `fresh-final` flake, unexplained since PR #48,
+  is **not a flake**. Three tests pinned `_message_created_ts = 0.0` and
+  relied on `time.monotonic()` (which counts from boot on Linux) exceeding a
+  60s threshold. True on a 9-day-uptime dev box, false on a freshly-booted
+  CI runner. Fixed deterministically; all eight CI slices green.
+- **Deploy** — the gateway was moved from `dd7a0164` to `547f82d812`
+  (drop-in `44-hermes-lane-quorum-547f82d812.conf`, rollback target
+  `dd7a0164` intact as drop-in 43). Two artifacts that `git archive` omits
+  because they are untracked — `hermes_cli/web_dist/` and
+  `.hermes-release-sha` — were initially missing and had to be restored.
+  **Any future release built from `git archive` must be diffed against the
+  outgoing release before the service is pointed at it.**
+- **klib config** — `config.yaml:633` pointed the gateway's klib MCP server
+  at a deleted worktree. Corrected to the canonical root
+  `/home/cwliao/project/klib/server/klib_mcp.py`, verified with klib's own
+  `check_canonical_root_refs.sh` (PASS). The MCP child now spawns cleanly.
+
+## 1c. Four-lane end-to-end test — first real run (2026-08-19)
+
+Run under tenant `e2e-fourlane-v2`, root `t_6576cd95`, against the deployed
+release. Result: **the graph completed, but not autonomously.**
+
+| gate | result |
+|---|---|
+| 3 runtime preflight | PASS — all four lanes resolved a CLI and a skill |
+| 4 graph construction | PASS on the second attempt (see Defect 1 below) |
+| 5 worker completion | **PASS, unassisted** — all four lanes completed with contract-valid metadata enforced by `validate_completion` |
+| 6 verifier / synthesis | **PARTIAL** — the fail-closed unlock worked, but both cards blocked and were completed manually from the CLI |
+| 7 Dashboard | not attempted |
+| 8 Telegram | not attempted |
+| 9 cleanup | old cards archived; `e2e-fourlane-v2` cards left completed |
+
+All four lanes produced real jokes in their `result` fields, including
+`agy`, which could not run at all earlier the same day.
+
+**Four defects fell out, none of which unit tests, CI, or packet review had
+found.** They are written up in
+`docs/plans/2026-08-19-swarm-e2e-defects-001.md`, which passed review at
+Claude PASS / AGY PASS after **eight rounds** — every round found a real
+fault, all of the same class (a checkable claim stated without the evidence
+to check it). Round 1's central thesis was outright false. That ticket's
+review history is worth reading before trusting any single-pass document:
+
+1. `create_swarm()` is not atomic — a validation failure on the second
+   worker still left a root and a live worker that the dispatcher picked up
+   and ran.
+2. The verifier card is dispatched without `kanban-worker`, the only skill
+   documenting its own completion contract.
+3. The synthesizer card has the same gap.
+4. `validate_completion` requires a non-empty task `result`, while the
+   model-facing tool schema labels `result` "legacy" and tells agents to use
+   `summary` instead.
+
+The gate-5 versus gate-6 asymmetry is the evidence tying 2 and 3 together:
+workers carry the contract skill and all four succeeded unassisted; the two
+cards without it both deadlocked. The gates themselves are sound — correct
+metadata submitted from the CLI was accepted immediately in both cases.
 
 ## 2. Current goal and roadmap
 

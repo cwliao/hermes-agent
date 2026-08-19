@@ -1,6 +1,7 @@
 """Tests for /restart notification — the gateway notifies the requester on comeback."""
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -305,6 +306,66 @@ async def test_send_home_channel_startup_notification_preserves_thread_metadata(
         },
     )
 
+
+@pytest.mark.asyncio
+async def test_home_startup_waits_for_telegram_readiness(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    runner, adapter = make_restart_runner()
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="home-42",
+        name="Ops Home",
+    )
+    adapter._startup_ready = AsyncMock(return_value=True)
+
+    async def wait_until_send_path_ready(self, *, timeout):
+        return await self._startup_ready(timeout=timeout)
+
+    adapter.__class__ = type(
+        "ReadyRestartAdapter",
+        (type(adapter),),
+        {"wait_until_send_path_ready": wait_until_send_path_ready},
+    )
+    adapter.send = AsyncMock()
+
+    delivered = await runner._send_home_channel_startup_notifications()
+
+    assert delivered == {("telegram", "home-42", None)}
+    adapter._startup_ready.assert_awaited_once_with(timeout=60.0)
+    adapter.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_home_startup_skips_when_telegram_readiness_times_out(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    caplog.set_level(logging.INFO)
+
+    runner, adapter = make_restart_runner()
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="home-42",
+        name="Ops Home",
+    )
+    adapter._startup_ready = AsyncMock(return_value=False)
+
+    async def wait_until_send_path_ready(self, *, timeout):
+        return await self._startup_ready(timeout=timeout)
+
+    adapter.__class__ = type(
+        "NotReadyRestartAdapter",
+        (type(adapter),),
+        {"wait_until_send_path_ready": wait_until_send_path_ready},
+    )
+    adapter.send = AsyncMock()
+
+    delivered = await runner._send_home_channel_startup_notifications()
+
+    assert delivered == set()
+    adapter.send.assert_not_awaited()
+    assert "send path not ready" in caplog.text
 
 @pytest.mark.asyncio
 async def test_send_home_channel_startup_notification_skips_restart_target(

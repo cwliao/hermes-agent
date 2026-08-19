@@ -59,6 +59,7 @@ from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.i18n import t
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
+from plugins.klib import _truncate_display
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -101,6 +102,53 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
 _GATEWAY_RAW_TEXT_PLATFORMS = frozenset(
     {"local", "api_server", "webhook", "msgraph_webhook"}
 )
+
+# A real out-of-band steer marker is injected by Hermes into tool-result
+# context, never generated as assistant content. Keep this detector narrow:
+# it only matches a bracket-delimited phrase containing both halves of that
+# marker concept, rather than looking for user/message words in general.
+_GATEWAY_SELF_IMPERSONATION_RE = re.compile(
+    r"\[\s*/?\s*"
+    r"(?=[^\]]*\bout[\s_\-\u2010-\u2015]*of[\s_\-\u2010-\u2015]*band\b)"
+    r"(?=[^\]]*\buser[\s_\-\u2010-\u2015]*message\b)"
+    r"[^\]]*\]",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _is_entirely_bracket_wrapped(text: str) -> bool:
+    """Return whether text is only balanced square-bracketed content.
+
+    A depth scan avoids treating an unbalanced leading/trailing pair as one
+    structural span.  Once the first span closes, only whitespace may occur
+    before another span; this deliberately treats ``[foo] [bar]`` as
+    suspicious too, since it has no substantial content outside brackets.
+    """
+    body = text.strip()
+    if len(body) < 2 or body[0] != "[" or body[-1] != "]":
+        return False
+
+    depth = 0
+    closed_top_level_span = False
+    for char in body:
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth < 0:
+                return False
+            if depth == 0:
+                closed_top_level_span = True
+        elif depth == 0 and not char.isspace():
+            # Non-whitespace text between top-level bracket spans is
+            # legitimate prose outside the bracket wrapper.
+            return False
+        elif depth == 0 and closed_top_level_span:
+            # Whitespace between adjacent bracket spans is allowed by the
+            # intentional suspicious-shape policy described above.
+            continue
+
+    return depth == 0
 
 
 def _gateway_surface_passes_raw_text(platform: Any) -> bool:
@@ -452,6 +500,26 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     """
     if not text:
         return text
+
+    raw_text = str(text)
+    if _GATEWAY_SELF_IMPERSONATION_RE.search(raw_text):
+        logger.warning(
+            "Blocked model self-impersonation attempt on %s; original content "
+            "was not delivered: %s",
+            platform,
+            raw_text,
+        )
+        return "⚠️ The model produced an invalid response and it was blocked for safety review."
+
+    if _is_entirely_bracket_wrapped(raw_text):
+        logger.warning(
+            "Blocked model self-impersonation attempt on %s; original content "
+            "was not delivered: %s",
+            platform,
+            raw_text,
+        )
+        return "⚠️ The model produced an invalid response and it was blocked for safety review."
+
     if _gateway_surface_passes_raw_text(platform):
         return text
 
@@ -460,7 +528,7 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     if str(text).strip().startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX):
         return ""
 
-    redacted = _redact_gateway_user_facing_secrets(str(text))
+    redacted = _redact_gateway_user_facing_secrets(raw_text)
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
@@ -1025,6 +1093,7 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "text_to_speech",
     "text_to_speech_tool",
     "image_generate",
+    "render_mermaid",
 }
 
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------
@@ -2098,7 +2167,54 @@ def _build_media_placeholder(event) -> str:
     return "\n".join(parts)
 
 
-def _build_document_context_note(display_name: str, agent_path: str, mtype: str) -> str:
+_DOCUMENT_MTYPE_TO_SKILL = {
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "powerpoint",
+}
+_PPTX_MTYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_PPTX_INLINE_TEXT_MAX_LENGTH = 20_000
+
+
+async def _try_extract_pptx_text(path: str, timeout: int = 20) -> str | None:
+    """Best-effort server-side extraction of a PPTX's text via markitdown."""
+    proc = None
+    filename = os.path.basename(path)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "markitdown",
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode != 0:
+            raise RuntimeError("markitdown returned a non-zero exit code")
+        extracted = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
+        if not extracted:
+            raise RuntimeError("markitdown returned empty output")
+        return extracted
+    except asyncio.TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    logger.warning("PPTX text extraction failed for %s", filename)
+    return None
+
+
+def _build_document_context_note(
+    display_name: str,
+    agent_path: str,
+    mtype: str,
+    *,
+    ingested: bool = False,
+    extracted_text: str | None = None,
+) -> str:
     """Context note prepended to a user turn when they attach a document.
 
     Text documents (``text/*``) have their content inlined upstream by the
@@ -2116,6 +2232,32 @@ def _build_document_context_note(display_name: str, agent_path: str, mtype: str)
             f"Its content has been included below. "
             f"The file is also saved at: {agent_path}]"
         )
+    if ingested:
+        return (
+            f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
+            f"Its text is not inlined here, but DocuBot has processed and stored the file. "
+            f"Its content is not guaranteed to be available through klib's search tools "
+            f"(mcp__klib__search, mcp__klib__semantic_search, or "
+            f"mcp__klib__list_resources). If those queries return no results, tell the "
+            f"user honestly that you can't find it right now; do not use the terminal tool "
+            f"or write a script to parse the file yourself.]"
+        )
+    skill = _DOCUMENT_MTYPE_TO_SKILL.get(mtype)
+    if skill:
+        if extracted_text:
+            extracted = _truncate_display(extracted_text, _PPTX_INLINE_TEXT_MAX_LENGTH)
+            if extracted:
+                return (
+                    f"[The user sent a document: '{display_name}'. "
+                    f"Its content has been included below:\n\n"
+                    f"{extracted}\n\n"
+                    f"The file is also saved at: {agent_path}]"
+                )
+        return (
+            f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
+            f"Its text is not inlined here. Use the {skill} skill to extract its text "
+            f"before answering.]"
+        )
     return (
         f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
         f"Its text is not inlined here (it's a binary format such as PDF or DOCX). "
@@ -2123,6 +2265,20 @@ def _build_document_context_note(display_name: str, agent_path: str, mtype: str)
         f"terminal tool or the ocr-and-documents skill — before answering, instead "
         f"of asking the user to paste the contents.]"
     )
+
+
+def _telegram_docubot_ingested_for_path(event: Any, path: str) -> bool:
+    """Return whether Telegram's DocuBot pipeline accepted this attachment."""
+    source = getattr(event, "source", None)
+    if getattr(source, "platform", None) != Platform.TELEGRAM:
+        return False
+
+    metadata = getattr(event, "metadata", None) or {}
+    results = metadata.get("docubot_ingest_results")
+    if not isinstance(results, dict):
+        return False
+    record = results.get(path)
+    return isinstance(record, dict) and record.get("succeeded") is True
 
 
 def _format_duration(seconds: float) -> str:
@@ -10804,8 +10960,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # This ensures the agent receives a path it can open inside its sandbox, as the
                 # cache directories are auto-mounted at /root/.hermes/cache/* by get_cache_directory_mounts().
                 agent_path = to_agent_visible_cache_path(path)
+                extracted_text = None
+                if mtype == _PPTX_MTYPE:
+                    extracted_text = await _try_extract_pptx_text(path)
 
-                context_note = _build_document_context_note(display_name, agent_path, mtype)
+                context_note = _build_document_context_note(
+                    display_name,
+                    agent_path,
+                    mtype,
+                    ingested=_telegram_docubot_ingested_for_path(event, path),
+                    extracted_text=extracted_text,
+                )
                 message_text = f"{context_note}\n\n{message_text}"
 
         # Discord: surface the triggering message id per-turn on the user
@@ -15290,6 +15455,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             target = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
             if target in skipped or target in delivered:
                 continue
+
+            wait_until_ready = getattr(type(adapter), "wait_until_send_path_ready", None)
+            if callable(wait_until_ready):
+                ready = await adapter.wait_until_send_path_ready(timeout=60.0)
+                if not ready:
+                    logger.info(
+                        "Home-channel startup notification skipped for %s:%s: send path not ready",
+                        platform.value,
+                        home.chat_id,
+                    )
+                    continue
 
             try:
                 metadata = self._thread_metadata_for_target(

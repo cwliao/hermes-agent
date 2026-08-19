@@ -162,7 +162,7 @@ class TestUnitTypeCoverage:
         assert "listener.socket" in r.stderr
 
     def test_flapping_layer_covers_non_service_units(self, tmp_path):
-        journal = "\n".join(["backup.timer: Failed with result 'exit-code'"] * 7)
+        journal = "\n".join(["Aug 19 20:00:41 host systemd[2859]: backup.timer: Failed with result 'exit-code'"] * 7)
         r = _run(tmp_path, "", journal=journal)
         assert "backup.timer" in r.stderr
 
@@ -175,19 +175,19 @@ class TestUnitNameCharacters:
 
     def test_uppercase_unit_name_in_flapping_layer(self, tmp_path):
         journal = "\n".join(
-            ["org.freedesktop.IBus.session.GNOME.service: Failed with result 'exit-code'"] * 7
+            ["Aug 19 20:00:41 host systemd[2859]: org.freedesktop.IBus.session.GNOME.service: Failed with result 'exit-code'"] * 7
         )
         r = _run(tmp_path, "", journal=journal)
         assert "IBus.session.GNOME" in r.stderr
 
     def test_underscore_unit_name_in_flapping_layer(self, tmp_path):
-        journal = "\n".join(["Backup_Job.service: Failed with result 'exit-code'"] * 7)
+        journal = "\n".join(["Aug 19 20:00:41 host systemd[2859]: Backup_Job.service: Failed with result 'exit-code'"] * 7)
         r = _run(tmp_path, "", journal=journal)
         assert "Backup_Job.service" in r.stderr
 
     def test_templated_unit_name_in_flapping_layer(self, tmp_path):
         journal = "\n".join(
-            ["app-org.gnome.DejaDup.Monitor@autostart.service: Failed with result 'exit-code'"] * 7
+            ["Aug 19 20:00:41 host systemd[2859]: app-org.gnome.DejaDup.Monitor@autostart.service: Failed with result 'exit-code'"] * 7
         )
         r = _run(tmp_path, "", journal=journal)
         assert "DejaDup.Monitor@autostart" in r.stderr
@@ -223,16 +223,16 @@ class TestFlapDebounceIgnoresCount:
     """
 
     def test_rising_failure_count_does_not_re_alert(self, tmp_path):
-        seven = "\n".join(["flappy.service: Failed with result 'exit-code'"] * 7)
-        eight = "\n".join(["flappy.service: Failed with result 'exit-code'"] * 8)
+        seven = "\n".join(["Aug 19 20:00:41 host systemd[2859]: flappy.service: Failed with result 'exit-code'"] * 7)
+        eight = "\n".join(["Aug 19 20:00:41 host systemd[2859]: flappy.service: Failed with result 'exit-code'"] * 8)
         first = _run(tmp_path, "", journal=seven)
         assert "flappy.service" in first.stderr
         second = _run(tmp_path, "", journal=eight)
         assert "flappy.service" not in second.stderr, "re-alerted on a count change alone"
 
     def test_new_flapping_unit_does_re_alert(self, tmp_path):
-        one = "\n".join(["a.service: Failed with result 'exit-code'"] * 7)
-        two = one + "\n" + "\n".join(["b.service: Failed with result 'exit-code'"] * 7)
+        one = "\n".join(["Aug 19 20:00:41 host systemd[2859]: a.service: Failed with result 'exit-code'"] * 7)
+        two = one + "\n" + "\n".join(["Aug 19 20:00:41 host systemd[2859]: b.service: Failed with result 'exit-code'"] * 7)
         _run(tmp_path, "", journal=one)
         r = _run(tmp_path, "", journal=two)
         assert "b.service" in r.stderr
@@ -272,7 +272,7 @@ class TestFlapDeliveryAccounting:
     test asserted that duplicate as if it were the requirement.
     """
 
-    JOURNAL = "\n".join(["flappy.service: Failed with result 'exit-code'"] * 7)
+    JOURNAL = "\n".join(["Aug 19 20:00:41 host systemd[2859]: flappy.service: Failed with result 'exit-code'"] * 7)
 
     def test_flap_appended_to_primary_is_not_resent(self, tmp_path):
         units = "broken.service loaded failed failed Broken"
@@ -300,7 +300,7 @@ class TestFlappingLayer:
     does not stay failed.
     """
 
-    JOURNAL = "\n".join(["flappy.service: Failed with result 'exit-code'"] * 7)
+    JOURNAL = "\n".join(["Aug 19 20:00:41 host systemd[2859]: flappy.service: Failed with result 'exit-code'"] * 7)
 
     def test_reports_unit_that_failed_repeatedly_but_recovered(self, tmp_path):
         r = _run(tmp_path, "", journal=self.JOURNAL)
@@ -308,13 +308,13 @@ class TestFlappingLayer:
         assert "7 failures" in r.stderr
 
     def test_below_threshold_is_not_reported(self, tmp_path):
-        journal = "\n".join(["rare.service: Failed with result 'exit-code'"] * 2)
+        journal = "\n".join(["Aug 19 20:00:41 host systemd[2859]: rare.service: Failed with result 'exit-code'"] * 2)
         r = _run(tmp_path, "", journal=journal)
         assert "rare.service" not in r.stderr
 
     def test_currently_failed_unit_is_not_double_reported(self, tmp_path):
         """A unit in `--failed` is reported there, not twice."""
-        journal = "\n".join(["broken.service: Failed with result 'exit-code'"] * 9)
+        journal = "\n".join(["Aug 19 20:00:41 host systemd[2859]: broken.service: Failed with result 'exit-code'"] * 9)
         r = _run(tmp_path, "broken.service loaded failed failed Broken", journal=journal)
         assert "currently recovered" not in r.stderr
 
@@ -326,3 +326,149 @@ class TestFlappingLayer:
             FAILED_UNIT_WATCH_IGNORE="flappy.service",
         )
         assert "flappy.service" not in r.stderr
+
+
+class TestRestartsAreNotFailures:
+    """WATCHER-RESTART-NOISE-001.
+
+    `systemctl restart` SIGTERMs the old instance, and if it does not exit 0
+    systemd logs the same `Failed with result` line it logs for a crash.
+    hermes-gateway read as "7 failures today" when it had been deployed seven
+    times.
+
+    Suppression is narrow on purpose: inside a stop sequence AND
+    result=exit-code AND the main process was the one that exited. The three
+    shapes below differ in one of those and must all still count -- the ticket
+    named them as the cases a lifecycle-bracketing rule would mask, and an
+    earlier version of this fix did mask them.
+    """
+
+    P = "Aug 19 20:00:41 host systemd[2859]: "
+
+    RESTART = "\n".join([
+        P + "Stopping svc.service - Some Service...",
+        P + "svc.service: Main process exited, code=exited, status=1/FAILURE",
+        P + "svc.service: Failed with result 'exit-code'.",
+        P + "Stopped svc.service - Some Service.",
+        P + "Started svc.service - Some Service.",
+    ])
+
+    CRASH = "\n".join([
+        P + "svc.service: Main process exited, code=exited, status=1/FAILURE",
+        P + "svc.service: Failed with result 'exit-code'.",
+    ])
+
+    # ExecStop= itself failed. Same window as a restart, control process.
+    EXECSTOP_CRASH = "\n".join([
+        P + "Stopping svc.service - Some Service...",
+        P + "svc.service: Control process exited, code=exited, status=1/FAILURE",
+        P + "svc.service: Failed with result 'exit-code'.",
+        P + "Stopped svc.service - Some Service.",
+    ])
+
+    # Hung on shutdown, killed after TimeoutStopSec. Same window, different result.
+    STOP_TIMEOUT = "\n".join([
+        P + "Stopping svc.service - Some Service...",
+        P + "svc.service: State 'stop-sigterm' timed out. Killing.",
+        P + "svc.service: Failed with result 'timeout'.",
+        P + "Stopped svc.service - Some Service.",
+    ])
+
+    def test_restarts_are_not_reported(self, tmp_path):
+        r = _run(tmp_path, "", journal="\n".join([self.RESTART] * 7))
+        assert "svc.service" not in r.stderr
+        assert r.returncode == 0
+
+    def test_genuine_crashes_are_still_reported(self, tmp_path):
+        r = _run(tmp_path, "", journal="\n".join([self.CRASH] * 6))
+        assert "svc.service (6 failures" in r.stderr
+
+    def test_execstop_crash_is_not_suppressed(self, tmp_path):
+        """Inside the stop window, but a control process exited, not the main
+        one. Masking this was the ticket's first named risk."""
+        r = _run(tmp_path, "", journal="\n".join([self.EXECSTOP_CRASH] * 6))
+        assert "svc.service (6 failures" in r.stderr
+
+    def test_stop_timeout_is_not_suppressed(self, tmp_path):
+        """Inside the stop window, but result is 'timeout', not 'exit-code'.
+        The ticket's second named risk."""
+        r = _run(tmp_path, "", journal="\n".join([self.STOP_TIMEOUT] * 6))
+        assert "svc.service (6 failures" in r.stderr
+
+    def test_restarts_do_not_mask_a_units_real_crashes(self, tmp_path):
+        """A unit that is both restarted and crashing must be counted for its
+        crashes only. Threshold is 5, so 6 crashes must survive 3 restarts."""
+        r = _run(tmp_path, "", journal="\n".join([self.RESTART] * 3 + [self.CRASH] * 6))
+        assert "svc.service (6 failures" in r.stderr
+
+    def test_app_log_naming_its_own_unit_cannot_open_a_stop_window(self, tmp_path):
+        """The application, not systemd, writes this line, and it names the
+        unit exactly as systemd would. Only the `systemd[pid]:` anchor
+        separates them.
+
+        An earlier version of this test used "Stopping worker pool", which
+        passed for the wrong reason -- the extracted token was "worker", so it
+        could never have masked svc.service, and removing the anchor did not
+        fail the test. Verified by negative control.
+        """
+        app = "Aug 19 20:00:41 host svc[999]: Stopping svc.service gracefully"
+        journal = "\n".join([app + "\n" + self.CRASH] * 6)
+        r = _run(tmp_path, "", journal=journal)
+        assert "svc.service (6 failures" in r.stderr
+
+
+class TestShippedUnitFiles:
+    """The second defect in WATCHER-RESTART-NOISE-001 was that nothing
+    asserted anything about the unit files at all, so a unit naming a path
+    that does not exist shipped unnoticed."""
+
+    @staticmethod
+    def _exec_paths():
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parent.parent
+        unit = (repo / "systemd" / "failed-unit-watch.service").read_text()
+        return repo, [
+            line.split("=", 1)[1].strip().split()[0]
+            for line in unit.splitlines()
+            if line.startswith("ExecStart=") and line.split("=", 1)[1].strip()
+        ]
+
+    def test_execstart_names_a_script_this_repo_ships(self):
+        import re
+
+        repo, execs = self._exec_paths()
+        assert execs, "unit declares no ExecStart"
+        for path in execs:
+            name = re.sub(r"^.*/", "", path)
+            assert (repo / "scripts" / name).is_file(), (
+                f"ExecStart names {name}, which this repo does not ship in scripts/"
+            )
+
+    def test_execstart_does_not_point_into_the_development_checkout(self):
+        """The basename check above is not enough, and a negative control
+        proved it: the script has the same filename under either directory, so
+        that test passes with the path pointing at the checkout.
+
+        The checkout is mutable and was found out of sync with its own HEAD on
+        2026-08-19 -- listed by `git ls-tree HEAD`, absent from disk -- so a
+        unit installed from the repo as previously written would not have
+        started.
+        """
+
+        _, execs = self._exec_paths()
+        for path in execs:
+            assert "hermes-agent/scripts" not in path, (
+                f"ExecStart points into the development checkout: {path}"
+            )
+
+    def test_service_does_not_restart_itself(self):
+        """A watcher that restarts on failure becomes the noise it reports."""
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parent.parent
+        unit = (repo / "systemd" / "failed-unit-watch.service").read_text()
+        assert not any(
+            line.startswith("Restart=") and line.split("=", 1)[1].strip() not in ("", "no")
+            for line in unit.splitlines()
+        )

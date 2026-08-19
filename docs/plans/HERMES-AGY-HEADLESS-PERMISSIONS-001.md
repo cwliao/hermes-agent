@@ -1,6 +1,6 @@
 ---
 title: "HERMES-AGY-HEADLESS-PERMISSIONS-001 design/decision ticket"
-status: DESIGN_ONLY_NOT_IMPLEMENTED
+status: ROOT_CAUSE_FOUND_NOT_A_PERMISSIONS_PROBLEM
 date: 2026-08-18
 type: ticket-design
 ticket: HERMES-AGY-HEADLESS-PERMISSIONS-001
@@ -439,3 +439,87 @@ mechanism for bare commands is a **simple presence check** against
 → auto-deny in headless mode (no TTY to prompt a human). See the updated
 Section 9 bullet on rule matching for what remains unconfirmed
 (argument-bearing commands).
+
+## 12. Root cause found (2026-08-19): a global skill, not permissions
+
+Running the ticket's **actual** agy-lane worker prompt — `Return one short
+clean joke.` — under `--print --output-format stream-json` produced the
+decisive trace. It invalidates this ticket's central premise.
+
+### What the trace shows
+
+1. AGY first calls `view_file` on
+   `~/.gemini/config/skills/slave-mode/SKILL.md` — it auto-loads a globally
+   installed skill.
+2. It then calls `run_command` with a **composed, multi-line shell blob**:
+   `pwd && git rev-parse --show-toplevel ... || echo ...` / `git branch
+   --show-current ...` / `git rev-parse --short HEAD ...` / `hostname`.
+3. That command is auto-denied headless (`duration_seconds` 0.0067, no
+   output), and the whole run ends `status=CANCELED` with an empty
+   response.
+
+### Why it happens
+
+`slave-mode`'s SKILL.md requires every reply to be rendered as a
+fixed-width ASCII dashboard card containing, among other fields, the
+current time **and the repository/branch**. Populating that card is what
+forces the `git`/`hostname` reconnaissance on every single invocation —
+including one that only asks for a joke.
+
+The skill is installed globally at `~/.gemini/config/skills/slave-mode/`,
+so it applies to **every** AGY call on this host, not just interactive
+ones. (It is also self-aware about this: its own text tells AGY not to rely
+on unattended headless CLI subprocesses, which is precisely the mode the
+Kanban swarm dispatches it in.)
+
+### Why an allowlist is the WRONG fix
+
+Sections 4–6 of this ticket assumed the fix was a minimal
+`permissions.allow` allowlist built from observed commands. That assumption
+does not survive this trace:
+
+- The denied command is **composed on the fly** and is a multi-line
+  compound statement with `&&`, `||`, and redirects. There is no stable
+  exact string to allowlist, and matching is exact (Section 11).
+- Allowlisting it would grant unattended `git` + shell execution to satisfy
+  a **cosmetic dashboard**, not a task requirement. That trades real
+  privilege for decoration — the opposite of Section 5's principles.
+- Even when the command is permitted, the reply is wrapped in the dashboard,
+  so the swarm worker's `result` field would carry an ASCII console instead
+  of a joke.
+
+### What actually works — no settings change at all
+
+Adding an explicit no-tool instruction to the worker prompt suppresses both
+the recon and the dashboard:
+
+> `Return one short clean joke. Do not use tools, commands, files, network
+> access, agents, or subagents. Reply with the joke text only, no dashboard,
+> no formatting, no preamble.`
+
+Three consecutive runs: `status=SUCCESS`, **zero tool calls**, 66–77 byte
+replies, no dashboard markup. Compare the bare prompt, which reliably ends
+`CANCELED` with an empty response.
+
+`--disable-slash-commands` was also tested and is **not** sufficient: the
+run succeeded, but the slave-mode persona still applied and the joke came
+back wrapped in the full ASCII dashboard, which is unusable as a worker
+result.
+
+### Revised recommendation
+
+1. **Adopt the bounded no-tool worker instruction for the `agy` lane.** It
+   needs no `settings.json` change, grants no new privilege, and is
+   consistent with the ticket's existing rule that bounded instructions
+   live in the task body.
+2. **Do not implement the Section 4 Option-1 allowlist for this lane.** It
+   was designed against a misdiagnosed cause. Keep Option 3
+   (`--dangerously-skip-permissions`) prohibited as before.
+3. The pre-existing hygiene findings in Section 3 still stand on their own
+   merits and are unrelated to this lane: `permissions.allow` has 3 `sudo`
+   rules and 5 `python3 -c` rules, and there is no `deny`/`ask` array. These
+   remain the operator's call; nothing here changes them.
+4. **Open question for the operator:** whether `slave-mode` should be
+   globally installed for AGY at all, given it makes every headless
+   invocation require shell access and emit dashboard-wrapped output. This
+   ticket does not change it.

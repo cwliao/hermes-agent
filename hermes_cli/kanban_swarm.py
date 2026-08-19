@@ -326,6 +326,34 @@ def _create_swarm_uncommitted(
         if goal_max_turns < 1 or worker_max_runtime_seconds < 1:
             raise ValueError("goal_max_turns and worker_max_runtime_seconds must be positive")
 
+    # Resolve and validate every worker BEFORE creating any card.
+    #
+    # SWARM-E2E-DEFECTS-001 Defect 1. This check used to sit inside the
+    # creation loop, so a swarm whose second worker was invalid still left a
+    # root and one live worker behind -- and the dispatcher picked them up and
+    # ran them. Observed in production on 2026-08-19, not only in a test:
+    # a partial graph consumed real compute on work no verifier would ever
+    # consume, because no verifier had been created.
+    #
+    # This makes the failure happen before anything exists. It does NOT make
+    # creation atomic: `create_task` opens its own write transaction, so
+    # `create_swarm` cannot wrap the sequence in one, and a failure *inside*
+    # card creation (a database error, a disk fault) can still leave a partial
+    # graph. That is a smaller and different exposure than a validation error,
+    # which is deterministic and entirely predictable from the arguments.
+    resolved_skills: list[str] = []
+    for i, spec in enumerate(worker_specs, start=1):
+        expected_skill = (
+            spec.preflight_skill_id.strip()
+            if spec.preflight_skill_id.strip()
+            else (spec.skills[0].strip() if len(spec.skills) == 1 else "")
+        )
+        if lane_mode:
+            worker_lane = str(spec.lane_id).strip()
+            if worker_lane != REQUIRED_LANE_ID and not expected_skill:
+                raise ValueError(f"worker {worker_lane} requires a preflight skill id")
+        resolved_skills.append(expected_skill)
+
     common = dict(
         created_by=created_by, tenant=tenant,
         workspace_kind=workspace_kind, workspace_path=workspace_path,
@@ -356,16 +384,9 @@ def _create_swarm_uncommitted(
             return SwarmCreated(root, worker_ids, str(verifier_id), str(synthesizer_id))
 
     context_suffix = _swarm_context(root, goal)
-    worker_ids = []
-    for spec in worker_specs:
+    worker_ids: list[str] = []
+    for spec, expected_skill in zip(worker_specs, resolved_skills):
         worker_lane = str(spec.lane_id).strip() if lane_mode else None
-        expected_skill = (
-            spec.preflight_skill_id.strip()
-            if spec.preflight_skill_id.strip()
-            else (spec.skills[0].strip() if len(spec.skills) == 1 else "")
-        )
-        if lane_mode and worker_lane != "native_hermes" and not expected_skill:
-            raise ValueError(f"worker {worker_lane} requires a preflight skill id")
         contract = None
         if lane_mode:
             contract = {

@@ -298,7 +298,12 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert mock_hfc.call_count == 3
     assert result["turn_exit_reason"].startswith("text_response")
     assert "guardrail" not in result
-    assert result["final_response"] == "done"
+    # The model answered "done" while every tool call this turn failed. The
+    # tool-outcome footer (FABRICATION-REMEDY-001) states that unconditionally;
+    # without it this turn reads as a clean success, which is the shape of the
+    # 2026-08-19 fabrication incident.
+    assert result["final_response"].startswith("done")
+    assert "All 3 tool calls this turn failed" in result["final_response"]
     tool_contents = [m["content"] for m in result["messages"] if m.get("role") == "tool"]
     assert any("repeated_exact_failure_warning" in content for content in tool_contents)
 

@@ -42,6 +42,8 @@ from agent.model_metadata import (
 from agent.process_bootstrap import _install_safe_stdio
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.think_scrubber import StreamingThinkScrubber
+from dataclasses import replace
+
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
@@ -1377,12 +1379,14 @@ def init_agent(
             "desktop",
             "acp",
         }
-        agent._tool_guardrails = ToolCallGuardrailController(
-            ToolCallGuardrailConfig.from_mapping(
-                _agent_cfg.get("tool_loop_guardrails", {}),
-                default_hard_stop_enabled=_unattended_platform,
-            )
+        _guardrail_cfg = ToolCallGuardrailConfig.from_mapping(
+            _agent_cfg.get("tool_loop_guardrails", {}),
+            default_hard_stop_enabled=_unattended_platform,
         )
+        # Reuse the same platform classification for the tool-outcome footer
+        # so "unattended" has one definition rather than two that can drift.
+        _guardrail_cfg = replace(_guardrail_cfg, unattended=_unattended_platform)
+        agent._tool_guardrails = ToolCallGuardrailController(_guardrail_cfg)
         if agent._tool_guardrails.config.configuration_warning:
             _ra().logger.warning(
                 "Tool loop guardrail configuration: %s",

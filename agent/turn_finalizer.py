@@ -50,6 +50,7 @@ def finalize_turn(
     loop). See module docstring.
     """
     from agent.conversation_loop import logger
+    from agent.tool_guardrails import format_tool_outcome_footer
 
     budget_exhausted = (
         api_call_count >= agent.max_iterations
@@ -310,6 +311,38 @@ def finalize_turn(
                     final_response = final_response.rstrip() + "\n\n" + footer
         except Exception as _ver_err:
             logger.debug("file-mutation verifier footer failed: %s", _ver_err)
+
+    # Tool-outcome footer (FABRICATION-REMEDY-001).
+    #
+    # Placed here, beside the file-mutation footer, because both answer the
+    # same question: did the things this response implies actually happen.
+    # Guarded identically -- a real response, not interrupted -- and failing
+    # closed to silence, since a crash here must not cost the user their
+    # answer.
+    #
+    # Known limit, shared with the file-mutation footer above: this runs after
+    # the turn's text has been streamed. With ``streaming.enabled: true`` the
+    # gateway can deliver the accumulated stream and suppress the finalized
+    # ``final_response`` (see ``_final_response_sent`` in
+    # gateway/stream_consumer.py), in which case neither footer reaches the
+    # reader. Not introduced here, but this footer targets exactly the
+    # unattended surfaces where that path is used, so it matters more.
+    #
+    # Skipped after a guardrail halt: that path already replaces the response
+    # with an explanation of the repeated failures, and a second notice would
+    # say the same thing twice.
+    if final_response and not interrupted and _turn_exit_reason != "guardrail_halt":
+        try:
+            _guardrails = getattr(agent, "_tool_guardrails", None)
+            if _guardrails is not None:
+                _outcome = _guardrails.turn_tool_outcome()
+                _footer = format_tool_outcome_footer(
+                    _outcome, unattended=_guardrails.config.unattended
+                )
+                if _footer:
+                    final_response = final_response.rstrip() + "\n\n" + _footer
+        except Exception as _out_err:
+            logger.debug("tool-outcome footer failed: %s", _out_err)
 
     # Turn-completion explainer.
     # When a turn ends abnormally after substantive work — empty content

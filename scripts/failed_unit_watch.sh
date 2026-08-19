@@ -81,10 +81,91 @@ FLAP_THRESHOLD="${FAILED_UNIT_WATCH_FLAP_THRESHOLD:-5}"
 FLAP_WINDOW="${FAILED_UNIT_WATCH_FLAP_WINDOW:-today}"
 FLAP_STATE_FILE="$HERMES_HOME/failed_unit_watch_flap_state"
 
+# A `Failed with result` line is emitted for an ordinary restart too: on
+# `systemctl restart` the old instance is SIGTERMed and, if it does not exit 0,
+# systemd records the same line it records for a crash. Counting those made
+# hermes-gateway read as "7 failures today" when it had been *deployed* seven
+# times, a false alert that grew with every deploy.
+#
+# Suppression is deliberately narrow: a failure is discounted only when ALL of
+#
+#   1. the unit is inside a stop sequence  (`Stopping` seen, no `Started`/
+#      `Stopped` since), AND
+#   2. the result is exactly `exit-code`, AND
+#   3. the process that exited was the MAIN process, not a control process
+#
+# hold. That is the shape a restart actually produces, verified on this host.
+# Everything else counts, including the three cases this ticket was warned
+# about, each of which differs in condition 2 or 3:
+#
+#   ExecStop crash      Stopping | Control process exited | Failed 'exit-code'
+#   stop timeout        Stopping | (no process-exit line) | Failed 'timeout'
+#   restart (discount)  Stopping | Main process exited    | Failed 'exit-code'
+#   crash               (no Stopping)                     | Failed 'exit-code'
+#
+# An earlier version of this fix keyed on `Main process exited` alone and
+# looked right only because the journal had been grepped in a way that hid the
+# restart case -- that line appears in both. A later version bracketed on the
+# stop sequence alone, which is exactly the rule the ticket warned would mask
+# an ExecStop crash and a stop timeout. Both were caught in review. The three
+# conditions together are what separate the shapes.
+#
+# Lifecycle lines are anchored to `systemd[<pid>]:` so that an application
+# logging its own "Stopping worker pool" cannot open a stop window for itself
+# and mask its own later crash.
 mapfile -t flapping < <(
   journalctl --user --since "$FLAP_WINDOW" --no-pager 2>/dev/null \
-    | grep -oE "[A-Za-z0-9@:_.\\-]+\.[a-z]+: Failed with result" \
-    | sed 's/: Failed.*//' | sort | uniq -c | sort -rn \
+    | awk '
+        # Unit named after a manager keyword: "... systemd[123]: Stopping foo.service - desc"
+        function unit_after(kw,   p, rest, a) {
+          p = index($0, kw)
+          if (p == 0) return ""
+          rest = substr($0, p + length(kw))
+          split(rest, a, " ")
+          return a[1]
+        }
+        # Unit named before a colon: "... systemd[123]: foo.service: Failed with result ..."
+        function unit_before(kw,   u) {
+          # Build the pattern as a string: in awk, /re/ in an expression
+          # position evaluates to a match against $0 and would concatenate as
+          # 0 or 1, not as a pattern.
+          if (!match($0, "[^ ]+: " kw)) return ""
+          u = substr($0, RSTART, RLENGTH)
+          sub(/: .*/, "", u)
+          return u
+        }
+        !/systemd\[[0-9]+\]: / { next }
+        /systemd\[[0-9]+\]: Stopping / {
+          u = unit_after("]: Stopping "); if (u != "") stopping[u] = 1; next
+        }
+        /systemd\[[0-9]+\]: (Started|Stopped) / {
+          u = unit_after("]: Started "); if (u == "") u = unit_after("]: Stopped ")
+          if (u != "") { stopping[u] = 0; exitkind[u] = "" }
+          next
+        }
+        /: Main process exited/    { u = unit_before("Main process exited");    if (u != "") exitkind[u] = "main";    next }
+        /: Control process exited/ { u = unit_before("Control process exited"); if (u != "") exitkind[u] = "control"; next }
+        /: Failed with result/ {
+          u = unit_before("Failed with result")
+          res = ""
+          # `result '\''exit-code'\''.` -- the quotes are part of systemd'\''s
+          # format. Matching [^ ]+ instead of [^'\'']+ captured the closing
+          # quote and made the exit-code comparison never true.
+          if (match($0, /result .[^.]+/)) { res = substr($0, RSTART + 8, RLENGTH - 9) }
+          # Unattributable line: count it rather than drop it. Silence is the
+          # failure mode this script exists to remove.
+          if (u == "") { real["(unattributed)"]++; next }
+          if (stopping[u] && res == "exit-code" && exitkind[u] == "main") {
+            exitkind[u] = ""
+            next
+          }
+          exitkind[u] = ""
+          real[u]++
+          next
+        }
+        END { for (u in real) print real[u], u }
+      ' \
+    | sort -rn \
     | awk -v t="$FLAP_THRESHOLD" '$1 >= t {print $2 " " $1}' || true
 )
 

@@ -523,3 +523,48 @@ result.
    globally installed for AGY at all, given it makes every headless
    invocation require shell access and emit dashboard-wrapped output. This
    ticket does not change it.
+
+## 13. Reliability data: scoping the skill is not sufficient on its own
+
+After Section 12, the operator's `slave-mode` skill was scoped — its
+frontmatter description and a new "Activation Scope" section now state it
+applies only to interactive TTY sessions, and explicitly not to
+`agy --print` / `-p` or to workers dispatched by the Kanban dispatcher, CI,
+or cron. The skill file lives outside this repository at
+`~/.gemini/config/skills/slave-mode/SKILL.md`; a timestamped backup was
+taken before editing.
+
+That change was then measured against the bare, unmodified lane prompt
+(`Return one short clean joke.`) and against the bounded no-tool prompt.
+A run counts as hijacked if it made any tool call or returned dashboard
+markup.
+
+| Configuration | clean | hijacked |
+|---|---|---|
+| before scoping, bare prompt | 0 | all `CANCELED` |
+| after scoping, bare prompt | 5 / 9 | 4 / 9 |
+| bounded no-tool prompt (before + after scoping) | **9 / 9** | 0 |
+
+**Conclusion: scoping the skill helps but is not a control.** A SKILL.md
+description is advisory to the model, not enforced; it cut the hijack rate
+from ~100% to roughly 45%, which is a coin flip and cannot be relied on by
+an unattended worker.
+
+The deterministic control is the **bounded no-tool instruction in the
+worker's task body**, which was 9/9 across both skill configurations. That
+instruction is required by the parent ticket anyway — bounded worker
+instructions belong in the task body, never in the swarm parser's skill
+field.
+
+Therefore:
+
+- The `agy` lane contract MUST carry the bounded no-tool instruction. It is
+  the control, not an optimization.
+- The skill scoping is retained as defense-in-depth and documentation: it
+  costs nothing, halves the failure rate for any caller that forgets the
+  instruction, and records why the boundary exists.
+- Removing the skill was offered by the operator and is **not** necessary:
+  the measured control works with the skill installed. Removal would also
+  lose its intended interactive value.
+- Still unchanged: no `settings.json` edit, no allowlist rule, and no
+  `--dangerously-skip-permissions` anywhere in this path.

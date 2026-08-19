@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the failed-unit watch periodically
+
+[Timer]
+# Hourly matches the cadence of the scheduled units it watches. The script
+# alerts only on state change, so a shorter interval would not increase
+# noise -- but it would not increase signal either.
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

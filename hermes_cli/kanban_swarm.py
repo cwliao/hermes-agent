@@ -87,6 +87,57 @@ def _contract_line(contract: dict[str, Any]) -> str:
     return CONTRACT_PREFIX + json.dumps(contract, ensure_ascii=False, sort_keys=True)
 
 
+def _completion_requirements(contract: dict[str, Any]) -> str:
+    """Spell out, in the task body, exactly what ``validate_completion``
+    enforces for this role.
+
+    These two must agree. When they disagreed the agent obeyed the body,
+    was rejected by the kernel, and blocked asking an operator for help --
+    which is how the first real four-lane run deadlocked at both the
+    verifier and the synthesizer. The workers survived only because the
+    caller had hand-written the contract into their task text; nothing in
+    this module put it there.
+
+    ``test_completion_requirements_satisfy_validate_completion`` builds a
+    metadata dict from the literal values named below and asserts
+    ``validate_completion`` accepts it, for every role. That test is what
+    keeps this text and the checker from drifting apart again.
+    """
+
+    role = contract.get("role")
+    lines = [
+        "",
+        "Completion contract (the kernel rejects a completion that omits any of these):",
+        f'  role = "{role}"',
+        f'  root_id = "{contract.get("root_id")}"',
+    ]
+    if role == "worker":
+        lines += [
+            f'  lane_id = "{contract.get("expected_lane_id")}"',
+            f'  preflight_skill_id = "{contract.get("preflight_skill_id") or ""}"',
+            '  outcome = "completed"',
+            "  verified_clean = true",
+        ]
+    elif role == "verifier":
+        expected = contract.get("expected_lane_count")
+        lines += [
+            '  gate = "pass"',
+            f"  expected_lane_count = {expected}",
+            f"  verified_lane_count = {expected}",
+            "  (every expected lane must be verified; a smaller count is rejected)",
+        ]
+    elif role == "synthesizer":
+        lines += [
+            '  outcome = "completed"',
+            "  result_present = true",
+            "  and the task result itself must be non-empty",
+        ]
+    lines.append(
+        "Send these as completion metadata. Do not complete with a subset."
+    )
+    return "\n".join(lines)
+
+
 def extract_contract(body: Optional[str]) -> Optional[dict[str, Any]]:
     """Read the last machine-readable swarm contract from a task body."""
 
@@ -272,6 +323,7 @@ def create_swarm(
             }
         worker_body = (spec.body or "") + context_suffix
         if contract:
+            worker_body += "\n" + _completion_requirements(contract)
             worker_body += "\n" + _contract_line(contract)
         worker_id = kb.create_task(
             conn,
@@ -297,17 +349,19 @@ def create_swarm(
 
     verifier_body = (
         "Review every worker handoff and blackboard update. Gate the swarm: "
-        "complete only with metadata {\"gate\": \"pass\"} when evidence is "
-        "sufficient; otherwise block with exact missing work."
+        "pass only when the evidence is sufficient; otherwise block with the "
+        "exact missing work."
         + context_suffix
     )
     if lane_mode:
-        verifier_body += "\n" + _contract_line({
+        verifier_contract = {
             "version": 1,
             "role": "verifier",
             "root_id": root,
             "expected_lane_count": len(worker_specs),
-        })
+        }
+        verifier_body += "\n" + _completion_requirements(verifier_contract)
+        verifier_body += "\n" + _contract_line(verifier_contract)
     verifier = kb.create_task(
         conn,
         title=verifier_title,
@@ -328,12 +382,14 @@ def create_swarm(
         + context_suffix
     )
     if lane_mode:
-        synthesizer_body += "\n" + _contract_line({
+        synthesizer_contract = {
             "version": 1,
             "role": "synthesizer",
             "root_id": root,
             "verifier_id": verifier,
-        })
+        }
+        synthesizer_body += "\n" + _completion_requirements(synthesizer_contract)
+        synthesizer_body += "\n" + _contract_line(synthesizer_contract)
     synthesizer = kb.create_task(
         conn,
         title=synthesizer_title,

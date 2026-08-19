@@ -166,6 +166,45 @@ def _write_usage_file(path: Optional[str], result: dict, failure: Optional[str] 
         pass
 
 
+def _silence_stream_handlers() -> list[tuple[logging.Handler, int]]:
+    """Raise every stream handler above CRITICAL; leave file handlers alone.
+
+    Exported so the tests exercise this function rather than a copy of its
+    predicate -- a duplicated predicate cannot detect drift from the code it
+    claims to describe.
+
+    Returns the (handler, previous level) pairs, for a caller that wants to
+    restore them. ``run_oneshot`` does not: the process exits, and the call it
+    replaced never restored anything either.
+    """
+
+    silenced: list[tuple[logging.Handler, int]] = []
+
+    def _mute(handlers) -> None:
+        for handler in list(handlers or ()):
+            if isinstance(handler, logging.FileHandler):
+                continue
+            if not isinstance(handler, logging.StreamHandler):
+                continue
+            silenced.append((handler, handler.level))
+            # Above CRITICAL: anything lower would newly leak WARNING/ERROR
+            # text to a terminal that is currently silent.
+            handler.setLevel(logging.CRITICAL + 1)
+
+    _mute(logging.getLogger().handlers)
+    manager_dict = getattr(logging.Logger, "manager", None)
+    for existing in list(getattr(manager_dict, "loggerDict", {}).values()):
+        _mute(getattr(existing, "handlers", ()))
+    try:
+        import hermes_logging as _hermes_logging
+
+        _mute(getattr(getattr(_hermes_logging, "_queue_listener", None), "handlers", ()))
+    except Exception:
+        # Logging must never be the reason a one-shot run fails.
+        pass
+    return silenced
+
+
 def run_oneshot(
     prompt: str,
     model: Optional[str] = None,
@@ -189,12 +228,42 @@ def run_oneshot(
 
     Returns the exit code.  Caller should sys.exit() with the return.
     """
-    # Silence every stdlib logger for the duration.  AIAgent, tools, and
-    # provider adapters all log to stderr through the root logger; file
-    # handlers added by setup_logging() keep working (they're attached to
-    # the root logger's handler list, not affected by level), but no
-    # bytes reach the terminal.
-    logging.disable(logging.CRITICAL)
+    # Silence the terminal, not the record.
+    #
+    # This previously called ``logging.disable(logging.CRITICAL)`` under a
+    # comment claiming file handlers kept working because they are attached to
+    # the root logger's handler list. They do not: ``logging.disable`` sets a
+    # module-global threshold checked in ``Logger.isEnabledFor``, before any
+    # handler is consulted, so handler attachment is irrelevant to it. The
+    # effect was that one-shot runs wrote nothing to agent.log -- which is why
+    # the 2026-08-19 gate 8 diagnostic could not obtain a turn-end reason for
+    # its own run. See GATE8-OBSERVABILITY-001.
+    #
+    # Raising the level on stream handlers achieves what the old comment
+    # described, and file handlers are left alone.
+    #
+    # Named loggers are walked too, not just the root and the queue listener.
+    # ``hermes_cli/plugins.py`` attaches a stderr handler to its own logger
+    # under HERMES_PLUGINS_DEBUG=1; an earlier version of this fix looked only
+    # at the root and would have let its lines through while claiming in this
+    # very comment that they were muted. A reviewer found it.
+    #
+    # What this does NOT do, measured rather than assumed:
+    #
+    # - It cannot unemit output written before it runs. Plugin discovery logs
+    #   at import time, well before ``run_oneshot`` is entered, so with
+    #   HERMES_PLUGINS_DEBUG=1 those lines still reach the terminal. Verified:
+    #   the escaping bytes are all `[plugins]` discovery lines ending at
+    #   "Plugin discovery complete", with zero agent-runtime records among
+    #   them. The call this replaced sat at the same point and leaked them
+    #   identically, so this is not a regression -- but the muting is not
+    #   total and should not be described as if it were.
+    # - It does not cover a handler attached after this point.
+    #   ``setup_verbose_logging`` is one, called from ``AIAgent.__init__``,
+    #   and it happens to run inside the ``redirect_stderr(devnull)`` block
+    #   below, so it writes to devnull. That is ordering, not a guarantee
+    #   this code provides.
+    _silence_stream_handlers()
 
     # --provider without --model is ambiguous: carrying the user's configured
     # model across to a different provider is usually wrong (that provider may

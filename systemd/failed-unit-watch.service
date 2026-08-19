@@ -1,0 +1,9 @@
+[Unit]
+Description=Hermes failed-unit watch (systemd --user failure-state reporter)
+Documentation=file://%h/.hermes/hermes-agent/docs/plans/2026-08-19-unit-failure-blindness-001.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/.hermes/hermes-agent/scripts/failed_unit_watch.sh
+# No Restart=. This unit reports on failures; restarting it on failure would
+# make it a source of the noise it exists to surface.

@@ -4,6 +4,15 @@ Documentation=file://%h/.hermes/hermes-agent/docs/plans/2026-08-19-unit-failure-
 
 [Service]
 Type=oneshot
-ExecStart=%h/.hermes/hermes-agent/scripts/failed_unit_watch.sh
+# %h/.hermes/scripts/, not the development checkout. The checkout is mutable
+# and was found out of sync with its own HEAD on 2026-08-19 -- the script was
+# listed by `git ls-tree HEAD` and absent from disk -- so a unit installed
+# from this file as previously written would have failed to start. That is the
+# same shape as the klib incident the same day, where a production service
+# pointed at a checkout that changed underneath it.
+#
+# %h/.hermes/scripts/ is where this host's other operational scripts already
+# live (hermes_calendar_guard.sh, hermes_drive_watch.py, and others).
+ExecStart=%h/.hermes/scripts/failed_unit_watch.sh
 # No Restart=. This unit reports on failures; restarting it on failure would
 # make it a source of the noise it exists to surface.

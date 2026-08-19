@@ -20,8 +20,11 @@ test runner at ``scripts/run_tests.sh``.
 """
 
 import asyncio
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,6 +33,24 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ── Real operator roots, captured BEFORE anything sandboxes them ───────────
+# ORDER IS LOAD-BEARING. ``pytest_configure`` below unconditionally rewrites
+# ``HERMES_HOME`` to a throwaway session tempdir. Any guard or deny-list that
+# needs to know the operator's REAL Hermes root must read these constants
+# rather than re-reading ``os.environ`` later, or it would "protect" the
+# tempdir and silently stop protecting the real ~/.hermes.
+#
+# There is no such guard in this file today — these constants are structural
+# insurance so that adding one later can't reintroduce the bug. A prior
+# attempt at this fix on an abandoned branch hit exactly that failure mode,
+# and it fails silently: no exception, no failing test, the guard just stops
+# guarding.
+_REAL_HERMES_HOME = os.environ.get("HERMES_HOME", "").strip() or str(
+    Path.home() / ".hermes"
+)
+_REAL_KANBAN_HOME = os.environ.get("HERMES_KANBAN_HOME", "").strip()
 
 
 # ── Per-file process isolation ──────────────────────────────────────────────
@@ -426,6 +447,47 @@ def tmp_dir(tmp_path):
 
 
 @pytest.fixture()
+def isolated_log_dir(tmp_path):
+    """Bind Hermes file logging to a fresh per-test ``logs/`` directory.
+
+    Opt-in. File logging is normally initialized once per session against a
+    throwaway tempdir (see ``_sandbox_hermes_home_and_logging``), which is
+    enough to keep test records out of the operator's real ``agent.log``
+    without paying handler setup on every test. Request this fixture only
+    when a test asserts on the *contents* of a log file and therefore needs
+    one that contains nothing but its own records.
+
+    If you only need to assert on log *records*, use pytest's ``caplog``
+    instead — it is cheaper and needs no file at all.
+
+    Yields the ``logs/`` directory holding ``agent.log`` / ``errors.log``.
+    """
+    import hermes_logging
+
+    # HERMES_HOME is already pointed at this test's tmp_path by the autouse
+    # _hermetic_environment fixture; re-binding picks that up.
+    hermes_logging._reset_queued_handlers()
+    hermes_logging._logging_initialized = False
+    log_dir = hermes_logging.setup_logging()
+    try:
+        yield Path(log_dir)
+    finally:
+        # Release handles on tmp_path before pytest deletes it — on Windows an
+        # open handle makes that cleanup raise PermissionError.
+        #
+        # Deliberately do NOT re-bind here. At this point the autouse
+        # _hermetic_environment fixture has not yet torn down (autouse sets up
+        # first, so it finalizes last), so HERMES_HOME still points at the
+        # per-test tmp_path that is about to be deleted — re-binding would
+        # just open a fresh handle on a doomed directory. Leaving logging
+        # detached is safe: HERMES_HOME is sandboxed for the whole session, so
+        # whenever something next calls setup_logging() it resolves to a
+        # tempdir, never the operator's real home.
+        hermes_logging._reset_queued_handlers()
+        hermes_logging._logging_initialized = False
+
+
+@pytest.fixture()
 def mock_config():
     """Return a minimal hermes config dict suitable for unit tests."""
     return {
@@ -526,8 +588,88 @@ def _ensure_current_event_loop(request):
 _LIVE_SYSTEM_GUARD_BYPASS_MARK = "live_system_guard_bypass"
 
 
+def _sandbox_hermes_home_and_logging() -> None:
+    """Point HERMES_HOME at a throwaway session tempdir, then bind logging.
+
+    Why this exists
+    ---------------
+    ``hermes_cli/main.py`` calls ``setup_logging()`` at MODULE level. That
+    resolves ``get_hermes_home()`` and attaches rotating FILE handlers for
+    ``agent.log`` / ``errors.log`` to the ROOT logger, memoized behind a
+    ``_logging_initialized`` flag. So merely *importing* ``hermes_cli.main`` —
+    which many test modules do, directly or transitively — points the whole
+    pytest session's file logging at the operator's real
+    ``~/.hermes/logs/agent.log``.
+
+    The ``_hermetic_environment`` fixture also sandboxes ``HERMES_HOME``, but
+    fixtures run *after* collection has already imported test modules, so the
+    handler is bound to the real absolute path before any fixture executes.
+    Observed on a live install: a ``pytest tests/gateway`` run wrote 61 records
+    (test fixture emails, ``MagicMock`` tracebacks) into the operator's real
+    ``agent.log`` inside one 2-second window, which then tripped the hourly
+    secret-audit cron with 62 false-positive findings.
+
+    ``pytest_configure`` runs after conftest import but BEFORE collection
+    imports any test module, so doing it here closes that window.
+
+    Unconditional on purpose
+    ------------------------
+    This does NOT use ``setdefault`` / "only if unset". ``HERMES_HOME`` is
+    genuinely pre-exported in some real contexts — the ``hermes-gateway``
+    systemd unit sets it explicitly — and in exactly those contexts a
+    conditional sandbox would no-op and leak straight into the real log.
+
+    Session-scoped, not per-test
+    ----------------------------
+    Logging is initialized once here rather than in the per-test autouse
+    fixture. Per-test reinitialization would mean a RotatingFileHandler
+    open/stat plus handler wiring on every one of ~17k tests for no
+    correctness benefit: the leak is fixed once ``HERMES_HOME`` no longer
+    resolves to the operator home and no stale handler points at the real
+    path. Tests that assert on log-file *contents* opt in via
+    ``isolated_log_dir``; tests asserting on log *records* should use
+    pytest's ``caplog``.
+    """
+    previous = os.environ.get("HERMES_HOME", "").strip()
+    session_home = tempfile.mkdtemp(prefix="hermes-test-home-")
+    os.environ["HERMES_HOME"] = session_home
+    atexit.register(shutil.rmtree, session_home, True)
+
+    if previous and previous != session_home:
+        # Don't let an outer harness silently lose a deliberately pre-set
+        # path (e.g. CI collecting log artifacts from a known location).
+        print(
+            f"\n[conftest] HERMES_HOME sandboxed for tests: {previous} -> "
+            f"{session_home}",
+            file=sys.stderr,
+        )
+
+    # Bind file logging to the session tempdir now. Strictly this is
+    # defense-in-depth: nothing should have called setup_logging() yet (this
+    # conftest does not import hermes_cli.main at module scope, and the
+    # project registers no pytest11 entry point that could run earlier), so
+    # the lazy first call during collection would already resolve to the
+    # sandboxed path. Doing it explicitly makes the guarantee independent of
+    # that assumption, and costs one call per session rather than per test.
+    try:
+        import hermes_logging
+
+        # Detach first. Clearing the flag alone, or passing force=True
+        # without detaching, can leave the old handler attached and
+        # dual-write to two files.
+        hermes_logging._reset_queued_handlers()
+        hermes_logging._logging_initialized = False
+        hermes_logging.setup_logging()
+    except Exception:
+        # Best-effort: never let logging setup abort the whole test session.
+        # The env override above is what actually prevents the leak.
+        pass
+
+
 def pytest_configure(config):  # noqa: D401 — pytest hook
     """Register markers used by hermetic conftest."""
+    _sandbox_hermes_home_and_logging()
+
     config.addinivalue_line(
         "markers",
         f"{_LIVE_SYSTEM_GUARD_BYPASS_MARK}: bypass the live-system guard "

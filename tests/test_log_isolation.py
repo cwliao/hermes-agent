@@ -1,88 +1,145 @@
-"""The test suite must never write into the operator's real Hermes logs.
+"""Guard: pytest must never write into the operator's real Hermes logs.
 
-`hermes_cli/main.py` calls `setup_logging()` at module scope, which resolves
-`get_hermes_home()` and attaches rotating file handlers to the ROOT logger.
-Importing it - which many test modules do, directly or transitively - wires
-the whole pytest session's logging to `<HERMES_HOME>/logs/agent.log`.
+Regression cover for a live incident. ``hermes_cli/main.py`` calls
+``setup_logging()`` at module level, which binds rotating FILE handlers for
+``agent.log`` / ``errors.log`` to the ROOT logger using ``get_hermes_home()``.
+Because test modules import ``hermes_cli.main`` during collection — before any
+fixture runs — the whole session's file logging used to bind to the operator's
+real ``~/.hermes/logs/agent.log``. A ``pytest tests/gateway`` run wrote 61
+records (fixture email addresses, ``MagicMock`` tracebacks) into that real log
+inside a 2-second window, which then tripped an hourly secret-audit cron with
+62 false-positive findings.
 
-If HERMES_HOME is not already sandboxed at that moment, that is the
-operator's real log. Measured on a live install, 126 warnings in a personal
-`agent.log` came from test runs rather than the running gateway: phantom
-`FakeTree` Discord failures and `rejected invalid API key` entries from
-`test_api_server_runs.py`. Noise like that makes genuine warnings hard to
-find precisely when someone is debugging.
+``tests/conftest.py`` closes this at module scope (before any test module can
+import code that configures logging) by sandboxing ``HERMES_HOME`` unless a
+pre-set value already looks like a genuinely custom (non-production) home —
+see ``_hermes_home_points_at_production`` there.
 
-The per-test env fixture cannot close this: fixtures run after collection has
-imported the test modules, and by then the handler holds an absolute path.
-`tests/conftest.py` sets HERMES_HOME at module scope for that reason - this
-guards the property so a refactor cannot quietly undo it.
+WHY THIS FILE IS SHAPED THE WAY IT IS
+-------------------------------------
+Two details are load-bearing; without them these tests pass even when the fix
+is removed, which was verified by deleting the fix and watching an earlier
+draft stay green:
+
+1. ``hermes_cli.main`` is imported at MODULE scope, not inside a test. The
+   leak happens at collection time. By the time a test function body runs, the
+   autouse ``_hermetic_environment`` fixture has already repointed
+   ``HERMES_HOME`` at a per-test tmpdir, so an import there proves nothing.
+2. ``HERMES_HOME`` is snapshotted at MODULE scope too. Reading ``os.environ``
+   inside a test reads the per-test fixture value, which is sandboxed either
+   way — again proving nothing. The interesting moment is collection.
 """
 
 import logging
 import os
 from pathlib import Path
 
-import pytest
+from tests.conftest import _PRE_SANDBOX_HERMES_HOME
+
+# Import at module scope, exactly like the test modules that triggered the
+# original leak. This runs during collection, before any fixture.
+import hermes_cli.main  # noqa: F401  — imported for its logging side effect
+
+#: HERMES_HOME as it stood during collection — i.e. after conftest's
+#: module-level sandbox but before any per-test fixture. Reading os.environ
+#: inside a test instead would always look sandboxed and could never fail.
+_HERMES_HOME_AT_IMPORT = os.environ.get("HERMES_HOME", "")
+
+#: The operator's real Hermes home, as captured by conftest.py before it
+#: sandboxes HERMES_HOME — falls back to the conventional ``~/.hermes`` when
+#: no pre-set value existed (the common case: nothing exported HERMES_HOME
+#: before pytest started).
+_REAL_HERMES_HOME = _PRE_SANDBOX_HERMES_HOME.strip() or str(Path.home() / ".hermes")
 
 
-def _real_hermes_home() -> Path:
-    """Where the operator's logs live, ignoring any test sandboxing."""
-    return Path.home() / ".hermes"
+def _real_log_dir() -> Path:
+    return Path(_REAL_HERMES_HOME) / "logs"
 
 
-def _all_file_destinations() -> list[str]:
-    """Every file path the root logger can reach, including via a QueueHandler.
+def _file_handlers_targeting(directory: Path) -> list[str]:
+    """Return every live Hermes file-handler path that lives in *directory*.
 
-    Logging is routed through a queue, so the file handlers hang off the
-    listener rather than the root logger - checking `root.handlers` alone
-    reports nothing and looks falsely clean.
+    Hermes does not attach ``RotatingFileHandler``s to the root logger
+    directly: it attaches a ``_NonFormattingQueueHandler`` and keeps the real
+    file handlers on module-level globals in ``hermes_logging``
+    (``_queued_file_handlers``, plus ``_queue_listener.handlers``). Walking
+    only ``logging.getLogger().handlers`` therefore finds nothing and would
+    make these tests vacuously pass — verified by removing the fix and
+    watching an earlier draft stay green.
     """
-    seen: list[str] = []
+    import hermes_logging
 
-    def collect(handlers) -> None:
-        for handler in handlers or ():
-            path = getattr(handler, "baseFilename", None)
-            if path:
-                seen.append(str(path))
-            listener = getattr(handler, "listener", None)
-            if listener is not None:
-                collect(getattr(listener, "handlers", ()))
+    target_dir = directory.resolve()
+    hits: list[str] = []
+    seen: set[int] = set()
 
-    collect(logging.getLogger().handlers)
+    def _check(handler) -> None:
+        if handler is None or id(handler) in seen:
+            return
+        seen.add(id(handler))
+        filename = getattr(handler, "baseFilename", None)
+        if not filename:
+            return
+        try:
+            resolved = Path(filename).resolve()
+        except OSError:  # pragma: no cover - defensive
+            return
+        if resolved.parent == target_dir:
+            hits.append(str(resolved))
 
-    try:
-        import hermes_logging
+    for handler in list(logging.getLogger().handlers):
+        _check(handler)
+    for handler in list(getattr(hermes_logging, "_queued_file_handlers", ()) or ()):
+        _check(handler)
+    listener = getattr(hermes_logging, "_queue_listener", None)
+    for handler in list(getattr(listener, "handlers", ()) or ()):
+        _check(handler)
 
-        listener = getattr(hermes_logging, "_queue_listener", None)
-        if listener is not None:
-            collect(getattr(listener, "handlers", ()))
-    except Exception:
-        pass
-
-    return seen
+    return hits
 
 
-class TestLogIsolation:
-    def test_hermes_home_is_sandboxed_before_imports(self):
-        # Deliberately NOT os.environ: by test time the per-test `_isolate_env`
-        # fixture has sandboxed HERMES_HOME, so reading it here would pass even
-        # with the conftest block deleted. Assert the value captured at conftest
-        # import, which is the moment that actually matters.
-        from tests.conftest import HERMES_HOME_AT_CONFTEST_IMPORT as home
+def test_hermes_home_was_sandboxed_before_collection():
+    """The sandbox must already be active when test modules are imported."""
+    assert _HERMES_HOME_AT_IMPORT, (
+        "HERMES_HOME was unset during collection — conftest's module-level "
+        "sandbox did not run before test modules were imported."
+    )
+    assert (
+        Path(_HERMES_HOME_AT_IMPORT).resolve() != Path(_REAL_HERMES_HOME).resolve()
+    ), (
+        "At collection time HERMES_HOME still pointed at the operator's real "
+        "Hermes home, so module-level setup_logging() in imported test "
+        "modules binds file handlers to the real agent.log."
+    )
 
-        assert home, "conftest must set HERMES_HOME before test modules import"
-        assert Path(home).resolve() != _real_hermes_home().resolve(), (
-            f"HERMES_HOME pointed at the operator's real home ({home}) when "
-            "conftest loaded; import-time setup_logging() writes to their agent.log"
-        )
 
-    def test_importing_the_cli_does_not_target_the_real_logs(self):
-        pytest.importorskip("hermes_cli.main")
+def test_no_root_log_handler_points_at_the_real_log_dir():
+    """No file handler may target the operator's real ``logs/`` directory.
 
-        real_logs = str(_real_hermes_home() / "logs")
-        offenders = [p for p in _all_file_destinations() if p.startswith(real_logs)]
+    This is the assertion that would have caught the original incident: the
+    leak was a handler holding an absolute path, not a wrong env var value at
+    assertion time.
+    """
+    offenders = _file_handlers_targeting(_real_log_dir())
+    assert not offenders, (
+        "Root logger has file handler(s) bound to the operator's real log "
+        f"directory: {offenders}. Test output is being written into the real "
+        "agent.log / errors.log."
+    )
 
-        assert offenders == [], (
-            "the test session is writing into the operator's real Hermes logs:\n  "
-            + "\n  ".join(offenders)
-        )
+
+def test_isolated_log_dir_fixture_stays_inside_tmp_path(isolated_log_dir, tmp_path):
+    """The opt-in fixture must bind logging under the per-test tmp_path."""
+    assert isolated_log_dir.exists()
+    assert tmp_path in isolated_log_dir.parents, (
+        f"isolated_log_dir {isolated_log_dir} is not under tmp_path {tmp_path}"
+    )
+
+    logging.getLogger("tests.log_isolation").warning("marker-for-isolation-test")
+
+    assert not _file_handlers_targeting(_real_log_dir()), (
+        "isolated_log_dir left a handler pointing at the real log directory."
+    )
+    assert _file_handlers_targeting(isolated_log_dir), (
+        "isolated_log_dir did not actually bind a file handler under tmp_path."
+    )

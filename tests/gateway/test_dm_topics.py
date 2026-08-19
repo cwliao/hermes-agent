@@ -681,11 +681,11 @@ def test_group_channel_skill_binding_without_topic():
     from gateway.platforms.base import MessageType
 
     adapter = _make_adapter(channel_skill_bindings=[
-        {"id": "-1004391006048", "skills": ["google-workspace"]},
+        {"id": "-1001234567890", "skills": ["google-workspace"]},
     ])
 
     msg = _make_mock_message(
-        chat_id=-1004391006048,
+        chat_id=-1001234567890,
         chat_type=_ChatType.SUPERGROUP,
         thread_id=None,
         text="tell me tomorrow's schedule",

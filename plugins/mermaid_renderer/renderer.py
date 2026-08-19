@@ -20,6 +20,20 @@ from PIL import Image, UnidentifiedImageError
 
 
 MEDIA_ROOT = Path("/home/cwliao/.hermes/media/mermaid-renderer")
+
+
+def _owner_matches(entry: os.stat_result) -> bool:
+    """Return True when the stat entry is owned by the current user.
+
+    ``os.getuid`` does not exist on Windows, so on platforms without it this
+    ownership check is skipped and reports True; the surrounding mode, symlink
+    and device/inode checks still apply there.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return True
+    return entry.st_uid == getuid()
+
 STAGING_ROOT = Path("/home/cwliao/snap/chromium/common/hermes-mermaid-stage")
 ASSET = Path(__file__).with_name("assets") / "mermaid.min.js"
 MAX_SOURCE = 100_000
@@ -89,7 +103,7 @@ def _prepare_secure_directory(path: Path, error_code: str) -> str | None:
         return error_code
     if not stat.S_ISDIR(entry.st_mode) or stat.S_ISLNK(entry.st_mode):
         return error_code
-    if entry.st_uid != os.getuid() or stat.S_IMODE(entry.st_mode) != 0o700:
+    if not _owner_matches(entry) or stat.S_IMODE(entry.st_mode) != 0o700:
         return error_code
     return None
 
@@ -300,6 +314,7 @@ def render_mermaid_to_png(
             ]
             try:
                 completed = subprocess.run(command, capture_output=True, text=True,
+                                           stdin=subprocess.DEVNULL,
                                            timeout=timeout_seconds, check=False)
             except subprocess.TimeoutExpired:
                 return RenderResult(False, output_path, error_code="chromium_timeout")

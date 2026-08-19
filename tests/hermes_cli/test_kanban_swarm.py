@@ -1,4 +1,6 @@
 
+import json
+
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_swarm import (
     MULTI_AGENT_LANE_IDS,
@@ -8,6 +10,7 @@ from hermes_cli.kanban_swarm import (
     latest_blackboard,
     parse_worker_arg,
     post_blackboard_update,
+    validate_completion,
 )
 import pytest
 
@@ -316,3 +319,119 @@ def test_swarm_worker_parser_keeps_third_segment_as_skill_only():
     assert spec.profile == "claude"
     assert spec.body == "Return one bounded joke"
     assert spec.skills == ["kanban-worker"]
+
+
+def _metadata_from_body(body):
+    """Read the completion metadata a compliant agent would send, by parsing
+    the instruction text out of the task body.
+
+    Deliberately parses the body rather than hardcoding the expected keys.
+    A hardcoded dict would only prove that some dict passes; parsing proves
+    that *the text the agent is given* passes. That is the property that was
+    violated -- the verifier body named one of the five required keys, so an
+    agent that obeyed it exactly was rejected.
+    """
+
+    metadata = {}
+    in_block = False
+    for line in body.splitlines():
+        if line.startswith("Completion contract ("):
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        if line.startswith("Send these as completion metadata"):
+            break
+        stripped = line.strip()
+        if not stripped.startswith("(") and " = " in stripped:
+            key, _, raw = stripped.partition(" = ")
+            metadata[key.strip()] = json.loads(raw.strip())
+    return metadata
+
+
+def test_completion_requirements_satisfy_validate_completion(tmp_path):
+    """The body's stated contract must be exactly what the kernel accepts.
+
+    This is the anti-drift check. If `_completion_requirements` and
+    `validate_completion` ever disagree again, this fails -- whichever side
+    moved.
+    """
+
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Ask four independent agents for one joke and synthesize it.",
+            workers=[
+                SwarmWorkerSpec(
+                    profile=lane, title=f"{lane} joke", body="Return one joke.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+            tenant="delivery-test",
+        )
+
+        tasks = [kb.get_task(conn, tid) for tid in created.worker_ids]
+        tasks.append(kb.get_task(conn, created.verifier_id))
+        tasks.append(kb.get_task(conn, created.synthesizer_id))
+
+        for task in tasks:
+            contract = extract_contract(task.body)
+            assert contract is not None
+            metadata = _metadata_from_body(task.body)
+            assert metadata, f"{contract['role']} body states no completion metadata"
+            # The synthesizer additionally requires a non-empty task result;
+            # every other role is metadata-only.
+            result = "final deliverable" if contract["role"] == "synthesizer" else None
+            reason = validate_completion(task, metadata=metadata, result=result)
+            assert reason is None, f"{contract['role']}: {reason}"
+    finally:
+        conn.close()
+
+
+def test_completion_requirements_reject_a_subset(tmp_path):
+    """Negative control: dropping any single stated key must be rejected.
+
+    Without this, the test above would still pass if the body listed keys the
+    kernel does not actually enforce.
+    """
+
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Ask four independent agents for one joke and synthesize it.",
+            workers=[
+                SwarmWorkerSpec(
+                    profile=lane, title=f"{lane} joke", body="Return one joke.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+            tenant="delivery-test",
+        )
+        # Use an external-lane worker, not native_hermes. native_hermes has an
+        # empty preflight_skill_id, and the kernel reads that key with a ""
+        # default -- so omitting it is genuinely equivalent to sending it, and
+        # the key is not load-bearing for that lane. Every key stated for an
+        # external worker is.
+        external_worker = created.worker_ids[list(MULTI_AGENT_LANE_IDS).index("claude")]
+        for task_id in (created.verifier_id, created.synthesizer_id, external_worker):
+            task = kb.get_task(conn, task_id)
+            role = extract_contract(task.body)["role"]
+            full = _metadata_from_body(task.body)
+            result = "final deliverable" if role == "synthesizer" else None
+            for dropped in full:
+                partial = {k: v for k, v in full.items() if k != dropped}
+                reason = validate_completion(task, metadata=partial, result=result)
+                assert reason is not None, (
+                    f"{role}: dropping {dropped!r} was accepted, so the body "
+                    "states a key the kernel does not enforce"
+                )
+    finally:
+        conn.close()

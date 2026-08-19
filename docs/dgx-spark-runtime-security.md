@@ -131,15 +131,15 @@ configured upstream push URL is intentionally `DISABLE`.
 Known Telegram delivery targets for this host:
 
 ```text
-ITRIGEL channel: -1003954447810
-SPARK group:    -1004391006048
+ITRIGEL channel: <ITRIGEL_CHAT_ID>
+SPARK group:    <SPARK_CHAT_ID>
 ```
 
 Use Hermes' delivery target format rather than legacy `--platform` /
 `--chat` flags:
 
 ```bash
-hermes send --to telegram:-1004391006048 "test message"
+hermes send --to telegram:<SPARK_CHAT_ID> "test message"
 ```
 
 The SPARK group was manually verified on 2026-07-02 with a TAIEX/0050 test
@@ -222,9 +222,9 @@ arguments to `--script`, so wrapper scripts are used for the three report modes.
 Active jobs:
 
 ```text
-0,30 9-13 * * 1-5  TAIEX 0050 market snapshot to SPARK -> telegram:-1004391006048
-5 9 * * 1-5        TAIEX 0050 open report to SPARK      -> telegram:-1004391006048
-40 13 * * 1-5      TAIEX 0050 close report to SPARK     -> telegram:-1004391006048
+0,30 9-13 * * 1-5  TAIEX 0050 market snapshot to SPARK -> telegram:<SPARK_CHAT_ID>
+5 9 * * 1-5        TAIEX 0050 open report to SPARK      -> telegram:<SPARK_CHAT_ID>
+40 13 * * 1-5      TAIEX 0050 close report to SPARK     -> telegram:<SPARK_CHAT_ID>
 ```
 
 There are three jobs, not four: the market snapshot job covers both whole-hour
@@ -281,7 +281,7 @@ Manual non-delivery test:
 Manual delivery test to SPARK:
 
 ```bash
-hermes send --to telegram:-1004391006048 "$("$HOME/.hermes/scripts/taiex_0050_report.sh" normal)"
+hermes send --to telegram:<SPARK_CHAT_ID> "$("$HOME/.hermes/scripts/taiex_0050_report.sh" normal)"
 ```
 
 ## Ollama / GPU health guard

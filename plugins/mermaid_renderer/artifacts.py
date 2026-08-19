@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import stat
 import time
@@ -10,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from plugins.mermaid_renderer.renderer import MEDIA_ROOT as RENDERER_MEDIA_ROOT
+from plugins.mermaid_renderer.renderer import _owner_matches
 
 
 MEDIA_ROOT = RENDERER_MEDIA_ROOT
@@ -64,7 +64,7 @@ def _validate_root() -> Path:
     if (
         not stat.S_ISDIR(entry.st_mode)
         or stat.S_ISLNK(entry.st_mode)
-        or entry.st_uid != os.getuid()
+        or not _owner_matches(entry)
         or stat.S_IMODE(entry.st_mode) != 0o700
     ):
         raise ArtifactRootError("media_root_insecure")
@@ -90,7 +90,7 @@ def _scan(now: float) -> tuple[ArtifactStatus, list[_Candidate]]:
         if (
             not stat.S_ISREG(entry.st_mode)
             or stat.S_ISLNK(entry.st_mode)
-            or entry.st_uid != os.getuid()
+            or not _owner_matches(entry)
             or not UUID_PNG.fullmatch(path.name)
         ):
             ignored_count += 1
@@ -128,7 +128,7 @@ def _candidate_is_current(candidate: _Candidate, cutoff: float) -> bool:
     return (
         stat.S_ISREG(entry.st_mode)
         and not stat.S_ISLNK(entry.st_mode)
-        and entry.st_uid == os.getuid()
+        and _owner_matches(entry)
         and UUID_PNG.fullmatch(candidate.path.name) is not None
         and entry.st_dev == candidate.device
         and entry.st_ino == candidate.inode

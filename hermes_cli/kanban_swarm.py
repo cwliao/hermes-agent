@@ -29,6 +29,20 @@ MULTI_AGENT_LANE_IDS = ("native_hermes", "claude", "grok", "agy")
 REQUIRED_LANE_ID = "native_hermes"
 EXTERNAL_LANE_IDS = ("claude", "grok", "agy")
 MIN_EXTERNAL_LANES = 2
+
+# GATE8-SWARM-CREATION-TOOL-001: the skill each external lane needs to reach
+# its actual CLI. Before this table existed, nothing in the codebase
+# constrained what skill string an agent put on a lane's worker -- observed
+# live sending "HUMANIZER" for every lane (GATE8-RERUN-RESULT-001) and,
+# separately, workers whose `assignee` named a Hermes profile that doesn't
+# exist, which the dispatcher silently never picks up (no error anywhere).
+# `tools/kanban_tools.py::_handle_swarm` uses this to fill in
+# `preflight_skill_id` from `lane_id` rather than trust a model-typed value.
+LANE_SKILL_IDS = {
+    "claude": "claude-code",
+    "grok": "grok",
+    "agy": "antigravity-cli",
+}
 DEFAULT_WORKER_MAX_RUNTIME_SECONDS = 120
 DEFAULT_GOAL_MAX_TURNS = 5
 

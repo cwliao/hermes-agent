@@ -8940,6 +8940,168 @@ def rewind_notify_cursor(
 # Retention + garbage collection
 # ---------------------------------------------------------------------------
 
+LIVE_STATUSES = ("running", "ready")
+TERMINAL_STATUSES = ("done", "archived")
+
+
+def find_dead_graphs(
+    conn: sqlite3.Connection, *, older_than_seconds: int,
+    tenant: Optional[str] = None,
+) -> list[list[str]]:
+    """Return dead task graphs, each ordered children-before-parents.
+
+    KANBAN-CARD-GC-001. A failed swarm leaves its whole graph on the board:
+    workers ``blocked`` after the dispatcher gave up, verifier and synthesizer
+    ``todo`` behind parents that will never complete. Nothing archives them,
+    so the board grows without bound.
+
+    A graph is dead when every one of these holds:
+
+    * it has at least one card that is not ``done`` or ``archived`` -- an
+      entirely finished graph is history, not garbage;
+    * no card is ``running`` or ``ready`` -- something still dispatchable is
+      not dead, whatever its age;
+    * no card has recorded an event within ``older_than_seconds``.
+
+    The age test is deliberately over the *whole graph*: one live card keeps
+    its siblings alive, because a graph is abandoned together or not at all.
+
+    ``tenant`` scopes the sweep and is not optional in practice: the caller
+    must name what is disposable, because nothing on a card distinguishes a
+    test graph from a backlog somebody parked on purpose. A graph is
+    considered only when every card in it carries that tenant.
+
+    **Ordering is not cosmetic.** ``archive_task`` runs ``recompute_ready``
+    after each call, and an ``archived`` parent satisfies a dependency exactly
+    as a ``done`` one does. Archiving a dead worker before its verifier
+    therefore promotes that verifier to ``ready`` against a graph that
+    produced nothing -- an incident of exactly this shape is recorded in
+    KANBAN-CARD-GC-001 with the card's event trail, rather than narrated here
+    where a later reader cannot check it.
+
+    Depth is the longest path from a root, so ``depth(child) > depth(parent)``
+    holds for every edge and descending order archives descendants first. What
+    that guarantees is narrow and worth stating exactly: **within this
+    sequence** ``recompute_ready`` never sees an unarchived parent of an
+    archived child, because it scans only ``todo`` and ``blocked`` rows. It is
+    not a database-level invariant -- any other caller archiving upward
+    reproduces the hazard, and the guarantee assumes ``task_links`` is the
+    only dependency edge and that ``_would_cycle`` keeps the graph acyclic.
+    Neither is established here.
+
+    **Known gaps, not defended against:**
+
+    * A card stuck in ``running`` or ``ready`` forever -- a worker killed
+      without updating its row, a dispatcher that never claims it -- exempts
+      its whole graph from collection at any age. That is the mirror of the
+      problem this function exists to solve and is left deliberately, because
+      treating a live status as dead needs evidence this code cannot gather.
+    * The component walk is undirected, so any card linked into a swarm is
+      swept with it. Within one tenant that is usually the intent; it is not
+      guaranteed to be.
+    """
+
+    cutoff = int(time.time()) - int(older_than_seconds)
+    if tenant:
+        rows = conn.execute(
+            "SELECT id, status FROM tasks WHERE tenant = ?", (tenant,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT id, status FROM tasks").fetchall()
+    status_of = {r["id"]: r["status"] for r in rows}
+    if not status_of:
+        return []
+
+    links = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
+    children: dict[str, list[str]] = {}
+    parents: dict[str, list[str]] = {}
+    for link in links:
+        pid, cid = link["parent_id"], link["child_id"]
+        if pid in status_of and cid in status_of:
+            children.setdefault(pid, []).append(cid)
+            parents.setdefault(cid, []).append(pid)
+
+    # Connected components over the undirected link graph. A swarm root, its
+    # workers, verifier and synthesizer form one component; a standalone card
+    # forms a component of one and is skipped below unless it is itself stale
+    # and non-terminal.
+    seen: set[str] = set()
+    components: list[list[str]] = []
+    for task_id in status_of:
+        if task_id in seen:
+            continue
+        stack, comp = [task_id], []
+        seen.add(task_id)
+        while stack:
+            node = stack.pop()
+            comp.append(node)
+            for nxt in (*children.get(node, ()), *parents.get(node, ())):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        components.append(comp)
+
+    last_event: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT task_id, MAX(created_at) AS ts FROM task_events GROUP BY task_id"
+    ).fetchall():
+        last_event[row["task_id"]] = int(row["ts"] or 0)
+
+    dead: list[list[str]] = []
+    for comp in components:
+        statuses = [status_of[i] for i in comp]
+        if all(st in TERMINAL_STATUSES for st in statuses):
+            continue
+        if any(st in LIVE_STATUSES for st in statuses):
+            continue
+        if any(last_event.get(i, 0) > cutoff for i in comp):
+            continue
+        dead.append(_children_before_parents(comp, parents))
+    return dead
+
+
+def _children_before_parents(
+    comp: list[str], parents: dict[str, list[str]],
+) -> list[str]:
+    """Order a component so no card precedes its own descendants.
+
+    Cycles cannot occur -- ``_would_cycle`` rejects them at link time -- but
+    the traversal still guards against one rather than looping forever, since
+    a corrupted board must not hang a cleanup pass.
+    """
+
+    depth: dict[str, int] = {}
+
+    def _depth(node: str, guard: frozenset[str]) -> int:
+        if node in depth:
+            return depth[node]
+        if node in guard:
+            return 0
+        value = 0
+        for parent in parents.get(node, ()):  # deeper = further from the root
+            value = max(value, _depth(parent, guard | {node}) + 1)
+        depth[node] = value
+        return value
+
+    for node in comp:
+        _depth(node, frozenset())
+    return sorted(comp, key=lambda n: (-depth[n], n))
+
+
+def archive_graph(conn: sqlite3.Connection, ordered_ids: list[str]) -> int:
+    """Archive a graph in the order given. Returns the number archived.
+
+    Takes an ordering rather than computing one so the caller -- and the
+    tests -- can be explicit about the property that matters.
+    """
+
+    archived = 0
+    for task_id in ordered_ids:
+        if archive_task(conn, task_id):
+            archived += 1
+    return archived
+
+
 def gc_events(
     conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600,
 ) -> int:

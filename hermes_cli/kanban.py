@@ -34,6 +34,11 @@ from hermes_cli.kanban_ops import (
 from hermes_cli.kanban_parser import build_parser  # noqa: F401  (re-exported: hermes_cli.main, run_slash)
 
 
+def _resolve_max_in_progress(configured):
+    """Shared resolver seam for CLI/gateway concurrency semantics."""
+    return kb.resolve_max_in_progress(configured)
+
+
 # --- Flag parsing helpers ---
 
 def _none_profile(value: str) -> Optional[str]:

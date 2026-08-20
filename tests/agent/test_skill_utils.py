@@ -386,3 +386,62 @@ class TestNormalizeSkillLookupName:
         monkeypatch.setattr("agent.skill_utils.get_skills_dir", lambda: tmp_path / "skills")
         outside = str(tmp_path / "outside" / "skill")
         assert normalize_skill_lookup_name(outside) == outside
+
+
+class TestDetectEnvironmentKanbanCaching:
+    """KANBAN-TOOLSET-PLATFORM-GATE-001: _detect_environment("kanban") must
+    not serve one platform's cached answer to a different platform in the
+    same long-lived process, now that the underlying check is
+    platform-aware."""
+
+    def _reset_cache(self, monkeypatch):
+        from agent import skill_utils
+        monkeypatch.setattr(skill_utils, "_ENV_DETECT_CACHE", {})
+
+    def test_different_platforms_get_independent_cache_entries(self, monkeypatch):
+        """Uses a fake get_session_env rather than the real
+        set_session_vars/clear_session_vars -- those helpers' own docstring
+        says they are "not nestable/stack-safe" and flip a process-global
+        engaged flag, which leaked into unrelated tests (e.g.
+        test_kanban_cli.py's monkeypatch.setenv-based tests) the first time
+        this test used them, run together in the same pytest process."""
+        from agent import skill_utils
+
+        self._reset_cache(monkeypatch)
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+
+        current_platform = {"value": "telegram"}
+
+        def fake_get_session_env(name, default=""):
+            if name == "HERMES_SESSION_PLATFORM":
+                return current_platform["value"]
+            return default
+
+        monkeypatch.setattr(
+            "gateway.session_context.get_session_env", fake_get_session_env
+        )
+
+        def fake_check():
+            return current_platform["value"] == "telegram"
+
+        monkeypatch.setattr(
+            "tools.kanban_tools._profile_has_kanban_toolset", fake_check
+        )
+
+        current_platform["value"] = "telegram"
+        assert skill_utils._detect_environment("kanban") is True
+
+        current_platform["value"] = "cli"
+        assert skill_utils._detect_environment("kanban") is False
+
+        # Re-querying telegram must still return its own cached answer, not
+        # the cli session's -- fake_check would return True either way here
+        # (current_platform is back to "telegram"), so this only proves
+        # something if the cache is actually keyed per-platform.
+        current_platform["value"] = "telegram"
+        assert skill_utils._detect_environment("kanban") is True
+
+        assert "kanban:telegram" in skill_utils._ENV_DETECT_CACHE
+        assert "kanban:cli" in skill_utils._ENV_DETECT_CACHE
+        assert "kanban" not in skill_utils._ENV_DETECT_CACHE

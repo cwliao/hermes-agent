@@ -327,6 +327,52 @@ def get_session_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def resolve_notify_origin() -> dict:
+    """Resolve the live session's notification-delivery identity, for
+    stamping onto a newly created kanban task (WORKER-SUBPROCESS-SESSION-
+    ENV-001) so descendants -- including dispatcher-spawned worker
+    subprocesses, which have no ContextVar of their own -- can recover it
+    later via ``origin_platform``/``origin_chat_id``/etc. on the task row.
+
+    Mirrors the resolution order in ``tools/kanban_tools.py::
+    _maybe_auto_subscribe`` / ``hermes_cli/kanban.py::
+    _maybe_auto_subscribe_swarm`` (including the TUI ``HERMES_SESSION_KEY``
+    fallback) without either function's DB side effect, and without
+    duplicating logic across kanban task-creation call sites. Deliberately
+    does not read ``kanban.auto_subscribe_on_create`` -- persisting origin on
+    the task row is not itself a subscription; whether to actually write a
+    ``kanban_notify_subs`` row is a separate decision made by
+    ``_maybe_auto_subscribe``/``_maybe_auto_subscribe_swarm`` at the point a
+    subscription is created.
+
+    Returns ``{}`` when no session context is resolvable at all (CLI, cron,
+    or an unattached test process) -- callers should treat that as "no
+    origin to stamp," the same as if this weren't called.
+    """
+    import os
+
+    platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+    chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+    session_key = (
+        get_session_env("HERMES_SESSION_KEY", "") or os.environ.get("HERMES_SESSION_KEY", "")
+    )
+    if not platform or not chat_id:
+        if not session_key:
+            return {}
+        platform = "tui"
+        chat_id = session_key
+    return {
+        "origin_platform": platform,
+        "origin_chat_id": chat_id,
+        "origin_thread_id": get_session_env("HERMES_SESSION_THREAD_ID", "") or None,
+        "origin_user_id": get_session_env("HERMES_SESSION_USER_ID", "") or None,
+        "origin_session_key": session_key or None,
+        "origin_profile": (
+            get_session_env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE")
+        ),
+    }
+
+
 def async_delivery_supported() -> bool:
     """Whether the current session can deliver a background completion later.
 

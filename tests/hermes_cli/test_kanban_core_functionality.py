@@ -1065,6 +1065,63 @@ def test_create_task_persists_max_runtime(kanban_home):
         conn.close()
 
 
+def test_create_task_persists_explicit_origin(kanban_home):
+    """WORKER-SUBPROCESS-SESSION-ENV-001: explicit origin_* kwargs land on
+    the new row unchanged."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn, title="x",
+            origin_platform="telegram", origin_chat_id="-100123",
+            origin_thread_id="7", origin_user_id="9",
+            origin_session_key="key1", origin_profile="default",
+        )
+        task = kb.get_task(conn, tid)
+        assert task.origin_platform == "telegram"
+        assert task.origin_chat_id == "-100123"
+        assert task.origin_thread_id == "7"
+        assert task.origin_user_id == "9"
+        assert task.origin_session_key == "key1"
+        assert task.origin_profile == "default"
+    finally:
+        conn.close()
+
+
+def test_create_task_inherits_origin_from_parent(kanban_home):
+    """A child task created with no explicit origin_* inherits it from its
+    first parent, so origin propagates down an entire swarm/worker tree
+    without every call site re-resolving the live session."""
+    conn = kb.connect()
+    try:
+        parent_id = kb.create_task(
+            conn, title="parent",
+            origin_platform="telegram", origin_chat_id="-100999",
+        )
+        child_id = kb.create_task(
+            conn, title="child", parents=[parent_id],
+        )
+        child = kb.get_task(conn, child_id)
+        assert child.origin_platform == "telegram"
+        assert child.origin_chat_id == "-100999"
+    finally:
+        conn.close()
+
+
+def test_create_task_no_origin_inheritance_when_parent_has_none(kanban_home):
+    """A parent with no origin_platform (e.g. created from a plain CLI/cron
+    invocation) leaves the child's origin_* NULL too -- no origin to
+    propagate, not an error."""
+    conn = kb.connect()
+    try:
+        parent_id = kb.create_task(conn, title="parent")
+        child_id = kb.create_task(conn, title="child", parents=[parent_id])
+        child = kb.get_task(conn, child_id)
+        assert child.origin_platform is None
+        assert child.origin_chat_id is None
+    finally:
+        conn.close()
+
+
 def test_enforce_max_runtime_integrates_with_dispatch(kanban_home, monkeypatch):
     """enforce_max_runtime + dispatch_once integrate cleanly — a timed-out
     task goes through ``timed_out`` → ``ready`` and dispatch_once can then

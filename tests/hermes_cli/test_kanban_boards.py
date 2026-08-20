@@ -462,6 +462,94 @@ class TestWorkerSpawnEnv:
         assert env["HERMES_KANBAN_BOARD"] == "default"
         assert env["HERMES_KANBAN_DB"] == str(fresh_home / "kanban.db")
 
+    def test_default_spawn_forwards_notify_origin(self, fresh_home, monkeypatch):
+        """WORKER-SUBPROCESS-SESSION-ENV-001: a task with origin_* set gets
+        HERMES_SESSION_PLATFORM/_CHAT_ID/etc. stamped into the worker's env,
+        so a kanban_create/kanban_swarm call made from inside that worker
+        can auto-subscribe even though the worker is a fresh process with
+        no live ContextVar.
+        """
+        captured = {}
+
+        class FakeProc:
+            pid = 1
+
+        def fake_popen(cmd, *args, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return FakeProc()
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        task = kb.Task(
+            id="t_origin",
+            title="",
+            body=None,
+            assignee="teknium",
+            status="ready",
+            priority=0,
+            created_by=None,
+            created_at=0,
+            started_at=None,
+            completed_at=None,
+            workspace_kind="scratch",
+            workspace_path=None,
+            claim_lock=None,
+            claim_expires=None,
+            tenant=None,
+            origin_platform="telegram",
+            origin_chat_id="-100123",
+            origin_thread_id="42",
+            origin_user_id="99",
+            origin_session_key="sesskey1",
+            origin_profile="default",
+        )
+        kb._default_spawn(task, str(fresh_home / "ws"), board=None)
+        env = captured["env"]
+        assert env["HERMES_SESSION_PLATFORM"] == "telegram"
+        assert env["HERMES_SESSION_CHAT_ID"] == "-100123"
+        assert env["HERMES_SESSION_THREAD_ID"] == "42"
+        assert env["HERMES_SESSION_USER_ID"] == "99"
+        assert env["HERMES_SESSION_KEY"] == "sesskey1"
+        assert env["HERMES_SESSION_PROFILE"] == "default"
+
+    def test_default_spawn_omits_notify_origin_when_absent(self, fresh_home, monkeypatch):
+        """A task with no origin_* set must not inject stale/empty
+        HERMES_SESSION_* vars -- absence, not empty string, is the signal
+        _maybe_auto_subscribe's os.environ fallback checks for.
+        """
+        captured = {}
+
+        class FakeProc:
+            pid = 1
+
+        def fake_popen(cmd, *args, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return FakeProc()
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+        monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
+        task = kb.Task(
+            id="t_no_origin",
+            title="",
+            body=None,
+            assignee="teknium",
+            status="ready",
+            priority=0,
+            created_by=None,
+            created_at=0,
+            started_at=None,
+            completed_at=None,
+            workspace_kind="scratch",
+            workspace_path=None,
+            claim_lock=None,
+            claim_expires=None,
+            tenant=None,
+        )
+        kb._default_spawn(task, str(fresh_home / "ws"), board=None)
+        env = captured["env"]
+        assert "HERMES_SESSION_PLATFORM" not in env
+        assert "HERMES_SESSION_CHAT_ID" not in env
+
 
 # ---------------------------------------------------------------------------
 # CLI surface

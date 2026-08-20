@@ -60,9 +60,11 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
     # Cap simultaneously running tasks so slow workers don't pile up and time
     # out. Explicit config wins; otherwise a memory-derived default (unbounded
     # fan-out swap-thrashes small hosts), or None where total memory can't be read.
-    max_in_progress = _positive_int_setting(kanban_cfg, "max_in_progress")
-    effective_max_in_progress = _kbd().resolve_max_in_progress(max_in_progress)
-    if max_in_progress is None and effective_max_in_progress is not None:
+    raw_max_in_progress = kanban_cfg.get("max_in_progress")
+    effective_max_in_progress = _kbd().resolve_max_in_progress(
+        raw_max_in_progress, warn=logger.warning,
+    )
+    if effective_max_in_progress is not None and raw_max_in_progress is None:
         logger.info(
             "kanban dispatcher: kanban.max_in_progress unset; using "
             "memory-derived default max_in_progress=%d "

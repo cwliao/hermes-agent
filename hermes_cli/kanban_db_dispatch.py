@@ -1304,7 +1304,9 @@ def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -
     machines are unaffected.
     """
     if sample is None:
-        sample = _system_memory_sample()
+        # Late-bound through kanban_db so tests and plugins can replace the
+        # process-local memory sampler without reaching into this split module.
+        sample = _kb._system_memory_sample()
     total_kib = sample.get("mem_total_kib")
     if isinstance(total_kib, bool) or not isinstance(total_kib, int) or total_kib <= 0:
         return None
@@ -1312,14 +1314,30 @@ def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -
     return max(DERIVED_MAX_IN_PROGRESS_FLOOR, min(workers, DERIVED_MAX_IN_PROGRESS_CEILING))
 
 
-def resolve_max_in_progress(configured: Optional[int]) -> Optional[int]:
+def resolve_max_in_progress(
+    configured: Optional[int], *, warn: Optional[Callable[..., None]] = None,
+) -> Optional[int]:
     """Effective global concurrency cap: explicit config wins, else the
-    memory-derived default. All config-parsing callers route through this so
-    both paths agree.
+    memory-derived default. ``0`` explicitly disables the cap; negative values
+    fall back to the derived default and malformed values remain uncapped with
+    an optional warning rather than crashing dispatch.
     """
-    if configured is not None:
-        return configured
-    return derive_default_max_in_progress()
+    if configured is None:
+        return derive_default_max_in_progress()
+    try:
+        value = int(configured)
+    except (TypeError, ValueError):
+        if warn:
+            warn("kanban dispatcher: invalid kanban.max_in_progress=%r; ignoring", configured)
+        return None
+    if value == 0:
+        return None
+    if value < 0:
+        default = derive_default_max_in_progress()
+        if warn:
+            warn("kanban dispatcher: kanban.max_in_progress=%r is negative; using %r", configured, default)
+        return default
+    return value
 
 
 def configured_max_in_progress() -> Optional[int]:

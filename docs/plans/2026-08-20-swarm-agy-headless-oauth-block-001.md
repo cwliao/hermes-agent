@@ -1,7 +1,77 @@
 # SWARM-AGY-HEADLESS-OAUTH-BLOCK-001
 
-Status: ticket, not yet investigated further. Needs cross-review before
-implementation starts.
+Status: investigated (step 2 of the suggested next steps below). Finding
+reframes the problem -- likely not an env/auth gap at all. Needs
+cross-review of this finding before deciding what (if anything) to
+implement.
+
+## Follow-up finding (same day, later investigation)
+
+Reproduced the worker's own claimed failure directly: ran `agy -p "Reply
+with exactly: OK" < /dev/null` (headless, no TTY, matching how a
+dispatcher-spawned worker runs) both plain and with `--sandbox` -- the
+exact two invocations the worker's block comment said it tried -- from an
+interactive shell first, then again with the worker's own env vars
+(`HOME`, `HERMES_PROFILE=default`, `HERMES_KANBAN_TASK=t_727e2096`) and
+cwd (`~/.hermes/kanban/boards/kanban/workspaces/t_727e2096`, the worker's
+actual workspace directory, still present on disk). **All four
+reproductions returned `OK` in under a second, using the existing stored
+OAuth token (`~/.gemini/antigravity-cli/antigravity-oauth-token`), with no
+browser-auth prompt, no hang, no timeout.**
+
+This does not match "agy requires interactive OAuth that cannot complete
+headless" at all -- that claim, as reported by the worker
+(`t_727e2096`'s `blocked` event and its own 529-char comment), could not
+be reproduced under conditions as close to the worker's actual execution
+context as could be checked without re-running the live dispatcher.
+
+**Working hypothesis, not yet confirmed:** the block reason may be a
+fabricated/incorrect self-diagnosis by the worker's own model
+(`ornith:35b`, a smaller local model, per `agent.log`'s
+`[20260820_214527_170e5c]` session), not a genuine agy limitation. The
+worker's `agent.log` session does show two real `process` tool calls
+(45.38s and 48.81s durations) in the relevant window -- so *something*
+ran and took a while -- but the log format doesn't expose the tool's
+actual command-line arguments at INFO level, so what those two calls
+literally invoked (and whether they were even `agy` calls, versus e.g. a
+misdirected/malformed command) was not confirmed here. This is exactly
+the class of problem `docs/plans/` history already has a named mechanism
+for (`fabrication-guard`, PR #68) -- worth checking whether that mechanism
+covers `kanban_block` reasons specifically, or only some other tool-result
+surface.
+
+**Ruled out as a separate confound:** this host has a chronic,
+long-running (spans 2026-08-18 through at least 2026-08-21, 476
+occurrences in `gateway.log`) pattern of `Primary api.telegram.org
+connection failed ... trying fallback IPs` -- but that's specifically
+Telegram's own network path, unrelated to `agy`/`claude`/`grok`'s
+upstream APIs, and was already present continuously before and after this
+test, not a spike coinciding with it. Noted so a future investigator
+doesn't chase it as the cause here.
+
+## Revised suggested next steps
+
+1. **Before implementing anything**, get the exact `process` tool
+   invocation(s) that session actually made -- either from a more verbose
+   log level, or by adding temporary tracing to the `process` tool
+   dispatch path -- to settle whether a real `agy` call was made and
+   genuinely misbehaved (contradicting this session's clean
+   reproduction, which would then need explaining) or whether the "OAuth
+   timeout" narrative was invented without a matching real failure.
+2. If confirmed as fabrication: this is a correctness/trust problem in
+   worker self-reporting, not an agy/auth problem. Consider whether the
+   agy lane's assigned model should be upgraded from `ornith:35b` to
+   something more reliable for self-diagnosis, and/or whether
+   `kanban_block`'s reason text should require some form of
+   evidence-attachment (e.g. the actual failing command's exit code/
+   stderr) rather than free-text narration, before a block is accepted.
+3. If NOT fabrication (a real, narrower trigger condition exists that
+   this session's reproduction didn't hit -- e.g. only fails under actual
+   dispatcher-concurrency conditions, or only on the first call after
+   token near-expiry), that would itself be a useful, more specific
+   finding to chase next, but has no supporting evidence yet.
+
+## Original suggested next steps (superseded by the above for step 2; steps 3/4 below still apply if fabrication is ruled out)
 
 ## Context
 

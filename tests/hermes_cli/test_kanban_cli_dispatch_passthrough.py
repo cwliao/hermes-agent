@@ -96,3 +96,83 @@ def test_cli_max_flag_overrides_config_max_spawn(isolated_kanban_home, monkeypat
     )
 
 
+def test_cli_invalid_max_in_progress_has_defined_behaviour(isolated_kanban_home, monkeypatch):
+    """Every unusable kanban.max_in_progress value has a defined outcome and
+    none of them crashes the dispatcher.
+
+    **Contract changed (WORKER-TIMEOUT-CONTENTION-001).** This test previously
+    asserted that 0, negatives and non-numerics all fell through to None,
+    i.e. unlimited concurrency, and was named ..._silently_disables. Unset
+    also meant unlimited, and unlimited is what let four swarm workers
+    contend for one local model until every one of them timed out.
+
+    Now `0` is the explicit opt-out and still yields None, but a **negative**
+    value falls back to the default rather than disabling the cap: failing
+    open on a nonsensical number is the path back to the original defect. A
+    non-numeric value still yields None, because a string cannot be
+    interpreted as an intent and refusing to dispatch would be worse than
+    running uncapped.
+
+    The property this test actually protected — no crash, defined behaviour
+    for every bad input — is unchanged.
+    """
+    from hermes_cli import kanban as kb_cli
+    from hermes_cli import kanban_db
+
+    monkeypatch.setattr(kanban_db, "_system_memory_sample", lambda: {})
+    default = kanban_db.derive_default_max_in_progress()
+
+    # value -> expected resolution
+    for bad_val, expected in (
+        (0, None),          # explicit opt-out
+        (-1, default),      # nonsense: fall back to the derived default, do not fail open
+        ("abc", None),      # uninterpretable
+        ("1.5", None),      # uninterpretable as an int
+    ):
+        fake_config = {"kanban": {"max_in_progress": bad_val}}
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: fake_config)
+        captured = {}
+        monkeypatch.setattr(
+            kanban_db, "dispatch_once",
+            lambda conn, **kw: (captured.update(kw), kanban_db.DispatchResult())[1],
+        )
+        args = argparse.Namespace(dry_run=True, max=None, failure_limit=2, json=False)
+        kb_cli._cmd_dispatch(args)
+        assert captured.get("max_in_progress") == expected, (
+            f"max_in_progress={bad_val!r} should resolve to {expected!r}, "
+            f"got {captured.get('max_in_progress')!r}"
+        )
+
+
+def test_kanban_swarm_uses_existing_humanizer_skill():
+    """#29415: kanban_swarm.py used to hardcode skills=['avoid-ai-writing'],
+    a skill that doesn't exist in any registry — synthesizer workers
+    crashed with 'Unknown skill(s): avoid-ai-writing' on every retry.
+
+    Verify the synthesizer card now uses the bundled 'humanizer' skill
+    which actually exists at skills/creative/humanizer/SKILL.md."""
+    import pathlib
+
+    swarm_path = (
+        pathlib.Path(__file__).resolve().parent.parent.parent
+        / "hermes_cli" / "kanban_swarm.py"
+    )
+    src = swarm_path.read_text()
+    assert "avoid-ai-writing" not in src, (
+        "kanban_swarm.py must not reference 'avoid-ai-writing' — that "
+        "skill doesn't exist in any registry, crashing synthesizers (#29415)"
+    )
+    assert '"humanizer"' in src, (
+        "kanban_swarm.py should use the bundled 'humanizer' skill for "
+        "synthesizer cards (the original intent of 'avoid-ai-writing')"
+    )
+
+    # And the replacement skill must actually exist on disk.
+    skills_root = (
+        pathlib.Path(__file__).resolve().parent.parent.parent / "skills"
+    )
+    humanizer_path = skills_root / "creative" / "humanizer" / "SKILL.md"
+    assert humanizer_path.is_file(), (
+        f"humanizer skill missing at {humanizer_path}; the kanban_swarm fix "
+        "for #29415 requires this bundled skill to exist"
+    )

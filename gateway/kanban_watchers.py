@@ -25,6 +25,7 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 
+
 def _resolve_notifier_gateway_identity() -> Optional[str]:
     """Resolve the current gateway identity used for per-board dispatch owner checks.
 
@@ -872,26 +873,31 @@ class GatewayKanbanWatchersMixin:
         # (local LLMs, resource-constrained hosts) don't pile up and time
         # out. When set, the dispatcher skips spawning when the board
         # already has this many tasks in 'running' status.
-        raw_max_in_progress = kanban_cfg.get("max_in_progress", None)
-        max_in_progress = None
-        if raw_max_in_progress is not None:
-            try:
-                max_in_progress = int(raw_max_in_progress)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "kanban dispatcher: invalid kanban.max_in_progress=%r; ignoring",
-                    raw_max_in_progress,
-                )
-                max_in_progress = None
-            else:
-                if max_in_progress < 1:
-                    logger.warning(
-                        "kanban dispatcher: kanban.max_in_progress=%r is below 1; ignoring",
-                        raw_max_in_progress,
-                    )
-                    max_in_progress = None
-                else:
-                    logger.info(f"kanban dispatcher: max_in_progress={max_in_progress}")
+        # WORKER-TIMEOUT-CONTENTION-001: unset means unlimited, and unlimited
+        # is the wrong default on a host serving one local model.
+        #
+        # Measured on 2026-08-20: a four-lane swarm dispatched all four workers
+        # at once alongside a chat session and cron jobs. Summed per-call
+        # latency over that window was 2538s inside 360s of wall-clock -- seven
+        # inference calls in flight on average -- and per-call latency rose
+        # from 18-39s to 32-129s. Every worker then exhausted its 300s cap
+        # after two calls and was killed. The comparable window with calls
+        # running back to back (overlap 1.0) completed normally.
+        #
+        # A cap trades a swarm's wall-clock for a bounded number of
+        # simultaneous inference calls. Whether that trade is right is
+        # host-dependent, which is why this stays a config key; what is not
+        # defensible on any host is no limit at all, so 0 is now the way to
+        # ask for unlimited rather than the way to leave it unconfigured.
+        # The runtime effect of the cap is not measured here -- see
+        # WORKER-TIMEOUT-CONTENTION-001 for what was and was not established.
+        max_in_progress = _kb.resolve_max_in_progress(
+            kanban_cfg.get("max_in_progress"), warn=logger.warning,
+        )
+        if max_in_progress is None:
+            logger.info("kanban dispatcher: concurrency unlimited")
+        else:
+            logger.info(f"kanban dispatcher: max_in_progress={max_in_progress}")
 
         raw_failure_limit = kanban_cfg.get("failure_limit", _kb.DEFAULT_FAILURE_LIMIT)
         try:

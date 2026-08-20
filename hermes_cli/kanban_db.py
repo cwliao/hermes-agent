@@ -8940,6 +8940,51 @@ def rewind_notify_cursor(
 # Retention + garbage collection
 # ---------------------------------------------------------------------------
 
+DEFAULT_MAX_IN_PROGRESS = 3
+
+
+def resolve_max_in_progress(raw, *, warn=None):
+    """Resolve ``kanban.max_in_progress`` to a live concurrency cap.
+
+    Returns an int cap, or None for unlimited.
+
+    Lives here rather than in the gateway because BOTH dispatch paths need it
+    -- the gateway-embedded dispatcher and ``hermes kanban dispatch``, which
+    is what cron invokes. An earlier version put it in the gateway and had the
+    CLI import it behind a try/except; a reviewer pointed out the fallback
+    silently restored the unlimited behaviour this exists to remove, on
+    exactly the path most likely to be running unattended.
+
+    ``0`` is an explicit opt-out and returns None. A negative value falls back
+    to the default rather than to unlimited: failing open on a nonsensical
+    number is how WORKER-TIMEOUT-CONTENTION-001 would return.
+
+    The default of 3 is chosen to be bounded, not optimal. The measured
+    failure had roughly seven inference calls in flight and the measured
+    success had one, so the right value is between and is host-dependent.
+    Nothing establishes that three beats two or four.
+    """
+
+    if raw is None:
+        raw = DEFAULT_MAX_IN_PROGRESS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        if warn:
+            warn("kanban dispatcher: invalid kanban.max_in_progress=%r; ignoring", raw)
+        return None
+    if value == 0:
+        return None
+    if value < 0:
+        if warn:
+            warn(
+                "kanban dispatcher: kanban.max_in_progress=%r is negative; using %d",
+                raw, DEFAULT_MAX_IN_PROGRESS,
+            )
+        return DEFAULT_MAX_IN_PROGRESS
+    return value
+
+
 LIVE_STATUSES = ("running", "ready")
 TERMINAL_STATUSES = ("done", "archived")
 

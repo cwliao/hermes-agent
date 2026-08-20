@@ -2190,7 +2190,13 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_in_progress_per_profile = _coerce_positive_int(
             _kanban_cfg.get("max_in_progress_per_profile")
         )
-        max_in_progress = _coerce_positive_int(_kanban_cfg.get("max_in_progress"))
+        # WORKER-TIMEOUT-CONTENTION-001: share the gateway's resolver rather
+        # than coercing here. This path is what cron invokes, and the
+        # docstring above promises the two behave alike -- resolving the same
+        # key two ways is how that promise quietly stops being true.
+        max_in_progress = kb.resolve_max_in_progress(
+            _kanban_cfg.get("max_in_progress")
+        )
         # CLI --max overrides config kanban.max_spawn when both are present;
         # CLI is the more explicit signal so it wins.
         cli_max = getattr(args, "max", None)

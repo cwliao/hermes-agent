@@ -538,3 +538,96 @@ def test_stale_running_recovery_claim_is_reclaimed(tmp_path):
     state = json.loads(state_path.read_text())
     assert "recovery BLOCKED" in result
     assert state["attempts"] == 2
+
+
+# --- T0213 Objective #2: request_gateway_recovery() / --request-recovery ---
+#
+# mcp_health_check.sh has no gateway-identity/boot context of its own (it
+# watches gateway *log* evidence of the klib MCP connection going stale, not
+# code-skew), so it becomes a second producer into the exact same request
+# file check_once()'s own SKEW/SERVICE_DOWN paths write, reusing
+# recover_once()'s claim/lock bounded-retry path unmodified.
+
+
+def test_request_gateway_recovery_writes_the_same_request_shape(tmp_path):
+    home = tmp_path / ".hermes"
+    result = calendar_guard.request_gateway_recovery(
+        "klib MCP connection degraded for 2 consecutive checks",
+        home=home,
+        now=500.0,
+    )
+    assert "recovery queued" in result
+    request = json.loads((home / "gateway" / "calendar_guard_request.json").read_text())
+    assert request["service"] == calendar_guard.SERVICE_NAME
+    assert request["schema"] == calendar_guard.STATE_SCHEMA
+    assert request["requested_at"] == 500.0
+    assert "incident_key" in request
+
+
+def test_request_gateway_recovery_is_consumed_by_existing_recover_once(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    release = home / "releases" / "v1"
+    release.mkdir(parents=True)
+    (release / ".hermes-release-sha").write_text("a" * 40 + "\n")
+
+    calendar_guard.request_gateway_recovery(
+        "klib MCP connection degraded", home=home, now=100.0
+    )
+
+    # Same pattern as test_recovery_requires_new_pid_and_matching_boot_record:
+    # a restart is only "verified" once the post-restart MainPID differs
+    # from the pre-restart one and the boot fingerprint matches.
+    identities = iter(
+        [
+            active_gateway_identity(home, project_root=tmp_path / "checkout", runner=_runner(_props(release, "1"))),
+            active_gateway_identity(home, project_root=tmp_path / "checkout", runner=_runner(_props(release, "2"))),
+        ]
+    )
+    monkeypatch.setattr(calendar_guard, "active_gateway_identity", lambda *args, **kwargs: next(identities))
+    monkeypatch.setattr(
+        calendar_guard,
+        "read_boot_record",
+        lambda home=None: {"schema": 1, "fingerprint": "release:" + "a" * 40, "release_path": str(release)},
+    )
+
+    restarted: list[str] = []
+
+    def restart(service_name: str) -> None:
+        restarted.append(service_name)
+
+    result = calendar_guard.recover_once(
+        home=home,
+        project_root=tmp_path / "checkout",
+        now=100.0,
+        restart=restart,
+        sleep=lambda seconds: None,
+    )
+    assert restarted == [calendar_guard.SERVICE_NAME]
+    assert "recovery verified" in result
+
+
+def test_request_gateway_recovery_accepts_a_custom_service_name(tmp_path):
+    home = tmp_path / ".hermes"
+    calendar_guard.request_gateway_recovery(
+        "example reason", service_name="example.service", home=home, now=1.0
+    )
+    request = json.loads((home / "gateway" / "calendar_guard_request.json").read_text())
+    assert request["service"] == "example.service"
+
+
+def test_request_recovery_cli_verb_writes_request_file(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    exit_code = calendar_guard.main(
+        [
+            "--request-recovery",
+            "--service",
+            "hermes-gateway.service",
+            "--reason",
+            "cli-triggered test",
+        ]
+    )
+    assert exit_code == 0
+    request = json.loads((home / "gateway" / "calendar_guard_request.json").read_text())
+    assert request["service"] == "hermes-gateway.service"
+    assert request["reason"] == "cli-triggered test"

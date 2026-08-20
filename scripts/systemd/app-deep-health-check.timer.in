@@ -1,0 +1,15 @@
+[Unit]
+Description=T0213 Objective #3: DocuBot/DocHelper deep health check schedule
+
+[Timer]
+# Alert-only, no auto-restart action, so a 15-minute cadence is plenty
+# responsive without adding meaningful load; offset from the other new
+# T0213 companion timer (failed-unit-allowlist-repair, 10-minute cadence)
+# and from hermes-mcp-health-guard.timer's 5-minute one.
+OnBootSec=7min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=app-deep-health-check.service
+
+[Install]
+WantedBy=timers.target

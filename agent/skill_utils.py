@@ -228,9 +228,26 @@ def _detect_environment(env: str) -> bool:
 
     Cached per process. Unknown env names return True (fail-open: never hide a
     skill because of a tag we don't understand).
+
+    KANBAN-TOOLSET-PLATFORM-GATE-001: the ``kanban`` case is cached under a
+    key that includes the active platform, not the bare ``"kanban"`` string
+    the other environments use. ``_profile_has_kanban_toolset`` (which this
+    mirrors) became platform-aware; ``docker``/``s6`` never vary within a
+    process so a global cache is fine for them, but a single long-lived
+    gateway process serving more than one platform would otherwise cache
+    the *first* platform's kanban answer and serve it to every other
+    platform afterward.
     """
-    if env in _ENV_DETECT_CACHE:
-        return _ENV_DETECT_CACHE[env]
+    cache_key = env
+    if env == "kanban":
+        try:
+            from gateway.session_context import get_session_env
+            cache_key = f"kanban:{get_session_env('HERMES_SESSION_PLATFORM', '') or 'cli'}"
+        except Exception:
+            cache_key = "kanban:cli"
+
+    if cache_key in _ENV_DETECT_CACHE:
+        return _ENV_DETECT_CACHE[cache_key]
 
     result = True
     if env == "kanban":
@@ -265,7 +282,7 @@ def _detect_environment(env: str) -> bool:
             "/package/admin/s6-overlay"
         )
 
-    _ENV_DETECT_CACHE[env] = result
+    _ENV_DETECT_CACHE[cache_key] = result
     return result
 
 

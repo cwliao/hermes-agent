@@ -143,6 +143,100 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
     assert kanban == expected, f"expected {expected}, got {kanban}"
 
 
+def test_kanban_tools_visible_via_platform_toolsets(monkeypatch, tmp_path):
+    """KANBAN-TOOLSET-PLATFORM-GATE-001: a platform-scoped
+    platform_toolsets.<platform>: [kanban, ...] entry must be honored, not
+    just the legacy top-level toolsets list -- this is the exact defect
+    (TELEGRAM-SWARM-UNREACHABLE-001 Defect A) that left a real Telegram
+    session with zero kanban tools despite declaring kanban for it."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "toolsets:\n  - hermes-cli\n"
+        "platform_toolsets:\n  telegram:\n    - kanban\n    - terminal\n"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+
+    import tools.kanban_tools  # ensure registered
+    from tools.registry import invalidate_check_fn_cache, registry
+    from toolsets import resolve_toolset
+
+    invalidate_check_fn_cache()
+    schema = registry.get_definitions(set(resolve_toolset("hermes-cli")), quiet=True)
+    names = {s["function"].get("name") for s in schema if "function" in s}
+    kanban = {n for n in names if n and n.startswith("kanban_")}
+    assert kanban, (
+        "platform_toolsets.telegram: [kanban] must grant kanban tools to a "
+        "telegram session even though the top-level toolsets list omits kanban"
+    )
+
+
+def test_kanban_tools_hidden_for_platform_without_explicit_kanban(monkeypatch, tmp_path):
+    """The flip side: a platform WITH an explicit platform_toolsets entry
+    that does NOT list kanban must not fall through to the top-level list
+    -- an explicit per-platform choice is authoritative, not a floor."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "toolsets:\n  - kanban\n"  # top-level DOES have kanban
+        "platform_toolsets:\n  telegram:\n    - terminal\n"  # telegram explicitly does not
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+
+    import tools.kanban_tools  # ensure registered
+    from tools.registry import invalidate_check_fn_cache, registry
+    from toolsets import resolve_toolset
+
+    invalidate_check_fn_cache()
+    schema = registry.get_definitions(set(resolve_toolset("hermes-cli")), quiet=True)
+    names = {s["function"].get("name") for s in schema if "function" in s}
+    kanban = {n for n in names if n and n.startswith("kanban_")}
+    assert kanban == set(), (
+        f"telegram explicitly excludes kanban; the top-level list must not "
+        f"leak it back in: {kanban}"
+    )
+
+
+def test_kanban_tools_fall_back_to_top_level_without_platform_context(monkeypatch, tmp_path):
+    """A bare CLI/script invocation with no session platform bound at all
+    must keep relying on the legacy top-level toolsets list -- this is the
+    existing behavior every non-gateway surface already depends on, and
+    must not regress."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("toolsets:\n  - kanban\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    from tools.kanban_tools import _profile_has_kanban_toolset
+    assert _profile_has_kanban_toolset() is True
+
+
+def test_kanban_toolset_check_does_not_leak_via_platform_composite_recovery(
+    monkeypatch, tmp_path,
+):
+    """Regression guard for the bug caught before this shipped: routing
+    this check through hermes_cli.tools_config._get_platform_tools looked
+    correct but that function's "recover non-configurable platform
+    toolsets" pass treats kanban as unconditionally enabled everywhere its
+    tools are statically listed in a platform's default composite (e.g.
+    hermes-cli) -- it returned True for a completely empty, default
+    config with no toolsets configured at all. This must stay False."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    from tools.kanban_tools import _profile_has_kanban_toolset
+    assert _profile_has_kanban_toolset() is False
+
+
 # ---------------------------------------------------------------------------
 # Handler happy paths
 # ---------------------------------------------------------------------------

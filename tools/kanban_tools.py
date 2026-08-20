@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
@@ -501,6 +502,63 @@ def _handle_list(args: dict, **kw) -> str:
         return tool_error(f"kanban_list: {e}")
 
 
+_SWARM_ROOT_RE = re.compile(
+    r"Swarm root / shared blackboard:\s*`([^`]+)`"
+)
+
+
+def _auto_post_swarm_handoff(conn: Any, task: Any, tid: str,
+                              summary: Optional[str], result: Optional[str]) -> None:
+    """Best-effort: post this worker's completion to its swarm root's blackboard.
+
+    GATE8-SWARM-COMPLETED-VERIFIER-RECOVERY-AND-DELIVERY-GAP-001. A worker's
+    task body carries "Swarm root / shared blackboard: `<id>`" whenever it was
+    composed as part of a swarm graph -- whether via ``create_swarm()`` (which
+    also writes a ``[swarm:contract]`` line) or hand-composed with
+    ``kanban_create`` (which does not; this is the path an agent without a
+    registered swarm-creation tool actually uses today, per GATE8-PATH-001).
+    Either way the same protocol boilerplate names the root.
+
+    Posting to the blackboard was previously only a suggestion in that
+    boilerplate text ("put cross-worker notes ... using structured
+    comments"). A worker that completes without acting on the suggestion
+    leaves nothing for a verifier to check against -- observed directly in
+    this ticket: the verifier had to recover a missing handoff from an
+    attachment file after already blocking on it, and never re-evaluated once
+    it had.
+
+    This always posts, even when the worker also posted its own comment --
+    detecting "did this worker already post" from free-text comment bodies
+    is unreliable (observed comments name the task id inconsistently), and a
+    duplicate structured comment is a strictly safer failure mode than a
+    silent gap. The ``[swarm:auto-handoff]`` prefix makes this comment's
+    origin unambiguous to a reader or a future dedup pass.
+
+    Never raises: this augments a completion that has already been committed
+    to the DB, so a failure here must not be surfaced as a completion failure.
+    """
+    try:
+        match = _SWARM_ROOT_RE.search(getattr(task, "body", None) or "")
+        if not match:
+            return
+        root_id = match.group(1).strip()
+        if not root_id or root_id == tid:
+            return
+        text = (summary or result or "").strip()
+        if not text:
+            return
+        from hermes_cli import kanban_db as _kb
+        _kb.add_comment(
+            conn, root_id, author="default",
+            body=f"[swarm:auto-handoff] task={tid}\n\n{text}",
+        )
+    except Exception:
+        logger.warning(
+            "auto-post swarm handoff failed for %s (non-fatal)", tid,
+            exc_info=True,
+        )
+
+
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
     tid = _default_task_id(args.get("task_id"))
@@ -669,6 +727,8 @@ def _handle_complete(args: dict, **kw) -> str:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
+            if task is not None:
+                _auto_post_swarm_handoff(conn, task, tid, summary, result)
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)
         finally:

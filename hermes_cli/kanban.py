@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import logging
 import os
 import shlex
 import sys
@@ -26,6 +27,7 @@ from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_swarm as ks
+from hermes_cli.config import cfg_get, load_config
 from hermes_cli.profiles import get_active_profile_name
 
 
@@ -1395,6 +1397,89 @@ def _cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _maybe_auto_subscribe_swarm(conn: Any, synthesizer_id: str) -> bool:
+    """Auto-subscribe the calling session to the swarm's final result.
+
+    GATE8-SWARM-COMPLETED-VERIFIER-RECOVERY-AND-DELIVERY-GAP-001. Unlike
+    ``kanban_create`` (``tools/kanban_tools.py::_maybe_auto_subscribe``),
+    ``hermes kanban swarm`` never registered a notification subscription for
+    any card in the graph it built -- confirmed live: a completed four-lane
+    swarm's synthesizer result never reached the Telegram session that asked
+    for it, and ``kanban_notify_subs`` held zero rows for that run. This
+    subscribes only the synthesizer (the card carrying gate 8's own
+    acceptance evidence -- "a synthesizer card in done with a ... result"),
+    not the whole graph, so a chatty swarm doesn't produce one notification
+    per worker.
+
+    This mirrors ``_maybe_auto_subscribe`` in full, not just its ContextVar
+    resolution -- an earlier version of this function copied only the
+    Telegram-style detection and was flagged in review for silently
+    diverging on two points a reader would reasonably assume it inherited:
+
+    - the ``kanban.auto_subscribe_on_create`` config gate, so a user who
+      opted out of auto-subscription on ``kanban_create`` does not get
+      silently re-subscribed via a different entry point;
+    - the TUI fallback (``HERMES_SESSION_KEY`` -> ``platform="tui"``), for
+      the surface where platform/chat_id ContextVars are intentionally
+      cleared but the agent subprocess still inherits a session key.
+
+    Session-context resolution: ``HERMES_SESSION_PLATFORM``/
+    ``HERMES_SESSION_CHAT_ID`` are ContextVars set by the gateway per-turn
+    and bridged into subprocess env by the terminal tool's
+    ``_inject_session_context_env`` (``tools/environments/local.py``), so a
+    bare ``hermes kanban swarm`` invocation shelled out from a live Telegram
+    turn still resolves them via the ``os.environ`` fallback in
+    ``get_session_env``. A CLI run with no such session (operator's own
+    terminal, cron) resolves nothing and this is a no-op -- never a hard
+    requirement to subscribe.
+
+    Best-effort only: any failure here must not fail the swarm creation that
+    already succeeded.
+    """
+    try:
+        cfg = load_config()
+        if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
+            return False
+    except Exception:
+        pass  # config load failure defaults to the subscribe-friendly path
+
+    platform = ""
+    chat_id = ""
+    try:
+        from gateway.session_context import get_session_env
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        if not platform or not chat_id:
+            session_key = (
+                get_session_env("HERMES_SESSION_KEY", "")
+                or os.environ.get("HERMES_SESSION_KEY", "")
+            )
+            if not session_key:
+                return False  # no persistent delivery channel for this invocation
+            platform = "tui"
+            chat_id = session_key
+        thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "") or None
+        user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+        notifier_profile = (
+            get_session_env("HERMES_SESSION_PROFILE", "")
+            or os.environ.get("HERMES_PROFILE")
+        )
+        kb.add_notify_sub(
+            conn, task_id=synthesizer_id,
+            platform=platform, chat_id=chat_id,
+            thread_id=thread_id, user_id=user_id,
+            notifier_profile=notifier_profile,
+        )
+        return True
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "swarm auto-subscribe failed for synthesizer %s (platform=%r "
+            "key_set=%r, non-fatal)", synthesizer_id, platform, bool(chat_id),
+            exc_info=True,
+        )
+        return False
+
+
 def _cmd_swarm(args: argparse.Namespace) -> int:
     try:
         workers = [ks.parse_worker_arg(raw) for raw in (args.worker or [])]
@@ -1429,6 +1514,7 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
                 args, "worker_max_runtime", ks.DEFAULT_WORKER_MAX_RUNTIME_SECONDS
             ),
         )
+        _maybe_auto_subscribe_swarm(conn, created.synthesizer_id)
     if getattr(args, "json", False):
         print(json.dumps(created.as_dict(), indent=2, ensure_ascii=False))
     else:

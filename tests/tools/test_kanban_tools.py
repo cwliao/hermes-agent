@@ -2246,3 +2246,100 @@ def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worke
     d = json.loads(out)
     assert d["ok"] is True, d
     assert d["subscribed"] is False, d
+
+
+# ---------------------------------------------------------------------------
+# Swarm handoff auto-post (GATE8-SWARM-COMPLETED-VERIFIER-RECOVERY-AND-
+# DELIVERY-GAP-001, finding 1): a worker whose body names a swarm root must
+# always leave a structured comment there on completion, whether or not it
+# also posted one itself.
+# ---------------------------------------------------------------------------
+
+def test_complete_auto_posts_to_swarm_root_named_in_body(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    from hermes_cli import kanban_db as kb
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        root_id = kb.create_task(conn, title="Swarm: test", assignee="default")
+        worker_id = kb.create_task(
+            conn, title="native joke", assignee="test-worker",
+            body=(
+                "native joke\n\n## Swarm protocol\n"
+                f"- Swarm root / shared blackboard: `{root_id}`.\n"
+                "- Put cross-worker notes on the root task using structured comments.\n"
+            ),
+        )
+        kb.claim_task(conn, worker_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", worker_id)
+
+    from tools import kanban_tools as kt
+    out = kt._handle_complete({"summary": "penguin brain-teaser, saved to file"})
+    assert json.loads(out)["ok"] is True
+
+    conn = kb.connect()
+    try:
+        comments = kb.list_comments(conn, root_id)
+    finally:
+        conn.close()
+    matching = [c for c in comments if c.body.startswith("[swarm:auto-handoff]")]
+    assert len(matching) == 1, comments
+    assert f"task={worker_id}" in matching[0].body
+    assert "penguin brain-teaser" in matching[0].body
+
+
+def test_complete_does_not_auto_post_without_swarm_root_in_body(worker_env):
+    """The pre-existing happy path (plain task, no swarm boilerplate) must
+    not gain a stray comment -- the regex must not misfire on ordinary
+    task bodies."""
+    from tools import kanban_tools as kt
+    out = kt._handle_complete({"summary": "ordinary task, no swarm"})
+    assert json.loads(out)["ok"] is True
+
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        comments = kb.list_comments(conn, worker_env)
+    finally:
+        conn.close()
+    assert comments == []
+
+
+def test_complete_auto_post_is_best_effort_when_root_does_not_exist(monkeypatch, tmp_path):
+    """A body naming a root id that was never created (typo, stale
+    reference) must not fail the completion it augments."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    from hermes_cli import kanban_db as kb
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        worker_id = kb.create_task(
+            conn, title="orphaned worker", assignee="test-worker",
+            body="## Swarm protocol\n- Swarm root / shared blackboard: `t_does_not_exist`.\n",
+        )
+        kb.claim_task(conn, worker_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", worker_id)
+
+    from tools import kanban_tools as kt
+    out = kt._handle_complete({"summary": "done, but root is gone"})
+    assert json.loads(out)["ok"] is True

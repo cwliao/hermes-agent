@@ -566,3 +566,141 @@ def test_run_slash_board_override_does_not_change_boards_show_current(kanban_hom
     out = kc.run_slash("--board beta boards show")
 
     assert "Current board: alpha" in out
+
+
+# ---------------------------------------------------------------------------
+# Swarm auto-subscribe (GATE8-SWARM-COMPLETED-VERIFIER-RECOVERY-AND-
+# DELIVERY-GAP-001, finding 2): `hermes kanban swarm` never registered a
+# notification subscription for its own graph, unlike `kanban_create`. A
+# completed synthesizer's result had nowhere to be delivered.
+# ---------------------------------------------------------------------------
+
+def _swarm_args(**overrides):
+    base = dict(
+        goal="four lane jokes",
+        worker=["native:native joke", "peer:claude joke"],
+        worker_lane=[],
+        goal_max_turns=5,
+        worker_max_runtime=120,
+        verifier="verifier",
+        synthesizer="synthesizer",
+        tenant="swarm-notify-test",
+        priority=0,
+        created_by="test",
+        idempotency_key=None,
+        json=True,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_cmd_swarm_subscribes_synthesizer_when_session_context_present(
+    kanban_home, monkeypatch, capsys,
+):
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-gate8")
+
+    rc = kc._cmd_swarm(_swarm_args())
+    assert rc == 0
+    created = json.loads(capsys.readouterr().out)
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, created["synthesizer_id"])
+    finally:
+        conn.close()
+    assert len(subs) == 1, subs
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "chat-gate8"
+    # Only the synthesizer is subscribed -- not every card in the graph,
+    # which would turn one swarm into one notification per worker.
+    conn = kb.connect()
+    try:
+        assert kb.list_notify_subs(conn, created["root_id"]) == []
+        assert kb.list_notify_subs(conn, created["verifier_id"]) == []
+    finally:
+        conn.close()
+
+
+def test_cmd_swarm_no_subscription_without_session_context(
+    kanban_home, monkeypatch, capsys,
+):
+    """A bare CLI invocation (operator's terminal, cron) has no Telegram
+    session to deliver to -- must stay a silent no-op, not an error."""
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
+
+    rc = kc._cmd_swarm(_swarm_args())
+    assert rc == 0
+    created = json.loads(capsys.readouterr().out)
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, created["synthesizer_id"])
+    finally:
+        conn.close()
+    assert subs == []
+
+
+def test_cmd_swarm_auto_subscribe_failure_does_not_fail_swarm_creation(
+    kanban_home, monkeypatch, capsys,
+):
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-gate8")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated DB failure")
+
+    monkeypatch.setattr(kb, "add_notify_sub", _boom)
+
+    rc = kc._cmd_swarm(_swarm_args())
+    assert rc == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["synthesizer_id"]
+
+
+def test_cmd_swarm_respects_auto_subscribe_on_create_false(
+    kanban_home, monkeypatch, capsys,
+):
+    """A user who opted out of auto-subscription on the kanban_create path
+    must not be silently re-subscribed via the swarm path -- the two entry
+    points share one config knob."""
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-gate8")
+    fake_config = {"kanban": {"auto_subscribe_on_create": False}}
+    monkeypatch.setattr("hermes_cli.kanban.load_config", lambda: fake_config)
+
+    rc = kc._cmd_swarm(_swarm_args())
+    assert rc == 0
+    created = json.loads(capsys.readouterr().out)
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, created["synthesizer_id"])
+    finally:
+        conn.close()
+    assert subs == []
+
+
+def test_cmd_swarm_tui_fallback_subscribes_via_session_key(
+    kanban_home, monkeypatch, capsys,
+):
+    """TUI sessions clear the platform/chat_id ContextVars but still export
+    HERMES_SESSION_KEY -- must subscribe as platform='tui', matching the
+    kanban_create path's existing TUI behaviour."""
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "tui-session-abc")
+
+    rc = kc._cmd_swarm(_swarm_args())
+    assert rc == 0
+    created = json.loads(capsys.readouterr().out)
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, created["synthesizer_id"])
+    finally:
+        conn.close()
+    assert len(subs) == 1, subs
+    assert subs[0]["platform"] == "tui"
+    assert subs[0]["chat_id"] == "tui-session-abc"

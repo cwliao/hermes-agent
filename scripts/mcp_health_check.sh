@@ -97,8 +97,36 @@ if [[ "$fail_count" -ge "$FAIL_THRESHOLD" && "$alert_sent" -eq 0 ]]; then
     home_channel=$(grep -E '^TELEGRAM_HOME_CHANNEL=' "$ENV_FILE" | tail -1 | cut -d= -f2-)
   fi
 
+  # T0213 Objective #2: also queue a bounded recovery request for the
+  # gateway, reusing hermes_cli.calendar_guard's existing claim/lock
+  # bounded-retry mechanism (recover_once() / hermes-gateway-recovery.timer,
+  # already running every 5 minutes) unmodified -- this script becomes a
+  # second *producer* into the same request file calendar_guard.py's own
+  # --check path already writes, it does not implement any new retry logic
+  # itself. Best-effort: a failure here must not affect the Telegram alert
+  # above, which stays unconditional (a human still sees "klib MCP
+  # degraded" even when the bounded restart quietly fixes it).
+  recovery_requested=0
+  recovery_py="$HERMES_HOME/hermes-agent/venv/bin/python"
+  [[ -x "$recovery_py" ]] || recovery_py="python3"
+  if [[ -d "$HERMES_HOME/hermes-agent" ]]; then
+    if (
+      cd "$HERMES_HOME/hermes-agent" && "$recovery_py" -m hermes_cli.calendar_guard \
+        --request-recovery \
+        --service "$SERVICE_NAME" \
+        --reason "klib MCP connection degraded for ${fail_count} consecutive checks"
+    ) >&2; then
+      recovery_requested=1
+    else
+      echo "⚠️ MCP health guard: failed to queue gateway recovery request" >&2
+    fi
+  fi
+
   if [[ -n "${bot_token:-}" && -n "${home_channel:-}" ]]; then
     alert_text="MCP health guard: klib server has been degraded for ${fail_count} consecutive checks (last transition: $(date '+%Y-%m-%d %H:%M:%S %Z')). Run: systemctl --user restart ${SERVICE_NAME}"
+    if [[ "$recovery_requested" -eq 1 ]]; then
+      alert_text+=" (auto-restart requested)"
+    fi
     # Direct Telegram Bot API call -- deliberately not the in-process
     # adapter.send() (an async instance method on a live bot session this
     # standalone script has no access to). Best-effort: alert failures

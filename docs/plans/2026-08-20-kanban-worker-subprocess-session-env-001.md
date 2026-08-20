@@ -1,6 +1,7 @@
 # WORKER-SUBPROCESS-SESSION-ENV-001
 
-Status: cross-reviewed, ready for implementation. Independent review (a
+Status: implemented and cross-reviewed. Ready to merge (pending user
+approval to push/open a PR -- not done unilaterally). Independent review (a
 separate agent, re-derived every claim from source rather than trusting this
 ticket's prose) confirmed `_default_spawn`'s env construction, confirmed
 `_maybe_auto_subscribe`/`_maybe_auto_subscribe_swarm`'s silent-False
@@ -125,6 +126,31 @@ parent task has known session identity.
 - Do **not** change `_maybe_auto_subscribe` / `_maybe_auto_subscribe_swarm`
   themselves -- they already do the right thing once the env vars are
   present; this ticket is entirely about the spawn boundary.
+
+## Implementation cross-review
+
+Implemented and independently cross-reviewed (separate agent, re-derived
+every claim from the diff and reran the test suite itself rather than
+trusting the commit message). Verdict: ready to merge, no correctness bugs
+found. One nuance the reviewer flagged, worth recording: `create_task()`'s
+parent-inheritance is shared code, so `hermes_cli/kanban.py::_cmd_create`
+(CLI `--parent`) and `plugins/kanban/dashboard/plugin_api.py`'s dashboard
+task creation -- neither of which was edited -- will now also transitively
+stamp `origin_*` onto a child task created under a parent that has it set.
+This is intentional (the ticket's design decision propagates to all
+descendants, not just tool-created ones) and inert until `_default_spawn`
+reads it, but it is a real behavior change to those call sites' output rows
+even though their own code is untouched.
+
+Test suite: the full `-k kanban` sweep across `tests/` shows 17 pre-existing
+failures (stale-claim/PID/detect-stale/reap tests in `test_kanban_db.py`,
+fanout tests in `test_kanban_decompose.py`, hook tests in
+`test_kanban_lifecycle_hooks.py`, `test_kanban_worker_runs.py::
+test_terminate_run_ok`) -- independently reproduced identically on a clean
+`origin/main` checkout with zero changes (17 failed / 1097 passed there vs.
+17 failed / 1102 passed on this branch; the +5 is exactly this ticket's new
+tests). Confirmed test-order/isolation flakiness unrelated to this diff, not
+a regression.
 
 ## Process notes
 

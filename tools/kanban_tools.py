@@ -934,11 +934,25 @@ def _handle_create(args: dict, **kw) -> str:
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
+        self_task = None
         if project_id is None and workspace_kind is None and workspace_path is None:
             self_tid = os.environ.get("HERMES_KANBAN_TASK")
             self_task = kb.get_task(conn, self_tid) if self_tid else None
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
+        origin = {}
+        if not parents:
+            from gateway.session_context import resolve_notify_origin
+            origin = resolve_notify_origin()
+            if not origin and self_task is not None and self_task.origin_platform:
+                origin = {
+                    "origin_platform": self_task.origin_platform,
+                    "origin_chat_id": self_task.origin_chat_id,
+                    "origin_thread_id": self_task.origin_thread_id,
+                    "origin_user_id": self_task.origin_user_id,
+                    "origin_session_key": self_task.origin_session_key,
+                    "origin_profile": self_task.origin_profile,
+                }
         new_tid = kb.create_task(
             conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
             parents=tuple(parents), tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
@@ -951,7 +965,8 @@ def _handle_create(args: dict, **kw) -> str:
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             initial_status=str(args.get("initial_status") or "running"),
-            created_by=os.environ.get("HERMES_PROFILE") or "worker", session_id=session_id)
+            created_by=os.environ.get("HERMES_PROFILE") or "worker", session_id=session_id,
+            **origin)
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
         return _ok(task_id=new_tid, **landed, subscribed=_maybe_auto_subscribe(conn, new_tid))
 
@@ -1146,6 +1161,21 @@ def _handle_swarm(args: dict, **kw) -> str:
         )
 
     with _board(args.get("board")) as (kb, conn):
+        origin = {}
+        from gateway.session_context import resolve_notify_origin
+        origin = resolve_notify_origin()
+        if not origin:
+            self_tid = os.environ.get("HERMES_KANBAN_TASK")
+            self_task = kb.get_task(conn, self_tid) if self_tid else None
+            if self_task is not None and self_task.origin_platform:
+                origin = {
+                    "origin_platform": self_task.origin_platform,
+                    "origin_chat_id": self_task.origin_chat_id,
+                    "origin_thread_id": self_task.origin_thread_id,
+                    "origin_user_id": self_task.origin_user_id,
+                    "origin_session_key": self_task.origin_session_key,
+                    "origin_profile": self_task.origin_profile,
+                }
         created = ks.create_swarm(
             conn,
             goal=str(goal),
@@ -1156,6 +1186,7 @@ def _handle_swarm(args: dict, **kw) -> str:
             created_by=os.environ.get("HERMES_PROFILE") or "swarm-orchestrator",
             worker_max_runtime_seconds=worker_max_runtime_seconds,
             goal_max_turns=goal_max_turns,
+            origin=origin,
         )
         subscribed = _maybe_auto_subscribe(conn, created.synthesizer_id)
         return _ok(subscribed=subscribed, **created.as_dict())

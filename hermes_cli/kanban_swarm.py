@@ -251,18 +251,30 @@ def create_swarm(
     idempotency_key: Optional[str] = None,
     goal_max_turns: int = DEFAULT_GOAL_MAX_TURNS,
     worker_max_runtime_seconds: int = DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
+    origin: Optional[dict] = None,
 ) -> SwarmCreated:
     """Atomically create a durable, immediately dispatchable Kanban swarm."""
     activation_summary = "Swarm topology planned; root remains the shared blackboard."
     activated = False
     with kb.write_txn(conn):
         created = _create_swarm_uncommitted(
-            conn, goal=goal, workers=workers, verifier_assignee=verifier_assignee,
-            synthesizer_assignee=synthesizer_assignee, root_title=root_title,
-            verifier_title=verifier_title, synthesizer_title=synthesizer_title, tenant=tenant,
-            created_by=created_by, workspace_kind=workspace_kind, workspace_path=workspace_path,
-            priority=priority, idempotency_key=idempotency_key,
-            goal_max_turns=goal_max_turns, worker_max_runtime_seconds=worker_max_runtime_seconds,
+            conn,
+            goal=goal,
+            workers=workers,
+            verifier_assignee=verifier_assignee,
+            synthesizer_assignee=synthesizer_assignee,
+            root_title=root_title,
+            verifier_title=verifier_title,
+            synthesizer_title=synthesizer_title,
+            tenant=tenant,
+            created_by=created_by,
+            workspace_kind=workspace_kind,
+            workspace_path=workspace_path,
+            priority=priority,
+            idempotency_key=idempotency_key,
+            goal_max_turns=goal_max_turns,
+            worker_max_runtime_seconds=worker_max_runtime_seconds,
+            origin=origin,
         )
         root = kb.get_task(conn, created.root_id)
         if root is not None and root.status == "blocked":
@@ -302,10 +314,22 @@ def _create_swarm_uncommitted(
     workspace_kind: str, workspace_path: Optional[str], priority: int, idempotency_key: Optional[str],
     goal_max_turns: int = DEFAULT_GOAL_MAX_TURNS,
     worker_max_runtime_seconds: int = DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
+    origin: Optional[dict] = None,
 ) -> SwarmCreated:
-    """Create the swarm graph inside the caller's transaction: planning root
-    (``blocked`` until the caller activates it), parallel workers, a verifier
-    waiting on every worker, and a synthesizer waiting on the verifier."""
+    """Create a durable Kanban swarm graph.
+
+    The returned graph is immediately dispatchable: the planning root is marked
+    ``done`` with topology metadata, parallel workers are ``ready``, the verifier
+    waits for every worker, and the synthesizer waits for the verifier.
+
+    ``origin`` (WORKER-SUBPROCESS-SESSION-ENV-001), when given, is a dict of
+    ``origin_platform``/``origin_chat_id``/``origin_thread_id``/
+    ``origin_user_id``/``origin_session_key``/``origin_profile`` kwargs
+    (see ``kb.create_task``) stamped onto the root task only -- every worker,
+    the verifier, and the synthesizer inherit it automatically from their
+    parent via ``create_task``'s own inheritance, since they're all created
+    with ``parents=`` pointing back into this same tree.
+    """
     goal = _require_text(goal, "goal")
     verifier_assignee = _require_text(verifier_assignee, "verifier_assignee")
     synthesizer_assignee = _require_text(synthesizer_assignee, "synthesizer_assignee")
@@ -385,6 +409,7 @@ def _create_swarm_uncommitted(
         goal_mode=lane_mode,
         goal_max_turns=goal_max_turns if lane_mode else None,
         **common,
+        **(origin or {}),
     )
 
     # Idempotency may return an existing root: recover its topology from the

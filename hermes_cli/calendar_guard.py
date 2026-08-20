@@ -520,13 +520,80 @@ def recover_once(
         return f"WARNING: Hermes Calendar Guard: recovery BLOCKED: {exc}"
 
 
+def request_gateway_recovery(
+    reason: str,
+    *,
+    service_name: str = SERVICE_NAME,
+    home: Path | None = None,
+    now: float | None = None,
+) -> str:
+    """T0213 Objective #2: let a non-gateway-identity health check queue a
+    bounded recovery request into the same request/state files
+    ``check_once()``'s own SKEW/SERVICE_DOWN paths already write.
+
+    This is a thin wrapper around the existing ``_record_check_outcome``,
+    not a new retry mechanism: it reuses the same claim/lock,
+    ``MAX_ATTEMPTS``, ``RECOVERY_WINDOW_SECONDS`` bounded-retry shape that
+    ``recover_once()`` -> ``_claim_recovery()`` -> ``_restart_user_service()``
+    already implements, unmodified. ``identity``/``boot`` are None because
+    the caller (``mcp_health_check.sh``, watching gateway-log evidence of
+    the klib MCP connection going stale) has no gateway-identity/boot
+    context of its own to offer -- ``_record_check_outcome`` already
+    tolerates both being absent (see its ``identity_for_key`` fallback).
+
+    A distinct ``category`` ("MCP_DEGRADED") keeps this incident's identity
+    separate from calendar_guard's own SKEW/SERVICE_DOWN/UNVERIFIABLE
+    incidents, so an in-flight or exhausted gateway-identity incident does
+    not silently swallow or get silently swallowed by an MCP-triggered one:
+    ``_record_check_outcome`` resets attempts/exhaustion state whenever the
+    computed incident key changes.
+    """
+    home = (home or get_hermes_home()).resolve()
+    now = time.time() if now is None else now
+    return _record_check_outcome(
+        home=home,
+        identity=None,
+        boot=None,
+        category="MCP_DEGRADED",
+        reason=reason,
+        now=now,
+        service_name=service_name,
+        queue_recovery=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Hermes calendar guard")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--recover", action="store_true")
+    mode.add_argument(
+        "--request-recovery",
+        action="store_true",
+        help=(
+            "T0213 Objective #2: queue a bounded recovery request for "
+            "--service from a non-gateway-identity health check (e.g. "
+            "mcp_health_check.sh), reusing --recover's existing claim/lock "
+            "bounded-retry path unmodified."
+        ),
+    )
+    parser.add_argument(
+        "--service",
+        default=SERVICE_NAME,
+        help="Target unit for --request-recovery (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--reason",
+        default="external health check reported a degraded state",
+        help="Reason string recorded with --request-recovery.",
+    )
     args = parser.parse_args(argv)
-    output = recover_once() if args.recover else check_once()
+    if args.request_recovery:
+        output = request_gateway_recovery(args.reason, service_name=args.service)
+    elif args.recover:
+        output = recover_once()
+    else:
+        output = check_once()
     if output:
         print(output)
     return 0

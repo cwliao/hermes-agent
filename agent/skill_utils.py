@@ -189,7 +189,8 @@ def _detect_environment(env: str) -> bool:
         return _ENV_DETECT_CACHE[env]
     detector = _ENV_DETECTORS.get(env)
     result = detector() if detector else True
-    _ENV_DETECT_CACHE[env] = result
+    if env != "kanban":
+        _ENV_DETECT_CACHE[env] = result
     return result
 
 

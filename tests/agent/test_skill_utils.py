@@ -381,4 +381,3 @@ class TestBOMToleranceSiblingSites:
         fm = _split_frontmatter("\ufeff---\nname: bp\n---\nbody")
         assert fm is not None
         assert fm.get("name") == "bp"
-

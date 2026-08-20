@@ -1,0 +1,12 @@
+[Unit]
+Description=T0213 Objective #3: DocuBot/DocHelper application-level (deep) health check
+Documentation=file://%h/.hermes/hermes-agent/.ai/tickets/T0213.md
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+Environment=HERMES_HOME=@HERMES_HOME@
+WorkingDirectory=@HERMES_HOME@/hermes-agent
+ExecStart=@HERMES_HOME@/hermes-agent/scripts/app_deep_health_check.sh
+StandardOutput=journal
+StandardError=journal

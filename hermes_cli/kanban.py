@@ -870,6 +870,21 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                       help="Delete task_events older than N days for terminal tasks (default: 30)")
     p_gc.add_argument("--log-retention-days", type=int, default=30,
                       help="Delete worker log files older than N days (default: 30)")
+    p_gc.add_argument("--dead-graphs", action="store_true",
+                      help="Also archive abandoned task graphs (KANBAN-CARD-GC-001). "
+                           "Off by default: archiving is a board mutation, and the "
+                           "rest of gc only removes derived data")
+    p_gc.add_argument("--dead-graph-days", type=int, default=7,
+                      help="A graph is abandoned after N days with no event on any "
+                           "of its cards (default: 7)")
+    p_gc.add_argument("--tenant", default=None,
+                      help="Required with --dead-graphs: only sweep graphs whose "
+                           "cards all belong to this tenant. There is no marker "
+                           "distinguishing a disposable graph from a parked one, "
+                           "so the operator names the scope")
+    p_gc.add_argument("--dry-run", action="store_true",
+                      help="With --dead-graphs, print what would be archived and "
+                           "change nothing at all")
 
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
@@ -2744,6 +2759,40 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     """Remove scratch workspaces of archived tasks, prune old events, and
     delete old worker logs."""
     import shutil
+
+    dead_graphs = getattr(args, "dead_graphs", False)
+    dry = getattr(args, "dry_run", False)
+    scope = (getattr(args, "tenant", "") or "").strip()
+
+    if dry and not dead_graphs:
+        print("--dry-run only applies to --dead-graphs; nothing to preview")
+        return 0
+    if dead_graphs and not scope:
+        # Option A of KANBAN-CARD-GC-001 (marking graphs disposable at
+        # creation) is not implemented, so there is nothing that
+        # distinguishes a test graph from a parked one. Without that, an
+        # unscoped sweep would archive a backlog deliberately left idle --
+        # waiting on a vendor, a decision, a season. Requiring a tenant makes
+        # the operator name what is disposable instead of the tool guessing.
+        print("--dead-graphs requires --tenant: refusing to sweep the whole board",
+              file=sys.stderr)
+        return 2
+    if dry:
+        # Everything below this point deletes derived data. A dry run must
+        # not reach it -- an earlier version ran the purges first and then
+        # reported that nothing had been touched.
+        with kb.connect_closing() as conn:
+            graphs = kb.find_dead_graphs(
+                conn,
+                older_than_seconds=getattr(args, "dead_graph_days", 7) * 24 * 3600,
+                tenant=scope,
+            )
+        for ordered in graphs:
+            print(f"would archive graph of {len(ordered)}: " + " ".join(ordered))
+        print(f"GC dry run: {len(graphs)} abandoned graph(s) in tenant "
+              f"{scope!r} would be archived; nothing was changed")
+        return 0
+
     scratch_root = kb.workspaces_root()
     removed_ws = 0
     with kb.connect_closing() as conn:
@@ -2776,8 +2825,26 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     removed_logs = kb.gc_worker_logs(
         older_than_seconds=log_days * 24 * 3600,
     )
-    print(f"GC complete: {removed_ws} workspace(s), "
-          f"{removed_events} event row(s), {removed_logs} log file(s) removed")
+    archived_graphs = archived_cards = 0
+    if dead_graphs:
+        with kb.connect_closing() as conn:
+            graphs = kb.find_dead_graphs(
+                conn,
+                older_than_seconds=getattr(args, "dead_graph_days", 7) * 24 * 3600,
+                tenant=scope,
+            )
+            for ordered in graphs:
+                # Children first. An archived parent satisfies a dependency,
+                # so archiving upward promotes a dependent against a graph
+                # that produced nothing.
+                archived_cards += kb.archive_graph(conn, ordered)
+                archived_graphs += 1
+    summary = (f"GC complete: {removed_ws} workspace(s), "
+               f"{removed_events} event row(s), {removed_logs} log file(s) removed")
+    if dead_graphs:
+        summary += (f", {archived_cards} card(s) in "
+                    f"{archived_graphs} abandoned graph(s) archived")
+    print(summary)
     return 0
 
 

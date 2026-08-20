@@ -24,7 +24,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from toolsets import get_toolset_names
 
@@ -4411,6 +4411,7 @@ from hermes_cli.kanban_db_dispatch import (  # noqa: E402
     _worker_survived_termination,
     _worker_terminal_timeout_env,
 )
+from hermes_cli.kanban_db_dispatch import _system_memory_sample  # noqa: E402,F401
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

@@ -36,6 +36,14 @@ KANBAN_LIST_MAX_LIMIT = 200
 # --- Gating ---
 
 def _profile_has_kanban_toolset() -> bool:
+    """Whether kanban tools should be visible: dynamic per-call selection first
+    (``kanban_toolset_requested()``, set only during schema assembly), then the
+    active platform's own explicit ``platform_toolsets`` entry (authoritative,
+    not just a floor -- KANBAN-TOOLSET-PLATFORM-GATE-001), then the legacy
+    top-level ``toolsets`` opt-in, then (outside any schema-assembly/platform
+    context, e.g. offer-time skill discovery) whether any configured platform
+    opts in.
+    """
     from tools.kanban_toolset_context import kanban_toolset_requested
 
     requested = kanban_toolset_requested()
@@ -43,6 +51,14 @@ def _profile_has_kanban_toolset() -> bool:
         return True
     try:
         config = load_config()
+        from gateway.session_context import get_session_env
+
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        platform_toolsets = config.get("platform_toolsets") or {}
+        explicit = platform_toolsets.get(platform) if platform else None
+        if isinstance(explicit, list):
+            # An explicit per-platform choice is authoritative either way.
+            return "kanban" in explicit
         # Preserve the legacy profile-wide opt-in for callers using bundles.
         if "kanban" in (config.get("toolsets") or []):
             return True
@@ -53,10 +69,9 @@ def _profile_has_kanban_toolset() -> bool:
         # makes the playbook relevant; actual schemas still use the scope above.
         from hermes_cli.tools_config import _get_platform_tools
 
-        platforms = config.get("platform_toolsets") or {}
         return any(
-            "kanban" in _get_platform_tools(config, platform, include_default_mcp_servers=False)
-            for platform, names in platforms.items() if isinstance(names, list)
+            "kanban" in _get_platform_tools(config, p, include_default_mcp_servers=False)
+            for p, names in platform_toolsets.items() if isinstance(names, list)
         )
     except Exception:
         return False

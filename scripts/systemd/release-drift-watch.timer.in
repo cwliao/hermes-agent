@@ -1,0 +1,16 @@
+# T0214 Objective #2 -- NOT enabled. See release-drift-watch.service for
+# the enable instructions.
+[Unit]
+Description=T0214 Objective #2: klib baked-release drift watch schedule
+
+[Timer]
+# Alert-only, no auto-rebake action, and the underlying check is a cheap
+# git-log call -- hourly matches failed-unit-watch.timer's own cadence,
+# no reason for a shorter interval.
+OnBootSec=5min
+OnUnitActiveSec=hourly
+Persistent=true
+Unit=release-drift-watch.service
+
+[Install]
+WantedBy=timers.target

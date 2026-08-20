@@ -1526,16 +1526,50 @@ def _handle_create(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            # A project link is safe to inherit because ``create_task`` turns
-            # it into a fresh per-task worktree. Never inherit the parent's
-            # literal workspace kind/path; directory sharing must be explicit.
-            if _inherit_project and project_id is None:
+            # Inherit the spawning worker's own task workspace when the
+            # caller didn't specify one (see resolution note above).
+            _self_task = None
+            if _inherit_project or not parents:
                 _self_tid = os.environ.get("HERMES_KANBAN_TASK")
                 if _self_tid:
                     _self_task = kb.get_task(conn, _self_tid)
-                    if _self_task is not None and _self_task.project_id:
-                        project_id = _self_task.project_id
-                        project_source_task_id = _self_task.id
+            # A project link is safe to inherit because ``create_task`` turns
+            # it into a fresh per-task worktree. Never inherit the parent's
+            # literal workspace kind/path; directory sharing must be explicit.
+            if _inherit_project and project_id is None and _self_task is not None and _self_task.project_id:
+                project_id = _self_task.project_id
+                project_source_task_id = _self_task.id
+            if _inherit_project and _self_task is not None and _self_task.workspace_kind:
+                workspace_kind = _self_task.workspace_kind
+                workspace_path = _self_task.workspace_path
+                # Keep follow-up children inside the same project so the
+                # whole subtree shares one repo + branch convention.
+                if project_id is None and _self_task.project_id:
+                    project_id = _self_task.project_id
+
+            # WORKER-SUBPROCESS-SESSION-ENV-001: resolve notification-
+            # delivery origin for this new task. `parents` (when given)
+            # already gets this for free via create_task's own inheritance
+            # from the first parent -- this only needs to handle the
+            # parentless case: a live session's own turn (orchestrator
+            # calling kanban_create directly), or -- since _default_spawn
+            # now stamps a worker's origin into its env -- a worker calling
+            # kanban_create for a standalone follow-up task with itself as
+            # the implicit origin source.
+            origin = {}
+            if not parents:
+                from gateway.session_context import resolve_notify_origin
+                origin = resolve_notify_origin()
+                if not origin and _self_task is not None and _self_task.origin_platform:
+                    origin = {
+                        "origin_platform": _self_task.origin_platform,
+                        "origin_chat_id": _self_task.origin_chat_id,
+                        "origin_thread_id": _self_task.origin_thread_id,
+                        "origin_user_id": _self_task.origin_user_id,
+                        "origin_session_key": _self_task.origin_session_key,
+                        "origin_profile": _self_task.origin_profile,
+                    }
+
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),
@@ -1548,6 +1582,7 @@ def _handle_create(args: dict, **kw) -> str:
                 workspace_path=workspace_path,
                 project_id=project_id,
                 project_source_task_id=project_source_task_id,
+                **origin,
                 triage=triage,
                 idempotency_key=idempotency_key,
                 max_runtime_seconds=(
@@ -1856,6 +1891,29 @@ def _handle_swarm(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            # WORKER-SUBPROCESS-SESSION-ENV-001: stamp the root task with
+            # this turn's notification-delivery origin so every descendant
+            # (workers, verifier, synthesizer) inherits it via create_task,
+            # and so a dispatcher-spawned worker anywhere in that tree gets
+            # it forwarded into its own env by _default_spawn. Falls back to
+            # the calling worker's own origin when this swarm is itself
+            # being created from inside another worker's turn (a nested
+            # swarm), not just a live gateway session.
+            from gateway.session_context import resolve_notify_origin
+            origin = resolve_notify_origin()
+            if not origin:
+                _self_tid = os.environ.get("HERMES_KANBAN_TASK")
+                if _self_tid:
+                    _self_task = kb.get_task(conn, _self_tid)
+                    if _self_task is not None and _self_task.origin_platform:
+                        origin = {
+                            "origin_platform": _self_task.origin_platform,
+                            "origin_chat_id": _self_task.origin_chat_id,
+                            "origin_thread_id": _self_task.origin_thread_id,
+                            "origin_user_id": _self_task.origin_user_id,
+                            "origin_session_key": _self_task.origin_session_key,
+                            "origin_profile": _self_task.origin_profile,
+                        }
             created = ks.create_swarm(
                 conn,
                 goal=str(goal),
@@ -1866,6 +1924,7 @@ def _handle_swarm(args: dict, **kw) -> str:
                 created_by=os.environ.get("HERMES_PROFILE") or "swarm-orchestrator",
                 worker_max_runtime_seconds=worker_max_runtime_seconds,
                 goal_max_turns=goal_max_turns,
+                origin=origin,
             )
             subscribed = _maybe_auto_subscribe(conn, created.synthesizer_id)
             return _ok(subscribed=subscribed, **created.as_dict())

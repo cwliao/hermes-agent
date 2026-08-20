@@ -1141,6 +1141,16 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    # WORKER-SUBPROCESS-SESSION-ENV-001: notification-delivery origin. See
+    # the column comments in SCHEMA_SQL. ``_default_spawn`` reads these to
+    # stamp a worker subprocess's env so nested kanban_create/kanban_swarm
+    # calls from inside the worker can still auto-subscribe.
+    origin_platform: Optional[str] = None
+    origin_chat_id: Optional[str] = None
+    origin_thread_id: Optional[str] = None
+    origin_user_id: Optional[str] = None
+    origin_session_key: Optional[str] = None
+    origin_profile: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1234,6 +1244,24 @@ class Task:
                 int(row["block_recurrences"])
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
+            ),
+            origin_platform=(
+                row["origin_platform"] if "origin_platform" in keys else None
+            ),
+            origin_chat_id=(
+                row["origin_chat_id"] if "origin_chat_id" in keys else None
+            ),
+            origin_thread_id=(
+                row["origin_thread_id"] if "origin_thread_id" in keys else None
+            ),
+            origin_user_id=(
+                row["origin_user_id"] if "origin_user_id" in keys else None
+            ),
+            origin_session_key=(
+                row["origin_session_key"] if "origin_session_key" in keys else None
+            ),
+            origin_profile=(
+                row["origin_profile"] if "origin_profile" in keys else None
             ),
         )
 
@@ -1422,7 +1450,23 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- WORKER-SUBPROCESS-SESSION-ENV-001: the notification-delivery identity
+    -- of whichever live session originally caused this task to exist (a
+    -- Telegram/etc. turn, or -- when created without one -- inherited from
+    -- the first parent, or from the task of a dispatcher-spawned worker that
+    -- created this task mid-run). NULL when no session context was ever
+    -- resolvable (CLI/dashboard/cron creation with no inheritable parent).
+    -- ``_default_spawn`` stamps these into a worker subprocess's env so a
+    -- nested ``kanban_create``/``kanban_swarm`` call made from inside that
+    -- worker can still auto-subscribe, even though the worker is a fresh
+    -- process with no live ContextVar of its own.
+    origin_platform       TEXT,
+    origin_chat_id        TEXT,
+    origin_thread_id      TEXT,
+    origin_user_id        TEXT,
+    origin_session_key    TEXT,
+    origin_profile        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2679,6 +2723,18 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
 
+    if "origin_platform" not in cols:
+        # WORKER-SUBPROCESS-SESSION-ENV-001: notification-delivery origin,
+        # inherited from a parent task or resolved from the live session at
+        # creation time. NULL on legacy rows and on any creation path with no
+        # resolvable session/parent — same as the new-DB default.
+        _add_column_if_missing(conn, "tasks", "origin_platform", "origin_platform TEXT")
+        _add_column_if_missing(conn, "tasks", "origin_chat_id", "origin_chat_id TEXT")
+        _add_column_if_missing(conn, "tasks", "origin_thread_id", "origin_thread_id TEXT")
+        _add_column_if_missing(conn, "tasks", "origin_user_id", "origin_user_id TEXT")
+        _add_column_if_missing(conn, "tasks", "origin_session_key", "origin_session_key TEXT")
+        _add_column_if_missing(conn, "tasks", "origin_profile", "origin_profile TEXT")
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -3183,6 +3239,12 @@ def create_task(
     board: Optional[str] = None,
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
+    origin_platform: Optional[str] = None,
+    origin_chat_id: Optional[str] = None,
+    origin_thread_id: Optional[str] = None,
+    origin_user_id: Optional[str] = None,
+    origin_session_key: Optional[str] = None,
+    origin_profile: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3222,6 +3284,20 @@ def create_task(
     in its own projects.db, a matching canonical project-linked task in this
     board can supply the repo and branch convention. Its literal worktree is
     never reused; the new task still gets its own task-id-keyed path.
+
+    ``origin_platform``/``origin_chat_id``/``origin_thread_id``/
+    ``origin_user_id``/``origin_session_key``/``origin_profile``
+    (WORKER-SUBPROCESS-SESSION-ENV-001) record the notification-delivery
+    identity of whichever live session caused this task to exist, so
+    ``_default_spawn`` can stamp it into a dispatcher-spawned worker's env
+    later. When the caller passes none of them explicitly and ``parents`` is
+    non-empty, they are inherited from the first parent task that has an
+    ``origin_platform`` set — this is how the values propagate down an
+    entire swarm/worker tree without every call site having to re-resolve
+    them. Pass ``origin_platform`` explicitly (even ``""``) to skip
+    inheritance for a specific call -- only ``origin_platform`` gates
+    whether inheritance runs; the other five fields follow whatever
+    ``origin_platform`` decided.
     """
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
@@ -3347,6 +3423,29 @@ def create_task(
                 project_repo = str(project_obj.primary_path)
 
     parents = tuple(p for p in parents if p)
+
+    # WORKER-SUBPROCESS-SESSION-ENV-001: inherit notification-delivery
+    # origin from the first parent that has one, when the caller didn't
+    # resolve/pass it explicitly. This is what makes origin propagate down
+    # an entire swarm/worker tree (worker -> verifier -> synthesizer, or any
+    # follow-up task a worker creates with itself as parent) without every
+    # call site re-resolving the live session.
+    if origin_platform is None and parents:
+        for _pid in parents:
+            _prow = conn.execute(
+                "SELECT origin_platform, origin_chat_id, origin_thread_id, "
+                "origin_user_id, origin_session_key, origin_profile "
+                "FROM tasks WHERE id = ?",
+                (_pid,),
+            ).fetchone()
+            if _prow is not None and _prow["origin_platform"]:
+                origin_platform = _prow["origin_platform"]
+                origin_chat_id = _prow["origin_chat_id"]
+                origin_thread_id = _prow["origin_thread_id"]
+                origin_user_id = _prow["origin_user_id"]
+                origin_session_key = _prow["origin_session_key"]
+                origin_profile = _prow["origin_profile"]
+                break
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
     # (preserving order). Refuse commas inside a single name so we don't
@@ -3497,8 +3596,11 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id,
+                        origin_platform, origin_chat_id, origin_thread_id,
+                        origin_user_id, origin_session_key, origin_profile
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3524,6 +3626,12 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        origin_platform or None,
+                        origin_chat_id or None,
+                        origin_thread_id or None,
+                        origin_user_id or None,
+                        origin_session_key or None,
+                        origin_profile or None,
                     ),
                 )
                 for pid in parents:
@@ -10937,6 +11045,28 @@ def _default_spawn(
     # what the tool reads — set it explicitly here so comments are
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
+
+    # WORKER-SUBPROCESS-SESSION-ENV-001: forward the task's notification-
+    # delivery origin (stamped at creation time -- see create_task's
+    # origin_* inheritance) into the worker's env, mirroring what
+    # tools/environments/local.py::_inject_session_context_env already does
+    # for the terminal tool's own subprocess spawns. Without this, a worker
+    # subprocess has no ContextVar (fresh process) and no os.environ
+    # fallback for HERMES_SESSION_PLATFORM/_CHAT_ID/_KEY, so any
+    # kanban_create/kanban_swarm call made from inside the worker's own turn
+    # silently fails to auto-subscribe (tools/kanban_tools.py::
+    # _maybe_auto_subscribe returns False with no exception, no warning).
+    if task.origin_platform and task.origin_chat_id:
+        env["HERMES_SESSION_PLATFORM"] = task.origin_platform
+        env["HERMES_SESSION_CHAT_ID"] = task.origin_chat_id
+        if task.origin_thread_id:
+            env["HERMES_SESSION_THREAD_ID"] = task.origin_thread_id
+        if task.origin_user_id:
+            env["HERMES_SESSION_USER_ID"] = task.origin_user_id
+        if task.origin_session_key:
+            env["HERMES_SESSION_KEY"] = task.origin_session_key
+        if task.origin_profile:
+            env["HERMES_SESSION_PROFILE"] = task.origin_profile
 
     # A worker must NEVER boot the interactive TUI: an inherited HERMES_TUI=1
     # or a `display.interface: tui` in the profile's config would send the

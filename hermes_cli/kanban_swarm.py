@@ -276,6 +276,7 @@ def create_swarm(
     idempotency_key: Optional[str] = None,
     goal_max_turns: int = DEFAULT_GOAL_MAX_TURNS,
     worker_max_runtime_seconds: int = DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
+    origin: Optional[dict] = None,
 ) -> SwarmCreated:
     """Atomically create a durable, immediately dispatchable Kanban swarm."""
     activation_summary = (
@@ -300,6 +301,7 @@ def create_swarm(
             idempotency_key=idempotency_key,
             goal_max_turns=goal_max_turns,
             worker_max_runtime_seconds=worker_max_runtime_seconds,
+            origin=origin,
         )
         root = kb.get_task(conn, created.root_id)
         if root is not None and root.status == "blocked":
@@ -351,12 +353,21 @@ def _create_swarm_uncommitted(
     idempotency_key: Optional[str] = None,
     goal_max_turns: int = DEFAULT_GOAL_MAX_TURNS,
     worker_max_runtime_seconds: int = DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
+    origin: Optional[dict] = None,
 ) -> SwarmCreated:
     """Create a durable Kanban swarm graph.
 
     The returned graph is immediately dispatchable: the planning root is marked
     ``done`` with topology metadata, parallel workers are ``ready``, the verifier
     waits for every worker, and the synthesizer waits for the verifier.
+
+    ``origin`` (WORKER-SUBPROCESS-SESSION-ENV-001), when given, is a dict of
+    ``origin_platform``/``origin_chat_id``/``origin_thread_id``/
+    ``origin_user_id``/``origin_session_key``/``origin_profile`` kwargs
+    (see ``kb.create_task``) stamped onto the root task only -- every worker,
+    the verifier, and the synthesizer inherit it automatically from their
+    parent via ``create_task``'s own inheritance, since they're all created
+    with ``parents=`` pointing back into this same tree.
     """
 
     goal = _require_text(goal, "goal")
@@ -439,6 +450,7 @@ def _create_swarm_uncommitted(
         workspace_path=workspace_path,
         goal_mode=lane_mode,
         goal_max_turns=goal_max_turns if lane_mode else None,
+        **(origin or {}),
     )
 
     # If idempotency returned an existing non-archived root, do not duplicate the

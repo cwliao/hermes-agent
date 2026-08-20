@@ -52,12 +52,46 @@ KANBAN_LIST_MAX_LIMIT = 200
 
 
 def _profile_has_kanban_toolset() -> bool:
-    # Uses load_config() which has mtime-based caching, so this adds
-    # negligible overhead. The check_fn results are further TTL-cached
-    # (~30s) by the tool registry.
+    """Whether the *active platform* has explicitly opted into kanban.
+
+    KANBAN-TOOLSET-PLATFORM-GATE-001 (TELEGRAM-SWARM-UNREACHABLE-001 Defect
+    A). This used to read only the top-level ``toolsets`` config key, so a
+    config declaring ``platform_toolsets.telegram: [kanban, ...]`` had no
+    effect here -- confirmed live: a Telegram session with exactly that
+    config had zero kanban tools in its schema.
+
+    Deliberately does **not** delegate to
+    ``hermes_cli.tools_config._get_platform_tools`` -- an earlier version of
+    this fix did, and was wrong. That function's "recover non-configurable
+    platform toolsets" pass adds any toolset whose static tool names are a
+    subset of the platform's default composite (e.g. ``hermes-cli``, which
+    lists every ``kanban_*`` tool directly), **unconditionally** -- it
+    returned ``"kanban"`` for a completely empty, default config with no
+    ``platform_toolsets`` at all. Routing this check through it would have
+    made every kanban tool visible everywhere, defeating the gate entirely;
+    caught by ``test_kanban_tools_hidden_without_env_var`` before it shipped.
+
+    So this reads ``platform_toolsets`` directly: if the active platform has
+    an explicit, saved toolset list, that list alone decides (an explicit
+    per-platform choice should not also be overridden by a different
+    surface's top-level default). Only when the platform has no explicit
+    entry -- or there is no session/platform context at all, e.g. a bare
+    CLI invocation -- does this fall back to the legacy top-level list, to
+    avoid changing behavior for every surface that has always relied on it.
+
+    Uses ``load_config()`` (mtime-cached) and the tool registry's own ~30s
+    check_fn TTL cache, so this adds negligible overhead per call.
+    """
     try:
+        from gateway.session_context import get_session_env
         from hermes_cli.config import load_config
+
         cfg = load_config()
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        platform_toolsets = cfg.get("platform_toolsets") or {}
+        explicit = platform_toolsets.get(platform) if platform else None
+        if isinstance(explicit, list):
+            return "kanban" in explicit
         toolsets = cfg.get("toolsets", [])
         return "kanban" in toolsets
     except Exception:

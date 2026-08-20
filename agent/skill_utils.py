@@ -345,7 +345,8 @@ def _detect_environment(env: str) -> bool:
             "/package/admin/s6-overlay"
         )
 
-    _ENV_DETECT_CACHE[env] = result
+    if env != "kanban":
+        _ENV_DETECT_CACHE[env] = result
     return result
 
 

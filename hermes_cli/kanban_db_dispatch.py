@@ -2267,6 +2267,20 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # This is the grant boundary: the dispatcher assigned this new worker's task.
     from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER
     env.pop(DELEGATED_CHILD_ENV_MARKER, None)
+    # Forward the originating chat/session identity into the fresh worker
+    # process. This lets nested kanban_create/kanban_swarm calls recover the
+    # notification destination even though ContextVars do not cross processes.
+    if task.origin_platform and task.origin_chat_id:
+        env["HERMES_SESSION_PLATFORM"] = task.origin_platform
+        env["HERMES_SESSION_CHAT_ID"] = task.origin_chat_id
+        if task.origin_thread_id:
+            env["HERMES_SESSION_THREAD_ID"] = task.origin_thread_id
+        if task.origin_user_id:
+            env["HERMES_SESSION_USER_ID"] = task.origin_user_id
+        if task.origin_session_key:
+            env["HERMES_SESSION_KEY"] = task.origin_session_key
+        if task.origin_profile:
+            env["HERMES_SESSION_PROFILE"] = task.origin_profile
     # `--cli` is the highest-precedence TUI override; dropping HERMES_TUI covers
     # older hermes builds on PATH that predate the flag's precedence.
     env.pop("HERMES_TUI", None)

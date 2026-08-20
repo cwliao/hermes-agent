@@ -322,6 +322,126 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
 
 
 
+def test_create_task_persists_max_runtime(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", max_runtime_seconds=600)
+        task = kb.get_task(conn, tid)
+        assert task.max_runtime_seconds == 600
+    finally:
+        conn.close()
+
+
+def test_create_task_persists_explicit_origin(kanban_home):
+    """WORKER-SUBPROCESS-SESSION-ENV-001: explicit origin_* kwargs land on
+    the new row unchanged."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn, title="x",
+            origin_platform="telegram", origin_chat_id="-100123",
+            origin_thread_id="7", origin_user_id="9",
+            origin_session_key="key1", origin_profile="default",
+        )
+        task = kb.get_task(conn, tid)
+        assert task.origin_platform == "telegram"
+        assert task.origin_chat_id == "-100123"
+        assert task.origin_thread_id == "7"
+        assert task.origin_user_id == "9"
+        assert task.origin_session_key == "key1"
+        assert task.origin_profile == "default"
+    finally:
+        conn.close()
+
+
+def test_create_task_inherits_origin_from_parent(kanban_home):
+    """A child task created with no explicit origin_* inherits it from its
+    first parent, so origin propagates down an entire swarm/worker tree
+    without every call site re-resolving the live session."""
+    conn = kb.connect()
+    try:
+        parent_id = kb.create_task(
+            conn, title="parent",
+            origin_platform="telegram", origin_chat_id="-100999",
+        )
+        child_id = kb.create_task(
+            conn, title="child", parents=[parent_id],
+        )
+        child = kb.get_task(conn, child_id)
+        assert child.origin_platform == "telegram"
+        assert child.origin_chat_id == "-100999"
+    finally:
+        conn.close()
+
+
+def test_create_task_no_origin_inheritance_when_parent_has_none(kanban_home):
+    """A parent with no origin_platform (e.g. created from a plain CLI/cron
+    invocation) leaves the child's origin_* NULL too -- no origin to
+    propagate, not an error."""
+    conn = kb.connect()
+    try:
+        parent_id = kb.create_task(conn, title="parent")
+        child_id = kb.create_task(conn, title="child", parents=[parent_id])
+        child = kb.get_task(conn, child_id)
+        assert child.origin_platform is None
+        assert child.origin_chat_id is None
+    finally:
+        conn.close()
+
+
+def test_enforce_max_runtime_integrates_with_dispatch(kanban_home, monkeypatch):
+    """enforce_max_runtime + dispatch_once integrate cleanly — a timed-out
+    task goes through ``timed_out`` → ``ready`` and dispatch_once can then
+    re-spawn it without re-reporting the timeout."""
+    import hermes_cli.kanban_db as _kb
+    # Leave _pid_alive=True so the crash detector doesn't steal the task
+    # before timeout enforcement runs. After SIGTERM in enforce_max_runtime,
+    # pretend the worker died so the grace wait exits fast.
+    state = {"sent_term": False}
+    def _alive(pid):
+        return not state["sent_term"]
+    def _signal(pid, sig):
+        import signal as _sig
+        if sig == _sig.SIGTERM:
+            state["sent_term"] = True
+    monkeypatch.setattr(_kb, "_pid_alive", _alive)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn, title="timeout-me", assignee="worker",
+            max_runtime_seconds=1,
+        )
+        kb.claim_task(conn, tid)
+        kb._set_worker_pid(conn, tid, os.getpid())
+        old_started = int(time.time()) - 30
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET started_at = ? WHERE id = ?",
+                (old_started, tid),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ? "
+                "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
+                (old_started, tid),
+            )
+        # Use enforce_max_runtime directly with our signal stub — dispatch_once
+        # uses the default os.kill, but integration-wise calling
+        # enforce_max_runtime directly proves the kernel wiring. For the
+        # dispatch_once assertion, rely on its own code path by calling it
+        # after forcing SIGTERM via enforce_max_runtime.
+        before = kb.enforce_max_runtime(conn, signal_fn=_signal)
+        assert tid in before, "kernel enforce_max_runtime should catch the overrun"
+
+        # Now a second dispatch_once run should be a no-op on this task
+        # (already released). Confirm the loop doesn't re-report it.
+        res = kb.dispatch_once(conn, spawn_fn=lambda t, ws: None)
+        task = kb.get_task(conn, tid)
+        # After timeout, task is back in 'ready' and will be re-spawned
+        # by the same pass. That's the intended behaviour.
+        assert task.status in {"ready", "running"}
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

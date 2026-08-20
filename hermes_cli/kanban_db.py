@@ -715,6 +715,16 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    # WORKER-SUBPROCESS-SESSION-ENV-001: notification-delivery origin. See
+    # the column comments in SCHEMA_SQL. ``_default_spawn`` reads these to
+    # stamp a worker subprocess's env so nested kanban_create/kanban_swarm
+    # calls from inside the worker can still auto-subscribe.
+    origin_platform: Optional[str] = None
+    origin_chat_id: Optional[str] = None
+    origin_thread_id: Optional[str] = None
+    origin_user_id: Optional[str] = None
+    origin_session_key: Optional[str] = None
+    origin_profile: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -732,6 +742,12 @@ class Task:
             skills=skills_value,
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
+            origin_platform=g("origin_platform"),
+            origin_chat_id=g("origin_chat_id"),
+            origin_thread_id=g("origin_thread_id"),
+            origin_user_id=g("origin_user_id"),
+            origin_session_key=g("origin_session_key"),
+            origin_profile=g("origin_profile"),
         )
 
 
@@ -941,7 +957,23 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- WORKER-SUBPROCESS-SESSION-ENV-001: the notification-delivery identity
+    -- of whichever live session originally caused this task to exist (a
+    -- Telegram/etc. turn, or -- when created without one -- inherited from
+    -- the first parent, or from the task of a dispatcher-spawned worker that
+    -- created this task mid-run). NULL when no session context was ever
+    -- resolvable (CLI/dashboard/cron creation with no inheritable parent).
+    -- ``_default_spawn`` stamps these into a worker subprocess's env so a
+    -- nested ``kanban_create``/``kanban_swarm`` call made from inside that
+    -- worker can still auto-subscribe, even though the worker is a fresh
+    -- process with no live ContextVar of its own.
+    origin_platform       TEXT,
+    origin_chat_id        TEXT,
+    origin_thread_id      TEXT,
+    origin_user_id        TEXT,
+    origin_session_key    TEXT,
+    origin_profile        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1232,21 +1264,74 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    origin_platform: Optional[str] = None,
+    origin_chat_id: Optional[str] = None,
+    origin_thread_id: Optional[str] = None,
+    origin_user_id: Optional[str] = None,
+    origin_session_key: Optional[str] = None,
+    origin_profile: Optional[str] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
-    Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
-    forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
-    ``idempotency_key``: an existing non-archived task with the key is returned
-    instead of a duplicate. ``max_runtime_seconds``: cap before the dispatcher
-    SIGTERMs and re-queues. ``model_override``/``provider_override`` pin the
-    worker model (provider requires model); ``reasoning_effort`` is independent.
+    Returns the new task id.  Status is ``ready`` when there are no
+    parents (or all parents already ``done``), otherwise ``todo``.
+    If ``triage=True``, status is forced to ``triage`` regardless of
+    parents — a specifier/triager is expected to promote the task to
+    ``todo`` once the spec is fleshed out.
+
+    If ``idempotency_key`` is provided and a non-archived task with the
+    same key already exists, returns the existing task's id instead of
+    creating a duplicate. Useful for retried webhooks / automation that
+    should not double-write.
+
+    ``max_runtime_seconds`` caps how long a worker may run before the
+    dispatcher SIGTERMs (then SIGKILLs after a grace window) and
+    re-queues the task. ``None`` means no cap (default).
+
+    ``skills`` is an optional list of skill names to force-load into
+    the worker when dispatched. Stored as JSON; the dispatcher passes
+    each name to ``hermes --skills ...``. Use this to pin a task to a
+    specialist skill (e.g. ``skills=["translation"]`` so the worker loads the
+    translation skill regardless of the profile's default config).
+
+    ``model_override`` / ``provider_override`` pin the worker to a specific
+    model (and optionally its provider) without touching the profile's
+    config — passed to the worker as ``-m <model> [--provider <name>]``.
+    ``provider_override`` requires ``model_override``.
+
+    ``reasoning_effort`` pins the worker's thinking depth for this task
+    (``minimal``…``ultra``, or ``none`` to disable thinking), passed as
+    ``--reasoning <level>``. It is independent of ``model_override``: a task
+    can run the profile's own model at a different depth.
+
+    ``project_source_task_id`` is an internal cross-profile fallback for a
+    worker-created child. When the active profile cannot resolve ``project_id``
+    in its own projects.db, a matching canonical project-linked task in this
+    board can supply the repo and branch convention. Its literal worktree is
+    never reused; the new task still gets its own task-id-keyed path.
+
+    ``origin_platform``/``origin_chat_id``/``origin_thread_id``/
+    ``origin_user_id``/``origin_session_key``/``origin_profile``
+    (WORKER-SUBPROCESS-SESSION-ENV-001) record the notification-delivery
+    identity of whichever live session caused this task to exist, so
+    ``_default_spawn`` can stamp it into a dispatcher-spawned worker's env
+    later. When the caller passes none of them explicitly and ``parents`` is
+    non-empty, they are inherited from the first parent task that has an
+    ``origin_platform`` set — this is how the values propagate down an
+    entire swarm/worker tree without every call site having to re-resolve
+    them. Pass ``origin_platform`` explicitly (even ``""``) to skip
+    inheritance for a specific call -- only ``origin_platform`` gates
+    whether inheritance runs; the other five fields follow whatever
+    ``origin_platform`` decided.
+
     ``creator_task_id``: inherit durable session/subscriptions independently of
     dependency edges; an explicit ``session_id`` still wins.
     ``project_source_task_id``: cross-profile fallback when ``project_id`` is not
     in the active profile's projects.db — see ``_resolve_project_link``.
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
+    ``completion_contract``: optional acceptance-contract text recorded at
+    creation time; unrelated to notification-delivery origin above.
     """
     from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
     from hermes_cli.kanban_pr_acceptance import validate_contract
@@ -1285,6 +1370,26 @@ def create_task(
     )
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
+
+    # WORKER-SUBPROCESS-SESSION-ENV-001: inherit notification-delivery
+    # origin from the first parent that has one when the caller did not
+    # resolve/pass it explicitly.
+    if origin_platform is None and parents:
+        for _pid in parents:
+            _prow = conn.execute(
+                "SELECT origin_platform, origin_chat_id, origin_thread_id, "
+                "origin_user_id, origin_session_key, origin_profile "
+                "FROM tasks WHERE id = ?",
+                (_pid,),
+            ).fetchone()
+            if _prow is not None and _prow["origin_platform"]:
+                origin_platform = _prow["origin_platform"]
+                origin_chat_id = _prow["origin_chat_id"]
+                origin_thread_id = _prow["origin_thread_id"]
+                origin_user_id = _prow["origin_user_id"]
+                origin_session_key = _prow["origin_session_key"]
+                origin_profile = _prow["origin_profile"]
+                break
 
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.
@@ -1331,8 +1436,11 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract,
+                        origin_platform, origin_chat_id, origin_thread_id,
+                        origin_user_id, origin_session_key, origin_profile
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
@@ -1342,6 +1450,12 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
                         1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        origin_platform or None,
+                        origin_chat_id or None,
+                        origin_thread_id or None,
+                        origin_user_id or None,
+                        origin_session_key or None,
+                        origin_profile or None,
                     ),
                 )
                 for pid in parents:
@@ -4319,6 +4433,7 @@ _PLUGIN_COMPAT_LAZY = {
     'derive_default_max_in_progress': ('hermes_cli.kanban_db_dispatch', 'derive_default_max_in_progress'),
     'detect_crashed_workers': ('hermes_cli.kanban_db_dispatch', 'detect_crashed_workers'),
     'detect_stale_running': ('hermes_cli.kanban_db_dispatch', 'detect_stale_running'),
+    '_default_spawn': ('hermes_cli.kanban_db_dispatch', '_default_spawn'),
     'dispatch_once': ('hermes_cli.kanban_db_dispatch', 'dispatch_once'),
     'enforce_max_runtime': ('hermes_cli.kanban_db_dispatch', 'enforce_max_runtime'),
     'has_spawnable_ready': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_ready'),
@@ -4336,6 +4451,7 @@ _PLUGIN_COMPAT_LAZY = {
     'rewind_notify_cursor': ('hermes_cli.kanban_db_notify', 'rewind_notify_cursor'),
     'run_daemon': ('hermes_cli.kanban_db_dispatch', 'run_daemon'),
     'set_branch_name': ('hermes_cli.kanban_db_workspace', 'set_branch_name'),
+    '_set_worker_pid': ('hermes_cli.kanban_db_dispatch', '_set_worker_pid'),
     'set_workspace_path': ('hermes_cli.kanban_db_workspace', 'set_workspace_path'),
     'unseen_events_for_sub': ('hermes_cli.kanban_db_notify', 'unseen_events_for_sub'),
     'worker_log_rotation_config': ('hermes_cli.kanban_db_dispatch', 'worker_log_rotation_config'),

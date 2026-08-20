@@ -837,6 +837,13 @@ _LATER_TASK_COLUMNS = (
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
     # Spawn-time start fingerprint of worker_pid (PID-reuse guard; NULL = legacy row).
     ("worker_started_at", "worker_started_at INTEGER"),
+    # Notification-delivery origin propagated into dispatcher worker envs.
+    ("origin_platform", "origin_platform TEXT"),
+    ("origin_chat_id", "origin_chat_id TEXT"),
+    ("origin_thread_id", "origin_thread_id TEXT"),
+    ("origin_user_id", "origin_user_id TEXT"),
+    ("origin_session_key", "origin_session_key TEXT"),
+    ("origin_profile", "origin_profile TEXT"),
 )
 
 _NOTIFY_SUB_COLUMNS = (

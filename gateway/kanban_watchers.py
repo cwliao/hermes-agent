@@ -25,6 +25,7 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 
+
 def _resolve_notifier_gateway_identity() -> Optional[str]:
     """Resolve the current gateway identity used for per-board dispatch owner checks.
 
@@ -1334,40 +1335,36 @@ class GatewayKanbanWatchersMixin:
         # (local LLMs, resource-constrained hosts) don't pile up and time
         # out. When set, the dispatcher skips spawning when the board
         # already has this many tasks in 'running' status.
-        raw_max_in_progress = kanban_cfg.get("max_in_progress", None)
-        max_in_progress = None
-        if raw_max_in_progress is not None:
-            try:
-                max_in_progress = int(raw_max_in_progress)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "kanban dispatcher: invalid kanban.max_in_progress=%r; ignoring",
-                    raw_max_in_progress,
-                )
-                max_in_progress = None
-            else:
-                if max_in_progress < 1:
-                    logger.warning(
-                        "kanban dispatcher: kanban.max_in_progress=%r is below 1; ignoring",
-                        raw_max_in_progress,
-                    )
-                    max_in_progress = None
-                else:
-                    logger.info("kanban dispatcher: max_in_progress=%s", max_in_progress)
-        # When the operator never set kanban.max_in_progress, fall back to a
-        # memory-derived default (OOF-30/OOF-77): unbounded fan-out on small
-        # hosted VMs has repeatedly swap-thrashed the whole machine. Explicit
-        # config always wins; None stays None on hosts where total memory
-        # can't be read (macOS/Windows dev machines).
-        effective_max_in_progress = _kb.resolve_max_in_progress(max_in_progress)
-        if max_in_progress is None and effective_max_in_progress is not None:
+        # Unset means the memory-derived default applies (OOF-30/OOF-77):
+        # unbounded fan-out on small hosted VMs has repeatedly swap-thrashed
+        # the whole machine. Explicit config always wins.
+        #
+        # WORKER-TIMEOUT-CONTENTION-001: even the derived default was not
+        # enough on a host serving one local model with several config paths
+        # bypassing it. Measured on 2026-08-20: a four-lane swarm dispatched
+        # all four workers at once alongside a chat session and cron jobs.
+        # Summed per-call latency over that window was 2538s inside 360s of
+        # wall-clock -- seven inference calls in flight on average -- and
+        # per-call latency rose from 18-39s to 32-129s. Every worker then
+        # exhausted its 300s cap after two calls and was killed. `0` is the
+        # explicit way to ask for unlimited; a negative or non-numeric value
+        # falls back to the derived default rather than disabling the cap,
+        # since failing open on a nonsensical number is how this returns.
+        raw_max_in_progress = kanban_cfg.get("max_in_progress")
+        max_in_progress = _kb.resolve_max_in_progress(
+            raw_max_in_progress, warn=logger.warning,
+        )
+        if max_in_progress is None:
+            logger.info("kanban dispatcher: concurrency unlimited")
+        elif raw_max_in_progress is None:
             logger.info(
                 "kanban dispatcher: kanban.max_in_progress unset; using "
                 "memory-derived default max_in_progress=%d "
                 "(set kanban.max_in_progress in config.yaml to override)",
-                effective_max_in_progress,
+                max_in_progress,
             )
-        max_in_progress = effective_max_in_progress
+        else:
+            logger.info("kanban dispatcher: max_in_progress=%s", max_in_progress)
 
         raw_failure_limit = kanban_cfg.get("failure_limit", _kb.DEFAULT_FAILURE_LIMIT)
         try:

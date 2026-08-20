@@ -87,7 +87,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
@@ -9761,17 +9761,45 @@ def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -
     )
 
 
-def resolve_max_in_progress(configured: Optional[int]) -> Optional[int]:
+def resolve_max_in_progress(
+    configured: Optional[int], *, warn: Optional[Callable[..., None]] = None,
+) -> Optional[int]:
     """Return the effective global concurrency cap for a dispatch tick.
 
     An explicit operator-configured value always wins. When unset, fall back
-    to the memory-derived default (see :func:`derive_default_max_in_progress`).
+    to the memory-derived default (see :func:`derive_default_max_in_progress`,
+    OOF-30/OOF-77).
+
+    ``0`` is an explicit opt-out and returns None (unlimited).  A negative
+    value falls back to the derived default rather than to unlimited: failing
+    open on a nonsensical number is how WORKER-TIMEOUT-CONTENTION-001 would
+    return. A non-numeric value returns None rather than raising, since a
+    string cannot be interpreted as intent and refusing to dispatch would be
+    worse than running uncapped; pass ``warn`` (e.g. ``logger.warning``) to
+    surface these fallbacks.
+
     Callers that parse config (gateway dispatcher, ``hermes kanban dispatch``)
-    should route through this so both paths agree.
+    should route through this so all paths agree.
     """
-    if configured is not None:
-        return configured
-    return derive_default_max_in_progress()
+    if configured is None:
+        return derive_default_max_in_progress()
+    try:
+        value = int(configured)
+    except (TypeError, ValueError):
+        if warn:
+            warn("kanban dispatcher: invalid kanban.max_in_progress=%r; ignoring", configured)
+        return None
+    if value == 0:
+        return None
+    if value < 0:
+        default = derive_default_max_in_progress()
+        if warn:
+            warn(
+                "kanban dispatcher: kanban.max_in_progress=%r is negative; using %r",
+                configured, default,
+            )
+        return default
+    return value
 
 
 def configured_max_in_progress() -> Optional[int]:

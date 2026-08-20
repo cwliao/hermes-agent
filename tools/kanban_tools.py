@@ -35,6 +35,7 @@ import re
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
+from hermes_cli import kanban_swarm as _KS
 from hermes_cli.goals import judge_goal
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
@@ -1152,6 +1153,140 @@ def _handle_unblock(args: dict, **kw) -> str:
         return tool_error(f"kanban_unblock: {e}")
 
 
+def _handle_swarm(args: dict, **kw) -> str:
+    """Create a lane-bound Kanban swarm (parallel workers -> verifier -> synthesizer).
+
+    GATE8-SWARM-CREATION-TOOL-001. Wraps ``hermes_cli.kanban_swarm.create_swarm()``
+    directly -- the same function ``hermes kanban swarm`` already calls -- so an
+    agent no longer has to hand-compose that shell command from memory. Every
+    observed failure of the hand-composed path is closed at this boundary
+    rather than left to the model to get right:
+
+    * ``lane_id`` is validated against ``MULTI_AGENT_LANE_IDS`` here, before
+      ``create_swarm`` is even called, with a specific error naming the valid
+      set (the CLI's separate ``--worker``/``--worker-lane`` positional lists
+      have no equivalent footgun here, since each worker carries its own
+      ``lane_id``).
+    * Every external lane's ``preflight_skill_id`` is filled in from
+      ``kanban_swarm.LANE_SKILL_IDS`` rather than typed by the model -- this
+      is what a static ``"HUMANIZER"``-for-every-lane mistake
+      (GATE8-RERUN-RESULT-001) can no longer do. An explicit ``skills`` that
+      conflicts with the lane's required skill is rejected with the expected
+      value named, rather than silently building an unrunnable graph.
+    * ``profile`` defaults to the calling session's own profile (or
+      ``"default"``) when omitted, rather than requiring the model to invent
+      a profile name per lane -- an unknown ``assignee`` is silently never
+      dispatched, with no error surfaced anywhere (observed live: three
+      workers stuck in ``ready`` for 10+ minutes with a single ``created``
+      event and nothing else).
+
+    Orchestrator-only, matching ``kanban_list``/``kanban_unblock``: building a
+    multi-lane graph with runtime/skill/lane invariants is board-routing
+    work, not something a dispatcher-spawned single-task worker should do
+    mid-task.
+    """
+    guard = _require_orchestrator_tool("kanban_swarm")
+    if guard:
+        return guard
+
+    goal = args.get("goal")
+    if not goal or not str(goal).strip():
+        return tool_error("goal is required")
+
+    raw_workers = args.get("workers")
+    if not isinstance(raw_workers, list) or not raw_workers:
+        return tool_error("workers must be a non-empty list")
+
+    ks = _KS
+    default_profile = os.environ.get("HERMES_PROFILE") or "default"
+    specs = []
+    for i, w in enumerate(raw_workers, start=1):
+        if not isinstance(w, dict):
+            return tool_error(f"workers[{i}] must be an object")
+        title = w.get("title")
+        if not title or not str(title).strip():
+            return tool_error(f"workers[{i}].title is required")
+        lane_id = w.get("lane_id") or None
+        body = w.get("body") or str(title)
+        profile = w.get("profile") or default_profile
+        skills = w.get("skills")
+        if isinstance(skills, str):
+            skills = [skills]
+        if skills is not None and not isinstance(skills, (list, tuple)):
+            return tool_error(
+                f"workers[{i}].skills must be a string or list of strings"
+            )
+        preflight_skill_id = ""
+        if lane_id is not None:
+            if lane_id not in ks.MULTI_AGENT_LANE_IDS:
+                return tool_error(
+                    f"workers[{i}].lane_id={lane_id!r} is not a known lane; "
+                    f"use one of: {', '.join(ks.MULTI_AGENT_LANE_IDS)}"
+                )
+            required_skill = ks.LANE_SKILL_IDS.get(lane_id)
+            if required_skill:
+                if skills and required_skill not in skills:
+                    return tool_error(
+                        f"workers[{i}] is on lane {lane_id!r}, which requires "
+                        f"the {required_skill!r} skill; got skills={list(skills)!r}. "
+                        f"Omit skills to let the lane fill it in automatically."
+                    )
+                skills = [required_skill]
+                preflight_skill_id = required_skill
+        max_runtime = w.get("max_runtime_seconds")
+        if max_runtime is not None:
+            try:
+                max_runtime = int(max_runtime)
+            except (TypeError, ValueError):
+                return tool_error(
+                    f"workers[{i}].max_runtime_seconds must be an integer"
+                )
+        specs.append(ks.SwarmWorkerSpec(
+            profile=str(profile), title=str(title), body=str(body),
+            skills=list(skills) if skills else [], lane_id=lane_id,
+            preflight_skill_id=preflight_skill_id,
+            max_runtime_seconds=max_runtime,
+        ))
+
+    verifier_assignee = args.get("verifier_assignee") or default_profile
+    synthesizer_assignee = args.get("synthesizer_assignee") or default_profile
+    tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
+    try:
+        worker_max_runtime_seconds = int(
+            args.get("worker_max_runtime_seconds", ks.DEFAULT_WORKER_MAX_RUNTIME_SECONDS)
+        )
+        goal_max_turns = int(args.get("goal_max_turns", ks.DEFAULT_GOAL_MAX_TURNS))
+    except (TypeError, ValueError):
+        return tool_error(
+            "worker_max_runtime_seconds and goal_max_turns must be integers"
+        )
+
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            created = ks.create_swarm(
+                conn,
+                goal=str(goal),
+                workers=specs,
+                verifier_assignee=str(verifier_assignee),
+                synthesizer_assignee=str(synthesizer_assignee),
+                tenant=tenant,
+                created_by=os.environ.get("HERMES_PROFILE") or "swarm-orchestrator",
+                worker_max_runtime_seconds=worker_max_runtime_seconds,
+                goal_max_turns=goal_max_turns,
+            )
+            subscribed = _maybe_auto_subscribe(conn, created.synthesizer_id)
+            return _ok(subscribed=subscribed, **created.as_dict())
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_swarm: {e}")
+    except Exception as e:
+        logger.exception("kanban_swarm failed")
+        return tool_error(f"kanban_swarm: {e}")
+
+
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact."""
     parent_id = args.get("parent_id")
@@ -1644,6 +1779,92 @@ KANBAN_UNBLOCK_SCHEMA = {
     },
 }
 
+KANBAN_SWARM_SCHEMA = {
+    "name": "kanban_swarm",
+    "description": (
+        "Create a lane-bound Kanban swarm: parallel workers -> verifier -> "
+        "synthesizer. Each worker with a lane_id gets its preflight_skill_id "
+        "filled in automatically from the lane (do not pass skills for a "
+        "lane worker unless you need to override it — the tool rejects a "
+        "conflicting value rather than silently using it). A worker without "
+        "a lane_id runs as an ordinary Kanban worker. Orchestrator-only."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "goal": {
+                "type": "string",
+                "description": "The swarm's overall goal / final outcome.",
+            },
+            "workers": {
+                "type": "array",
+                "description": "One entry per parallel worker.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "lane_id": {
+                            "type": "string",
+                            "enum": list(_KS.MULTI_AGENT_LANE_IDS),
+                            "description": (
+                                "Lane this worker runs on. A lane-bound swarm "
+                                "requires native_hermes plus at least "
+                                f"{_KS.MIN_EXTERNAL_LANES} of "
+                                f"{', '.join(_KS.EXTERNAL_LANE_IDS)}. Omit for "
+                                "an unbound worker."
+                            ),
+                        },
+                        "title": {"type": "string", "description": "Task title."},
+                        "body": {
+                            "type": "string",
+                            "description": "Task instructions. Defaults to title if omitted.",
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": (
+                                "Hermes profile to dispatch this worker as. "
+                                "Defaults to the calling session's own profile "
+                                "(or 'default') — do not guess a lane-named "
+                                "profile like 'claude' or 'grok', the lane's "
+                                "external CLI is reached via its skill, not "
+                                "a separate profile."
+                            ),
+                        },
+                        "skills": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Leave unset for a lane worker — the lane's "
+                                "required skill is filled in automatically."
+                            ),
+                        },
+                        "max_runtime_seconds": {"type": "integer"},
+                    },
+                    "required": ["title"],
+                },
+            },
+            "verifier_assignee": {
+                "type": "string",
+                "description": "Profile for the verifier task. Defaults like worker profile.",
+            },
+            "synthesizer_assignee": {
+                "type": "string",
+                "description": "Profile for the synthesizer task. Defaults like worker profile.",
+            },
+            "worker_max_runtime_seconds": {
+                "type": "integer",
+                "description": f"Per-worker runtime cap. Default {_KS.DEFAULT_WORKER_MAX_RUNTIME_SECONDS}s.",
+            },
+            "goal_max_turns": {
+                "type": "integer",
+                "description": f"Goal-loop turn budget for a lane-bound swarm. Default {_KS.DEFAULT_GOAL_MAX_TURNS}.",
+            },
+            "tenant": {"type": "string", "description": "Tenant namespace for this swarm."},
+            "board": _board_schema_prop(),
+        },
+        "required": ["goal", "workers"],
+    },
+}
+
 KANBAN_LINK_SCHEMA = {
     "name": "kanban_link",
     "description": (
@@ -1737,6 +1958,15 @@ registry.register(
     handler=_handle_unblock,
     check_fn=_check_kanban_orchestrator_mode,
     emoji="▶",
+)
+
+registry.register(
+    name="kanban_swarm",
+    toolset="kanban",
+    schema=KANBAN_SWARM_SCHEMA,
+    handler=_handle_swarm,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🐝",
 )
 
 registry.register(

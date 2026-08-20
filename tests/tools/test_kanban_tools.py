@@ -92,7 +92,7 @@ def test_worker_with_kanban_toolset_still_hides_board_routing(monkeypatch, tmp_p
 
     Even if a worker process happens to also have ``toolsets: [kanban]``
     in its config, the HERMES_KANBAN_TASK env var means it's a focused
-    worker and must not see kanban_list / kanban_unblock.
+    worker and must not see kanban_list / kanban_unblock / kanban_swarm.
     """
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_fake")
     home = tmp_path / ".hermes"
@@ -111,9 +111,10 @@ def test_worker_with_kanban_toolset_still_hides_board_routing(monkeypatch, tmp_p
     assert {
         "kanban_list",
         "kanban_unblock",
+        "kanban_swarm",
     }.isdisjoint(kanban), (
         f"Board-routing tools leaked into worker schema: "
-        f"{kanban & {'kanban_list', 'kanban_unblock'}}"
+        f"{kanban & {'kanban_list', 'kanban_unblock', 'kanban_swarm'}}"
     )
 
 
@@ -137,7 +138,7 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
         "kanban_list",
         "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
         "kanban_comment", "kanban_create", "kanban_link",
-        "kanban_unblock",
+        "kanban_unblock", "kanban_swarm",
     }
     assert kanban == expected, f"expected {expected}, got {kanban}"
 
@@ -2343,3 +2344,217 @@ def test_complete_auto_post_is_best_effort_when_root_does_not_exist(monkeypatch,
     from tools import kanban_tools as kt
     out = kt._handle_complete({"summary": "done, but root is gone"})
     assert json.loads(out)["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# kanban_swarm (GATE8-SWARM-CREATION-TOOL-001): a lane-bound swarm built via
+# a typed tool call, closing the failure classes a hand-composed
+# `hermes kanban swarm` shell command kept hitting -- wrong lane names,
+# wrong/missing preflight skill, and an assignee naming a profile that
+# doesn't exist (which the dispatcher silently never picks up).
+# ---------------------------------------------------------------------------
+
+def _lane_bound_workers():
+    return [
+        {"lane_id": "native_hermes", "title": "native joke"},
+        {"lane_id": "claude", "title": "claude joke"},
+        {"lane_id": "grok", "title": "grok joke"},
+        {"lane_id": "agy", "title": "agy joke"},
+    ]
+
+
+def test_swarm_happy_path_fills_in_skill_and_profile(monkeypatch, worker_env):
+    """The property this whole ticket is about: the tool fills in the
+    correct preflight_skill_id per lane and a real profile, so the model
+    never has to guess either -- both were observed getting silently wrong
+    when hand-composed."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({
+        "goal": "four lane jokes",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+    assert len(d["worker_ids"]) == 4
+
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        expected_skills = {
+            "native_hermes": [],
+            "claude": ["claude-code"],
+            "grok": ["grok"],
+            "agy": ["antigravity-cli"],
+        }
+        for tid in d["worker_ids"]:
+            task = kb.get_task(conn, tid)
+            # profile defaults to a real, dispatchable profile -- not a
+            # lane name like "claude" that no dispatcher can resolve.
+            assert task.assignee == "test-worker", task.assignee
+        contract_by_lane = {}
+        import re as _re
+        for tid in d["worker_ids"]:
+            task = kb.get_task(conn, tid)
+            m = _re.search(r'"expected_lane_id":\s*"([^"]+)"', task.body or "")
+            lane = m.group(1) if m else None
+            skills_m = _re.search(r'"preflight_skill_id":\s*"([^"]*)"', task.body or "")
+            contract_by_lane[lane] = skills_m.group(1) if skills_m else None
+        assert contract_by_lane == {
+            "native_hermes": "",
+            "claude": "claude-code",
+            "grok": "grok",
+            "agy": "antigravity-cli",
+        }, contract_by_lane
+    finally:
+        conn.close()
+
+
+def test_swarm_rejects_unknown_lane_before_creating_any_card(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        before = conn.execute("select count(*) from tasks").fetchone()[0]
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({
+        "goal": "x",
+        "workers": [{"lane_id": "bogus", "title": "x"}],
+    })
+    d = json.loads(out)
+    assert "error" in d
+    assert "bogus" in d["error"]
+
+    conn = kb.connect()
+    try:
+        after = conn.execute("select count(*) from tasks").fetchone()[0]
+    finally:
+        conn.close()
+    assert after == before, "an invalid lane must not leave a partial graph"
+
+
+def test_swarm_rejects_skill_conflicting_with_lane(monkeypatch, worker_env):
+    """A model-supplied skills value that contradicts the lane's real
+    requirement is rejected with the expected skill named, rather than
+    silently building a graph the worker can never complete (the
+    '"HUMANIZER"-for-every-lane' failure from GATE8-RERUN-RESULT-001)."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({
+        "goal": "x",
+        "workers": [{"lane_id": "claude", "title": "x", "skills": ["HUMANIZER"]}],
+    })
+    d = json.loads(out)
+    assert "error" in d
+    assert "claude-code" in d["error"]
+
+
+def test_swarm_worker_without_lane_id_is_unbound(monkeypatch, worker_env):
+    """A worker with no lane_id is an ordinary Kanban worker -- lane
+    validation and skill auto-fill only apply when lane_id is set."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({
+        "goal": "x",
+        "workers": [{"title": "unbound worker"}],
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+
+
+def test_swarm_requires_goal(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({"workers": _lane_bound_workers()})
+    assert "goal" in json.loads(out).get("error", "")
+
+
+def test_swarm_requires_nonempty_workers(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({"goal": "x", "workers": []})
+    assert "workers" in json.loads(out).get("error", "")
+
+
+def test_swarm_subscribes_synthesizer_when_session_context_present(
+    monkeypatch, worker_env,
+):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-1")
+
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({
+        "goal": "x",
+        "workers": _lane_bound_workers(),
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+    assert d["subscribed"] is True
+
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, d["synthesizer_id"])
+    finally:
+        conn.close()
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+
+
+def test_swarm_rejects_non_integer_worker_max_runtime(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        before = conn.execute("select count(*) from tasks").fetchone()[0]
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({
+        "goal": "x",
+        "workers": [{"title": "x", "max_runtime_seconds": "not-a-number"}],
+    })
+    d = json.loads(out)
+    assert "error" in d, d
+    assert "max_runtime_seconds" in d["error"]
+
+    conn = kb.connect()
+    try:
+        after = conn.execute("select count(*) from tasks").fetchone()[0]
+    finally:
+        conn.close()
+    assert after == before
+
+
+def test_swarm_rejects_mixed_lane_bound_and_unbound_workers(monkeypatch, worker_env):
+    """create_swarm's own lane_mode logic requires every worker to carry a
+    lane_id once any one does -- verified through the tool, not just
+    inferred from create_swarm's own tests."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({
+        "goal": "x",
+        "workers": [
+            {"lane_id": "native_hermes", "title": "bound"},
+            {"title": "unbound"},
+        ],
+    })
+    d = json.loads(out)
+    assert "error" in d, d
+    assert "lane_id" in d["error"]
+
+
+def test_worker_cannot_call_swarm(worker_env):
+    """kanban_swarm is orchestrator-only, matching kanban_unblock."""
+    from tools import kanban_tools as kt
+    out = kt._handle_swarm({"goal": "x", "workers": _lane_bound_workers()})
+    d = json.loads(out)
+    assert "error" in d
+    assert "orchestrator-only" in d["error"]

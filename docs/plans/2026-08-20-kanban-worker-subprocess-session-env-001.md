@@ -1,7 +1,20 @@
 # WORKER-SUBPROCESS-SESSION-ENV-001
 
-Status: ticket, not yet implemented. Needs cross-review before implementation
-starts.
+Status: cross-reviewed, ready for implementation. Independent review (a
+separate agent, re-derived every claim from source rather than trusting this
+ticket's prose) confirmed `_default_spawn`'s env construction, confirmed
+`_maybe_auto_subscribe`/`_maybe_auto_subscribe_swarm`'s silent-False
+behaviour, confirmed `_inject_session_context_env` as real working precedent,
+and additionally checked whether `tasks.session_id`/`HERMES_SESSION_ID`
+could shortcut the fix -- it can't (already deliberately excluded upstream
+as a notify-target proxy, per the code comment near
+`tools/kanban_tools.py`'s `_maybe_auto_subscribe`, referencing a prior
+revert). Reviewer's recommendation, adopted below: implement candidate 1
+(persist platform/chat_id/session_key on the task row at creation, propagate
+to descendants) -- candidate 2 (reuse `kanban_notify_subs`) is strictly
+weaker since it has no data to propagate until *someone* has already
+subscribed, which can't bootstrap a worker's own first nested subscribe
+attempt.
 
 ## Context
 
@@ -83,8 +96,8 @@ since the dispatcher is a long-lived background loop, not a per-request
 handler, and does not have a "current conversation" ContextVar to read from
 at spawn time.
 
-**Open design question for cross-review, not yet resolved:** where should
-`_default_spawn` source these values from? Candidates:
+**Design decision, resolved by cross-review:** candidate 1 below. Candidates
+2 and 3 are recorded for context on why they were rejected.
 
 1. Store platform/chat_id/session_key on the `tasks` row at creation time
    (e.g. as part of `created_by`/a new column) and have `_default_spawn` read

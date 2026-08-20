@@ -1,7 +1,27 @@
 # NOTIFY-SUBS-DEBUG-LOG-LOCATION-AND-HERMES-CLI-DRIFT-001
 
-Status: ticket, not yet implemented. Needs cross-review before implementation
-starts.
+Status: cross-reviewed. Finding 1 needs no code fix (diagnostic-methodology
+finding only, closed). Finding 2 needs a design decision from the user
+(see "Questions for cross-review" below) before any fix is scoped.
+
+## Cross-review summary
+
+Independent cross-review (separate agent, did not share this session's
+conversation, re-derived every claim from source) confirmed both findings by
+re-reading the cited code/log evidence directly: `hermes_logging.py`'s
+`_ComponentFilter` structurally explains why `tools.kanban_tools` output can
+only land in `agent.log`, never `gateway.log`, closing Finding 1's "why did
+the log never fire" question with a mechanism, not just a correlation. For
+Finding 2, the reviewer flagged one gap (whether `tools` is really covered by
+the editable-install mapping, given `tools.kanban_tools` is one of the two
+modules this ticket is actually about) -- that gap is now closed with a
+direct empirical check from a neutral cwd, added inline below (the
+reviewer's specific doubt about the `MAPPING` dict turned out to be a
+mis-read on a second independent check -- `tools` is in `MAPPING` -- but the
+extra empirical check it prompted was worth doing anyway and is now part of
+the record). Drift (36 commits behind `origin/main`, 70 changed lines
+uncommitted) was independently re-confirmed by the reviewer via its own
+`git` commands against `/home/cwliao/.hermes/hermes-agent`, read-only.
 
 ## Context
 
@@ -121,6 +141,36 @@ this has actually caused an observed-but-unexplained discrepancy anywhere in
 this effort's history is not established here -- it is a structural risk
 surfaced by reading the wrapper script and the editable-install mapping, not
 a specific incident with its own evidence trail (unlike Finding 1).
+
+**Verified directly, not just from the static `MAPPING` dict:** cross-review
+of this ticket raised (then, on a second independent check, retracted) a
+question of whether `tools` is really one of the editable-install's mapped
+top-level packages -- `tools` is confirmed present in `MAPPING` (parsed the
+dict with `ast.literal_eval` directly out of
+`__editable___hermes_agent_0_18_2_finder.py`, not eyeballed). To close the
+gap for good, this was also checked empirically rather than by reading the
+mapping alone: from a neutral cwd (`/tmp`, to rule out any implicit
+namespace-package contribution from an unrelated `/home/cwliao/.hermes/tools`
+directory that happens to also exist), with `PYTHONPATH`/`PYTHONHOME` unset
+exactly as the `hermes` wrapper does it:
+
+```
+$ cd /tmp && env -u PYTHONPATH -u PYTHONHOME \
+    /home/cwliao/.hermes/hermes-agent/venv/bin/python -c "
+import tools; print(list(tools.__path__))
+import tools.kanban_tools as kt; print(kt.__file__)
+import hermes_cli.kanban as kb; print(kb.__file__)"
+['/home/cwliao/.hermes/hermes-agent/tools']
+/home/cwliao/.hermes/hermes-agent/tools/kanban_tools.py
+/home/cwliao/.hermes/hermes-agent/hermes_cli/kanban.py
+```
+
+`tools.__path__` has exactly one entry (the drifted checkout's `tools/`, not
+a merged namespace with the unrelated directory), and both
+`tools.kanban_tools` and `hermes_cli.kanban` -- the two modules this whole
+investigation is about -- resolve there. The general claim in this Finding
+is now confirmed for the specific modules that matter to Gate 8, not just
+asserted from the mapping table.
 
 ## Questions for cross-review, not yet resolved
 

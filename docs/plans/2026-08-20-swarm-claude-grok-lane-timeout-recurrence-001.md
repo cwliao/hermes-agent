@@ -1,8 +1,51 @@
 # SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001
 
-Status: ticket, not yet investigated further. Needs cross-review before
-implementation starts (if any code change turns out to be warranted at all
--- this may turn out to be host load, not a code bug).
+Status: partially investigated (step 1 of the suggested next steps below,
+completed). Result supports "contention/load", not "CLI-specific
+slowness". Needs cross-review before any config change (e.g. tuning
+`max_in_progress` down from 3) is implemented.
+
+## Follow-up finding (same day, later investigation)
+
+Ran step 1 of the suggested next steps: `claude -p "Reply with exactly:
+OK" < /dev/null` and `grok -p "Reply with exactly: OK" < /dev/null`,
+solo (no concurrent swarm, no other lanes running), headless. **Both
+returned `OK` in well under the 300s limit -- no hang, no slowness, no
+sign of a CLI-specific problem.** This was run as part of the same
+investigation session as the agy ticket's follow-up
+(`2026-08-20-swarm-agy-headless-oauth-block-001.md`), where the same
+"reproduce solo, headless" test on agy's two claimed-failing invocations
+also came back clean -- raising the same fabrication concern noted
+there as a possible confound for *this* ticket's timeouts too (i.e. it's
+not fully ruled out that the dispatcher's own `task_events` "timed_out"
+records are accurate wall-clock measurements rather than something else,
+though `timed_out` is a dispatcher-side SIGTERM-on-deadline mechanism, not
+worker self-report, so it's much less likely to be fabricated the way a
+`kanban_block` reason can be).
+
+Given solo invocations are fast and clean, the timeout is more likely to
+be a genuine effect of concurrent load (matching step 1's original
+purpose) than a per-CLI slowness issue -- consistent with the original
+PR #78 diagnosis, just possibly needing a lower cap than 3 for this
+host's current conditions, or the load characteristics have changed since
+PR #78 shipped (a day earlier).
+
+## Revised suggested next steps
+
+1. ~~Re-run a claude-only or grok-only single-lane task...~~ **Done, see
+   above.** Solo lanes are clean.
+2. Re-run the 4-lane swarm again with per-worker wall-clock timing
+   captured (spawned -> first heartbeat -> subsequent heartbeat gaps) to
+   see whether the slowdown under concurrency is inference-step latency
+   (matching PR #78's original contention diagnosis) or something else
+   that only appears under concurrent dispatch specifically.
+3. If contention is confirmed, cross-review a proposal to lower
+   `kanban.max_in_progress` below the current default of 3 (or make it
+   adaptive to host load) before changing it -- the value's own comment
+   in `hermes_cli/kanban_db.py` already says "nothing establishes that
+   three beats two or four."
+
+## Original suggested next steps (kept for reference; step 1 above is the completed version of item 1 below)
 
 ## Context
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=T0214 Objective #2: klib baked-release drift watch (alert-only)
+Documentation=file://%h/project/klib/.ai/tickets/T0214.md
+
+[Service]
+Type=oneshot
+TimeoutStartSec=60
+Environment=HERMES_HOME=@HERMES_HOME@
+WorkingDirectory=@HERMES_HOME@/hermes-agent
+ExecStart=@HERMES_HOME@/hermes-agent/scripts/release_drift_watch.sh
+StandardOutput=journal
+StandardError=journal

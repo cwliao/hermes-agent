@@ -37,6 +37,13 @@ _GC_INTERVAL_SECONDS = 3600.0
 _HEALTH_WINDOW = 6
 
 
+def _resolve_gateway_max_in_progress(kanban_cfg: dict, kb: Any):
+    """Use the shared resolver for the embedded dispatcher configuration."""
+    return kb.resolve_max_in_progress(
+        kanban_cfg.get("max_in_progress"), warn=logger.warning,
+    )
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 

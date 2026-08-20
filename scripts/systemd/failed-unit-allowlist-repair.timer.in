@@ -1,0 +1,15 @@
+[Unit]
+Description=T0213 Objective #1: failed-unit allowlist repair schedule
+
+[Timer]
+# Lightweight (five `systemctl --user is-failed` calls per run); a 10-minute
+# cadence is intentionally offset from failed-unit-watch.timer's hourly
+# schedule and from hermes-gateway-recovery.timer's 5-minute one so this
+# does not fire in lockstep with either.
+OnBootSec=4min
+OnUnitActiveSec=10min
+Persistent=true
+Unit=failed-unit-allowlist-repair.service
+
+[Install]
+WantedBy=timers.target

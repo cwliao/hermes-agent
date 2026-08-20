@@ -1,0 +1,14 @@
+[Unit]
+Description=T0213 Objective #1: bounded auto-restart for the failed-unit-watch allowlist
+Documentation=file://%h/.hermes/hermes-agent/.ai/tickets/T0213.md
+
+[Service]
+Type=oneshot
+TimeoutStartSec=180
+Environment=HERMES_HOME=@HERMES_HOME@
+Environment=PYTHONPATH=@RELEASE_PATH@
+ExecStart=@PYTHON@ -m hermes_cli.failed_unit_allowlist_repair
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal

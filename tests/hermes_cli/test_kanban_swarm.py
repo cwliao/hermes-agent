@@ -169,14 +169,15 @@ def test_lane_bound_swarm_persists_contracts_goal_budget_and_runtime(tmp_path):
         assert all(task.goal_mode is True for task in workers)
         assert all(task.goal_max_turns == 5 for task in workers)
         # SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001: lane-aware default when
-        # worker_max_runtime_seconds is left unset -- native_hermes keeps the
-        # original 120s default; every external-CLI lane gets a higher ceiling.
+        # worker_max_runtime_seconds is left unset -- native_hermes gets
+        # DEFAULT_WORKER_MAX_RUNTIME_SECONDS; every external-CLI lane gets
+        # DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS instead.
         by_lane = {
             extract_contract(task.body)["expected_lane_id"]: task for task in workers
         }
-        assert by_lane["native_hermes"].max_runtime_seconds == 120
+        assert by_lane["native_hermes"].max_runtime_seconds == DEFAULT_WORKER_MAX_RUNTIME_SECONDS
         for lane in ("claude", "grok", "agy"):
-            assert by_lane[lane].max_runtime_seconds == 600
+            assert by_lane[lane].max_runtime_seconds == DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS
         assert [extract_contract(task.body)["expected_lane_id"] for task in workers] == list(MULTI_AGENT_LANE_IDS)
         assert extract_contract(verifier.body)["expected_lane_count"] == 4
         assert extract_contract(synthesizer.body)["verifier_id"] == created.verifier_id
@@ -245,8 +246,8 @@ def test_per_worker_max_runtime_seconds_still_beats_swarm_and_lane_defaults(tmp_
             for tid in created.worker_ids
         }
         assert by_lane["claude"].max_runtime_seconds == 42
-        assert by_lane["native_hermes"].max_runtime_seconds == 120
-        assert by_lane["grok"].max_runtime_seconds == 600
+        assert by_lane["native_hermes"].max_runtime_seconds == DEFAULT_WORKER_MAX_RUNTIME_SECONDS
+        assert by_lane["grok"].max_runtime_seconds == DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS
     finally:
         conn.close()
 

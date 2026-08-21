@@ -6134,6 +6134,11 @@ class DispatchResult:
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
+    quorum_excused: int = 0
+    """Blocked swarm workers archived this tick because enough siblings
+    already reached 'done' to satisfy the swarm's worker_quorum (see
+    kanban_swarm.excuse_blocked_workers_below_quorum). 0 for boards with
+    no quorum-configured swarms -- SWARM-PARTIAL-QUORUM-001."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
     stale: list[str] = field(default_factory=list)
@@ -7648,6 +7653,15 @@ def _dispatch_once_locked(
     if _crash_rate_limited:
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
+    # SWARM-PARTIAL-QUORUM-001: excuse permanently-blocked swarm workers
+    # whose siblings already satisfy the swarm's worker_quorum, so
+    # recompute_ready's normal "every parent done or archived" rule can
+    # promote the verifier without waiting on a lane that will never
+    # finish. Deferred import: kanban_swarm imports this module, so a
+    # module-level import here would be circular. Swarm-specific logic
+    # deliberately lives in kanban_swarm.py, not duplicated here.
+    from hermes_cli import kanban_swarm as _ks
+    result.quorum_excused = _ks.excuse_blocked_workers_below_quorum(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
 
     # Count tasks already running so max_spawn enforces concurrency rather

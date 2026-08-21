@@ -1445,6 +1445,182 @@ class TestIsAppTldFinding:
 
 
 # ---------------------------------------------------------------------------
+# CJK ideographic full stop (U+3002) confusable_text suppression
+# (SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001 retest, 2026-08-21)
+# ---------------------------------------------------------------------------
+
+class TestCjkFullStopConfusableSuppression:
+    """block/warn verdicts whose only evidence is U+3002 are downgraded to allow."""
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_truncated_evidence_hiding_a_real_homoglyph_is_never_suppressed(
+        self, mock_cfg, mock_run
+    ):
+        """Regression test for a real, independently-verified bypass caught
+        in cross-review before this suppression ever merged: tirith's own
+        `evidence` array truncates at a fixed cap per finding (confirmed at
+        10 entries against a live tirith 0.3.1 binary, ordered by byte
+        offset). A command with ten-plus ordinary CJK full stops ahead of a
+        genuine homoglyph attack (e.g. Cyrillic U+0430 in a lookalike
+        domain) can report evidence that LOOKS entirely benign -- all
+        U+3002 -- while tirith silently dropped the actual attack evidence
+        past the cap. This is exactly that shape: 10 U+3002 entries and
+        nothing else reported, standing in for a finding that in reality
+        also flagged something tirith didn't have room to report. Must
+        NOT be suppressed -- the reported evidence count alone (10) is
+        enough to refuse suppression, regardless of what it contains."""
+        mock_cfg.return_value = _CFG
+        findings = [{
+            "rule_id": "confusable_text", "severity": "HIGH",
+            "evidence": [{"hex": "U+3002"} for _ in range(10)],
+        }]
+        mock_run.return_value = _mock_run(1, _json_stdout(findings, "confusable"))
+        result = check_command_security(
+            "claude -p '你好。你好。你好。你好。你好。你好。你好。你好。你好。你好。аpple.com'"
+        )
+        assert result["action"] == "block"
+        assert len(result["findings"]) == 1
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_block_with_only_u3002_evidence_downgraded_to_allow(self, mock_cfg, mock_run):
+        """The exact shape observed live: action=block, single confusable_text
+        finding, two U+3002 evidence entries and nothing else."""
+        mock_cfg.return_value = _CFG
+        findings = [{
+            "rule_id": "confusable_text", "severity": "HIGH",
+            "title": "Confusable Unicode characters in text",
+            "evidence": [
+                {"type": "byte_sequence", "offset": 91, "hex": "U+3002",
+                 "description": "confusable U+3002 (looks like '.')"},
+                {"type": "byte_sequence", "offset": 195, "hex": "U+3002",
+                 "description": "confusable U+3002 (looks like '.')"},
+            ],
+            "mitre_id": "T1036.005",
+        }]
+        mock_run.return_value = _mock_run(1, _json_stdout(findings, "confusable text"))
+        result = check_command_security("claude -p '用繁體中文寫一句話。' --allowedTools ''")
+        assert result["action"] == "allow"
+        assert result["findings"] == []
+        assert result["summary"] == ""
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_warn_with_only_u3002_evidence_downgraded_to_allow(self, mock_cfg, mock_run):
+        mock_cfg.return_value = _CFG
+        findings = [{"rule_id": "confusable_text",
+                     "evidence": [{"hex": "U+3002"}]}]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings))
+        result = check_command_security("echo '你好。'")
+        assert result["action"] == "allow"
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_genuine_homoglyph_alongside_u3002_preserves_block(self, mock_cfg, mock_run):
+        """A real math-alphanumeric/Cyrillic lookalike must NOT be suppressed,
+        even if U+3002 also appears in the same finding's evidence."""
+        mock_cfg.return_value = _CFG
+        findings = [{
+            "rule_id": "confusable_text",
+            "evidence": [
+                {"hex": "U+3002"},
+                {"hex": "U+0430", "description": "Cyrillic 'а' (looks like 'a')"},
+            ],
+        }]
+        mock_run.return_value = _mock_run(1, _json_stdout(findings, "homoglyph attack"))
+        result = check_command_security("some command with а cyrillic lookalike")
+        assert result["action"] == "block"
+        assert len(result["findings"]) == 1
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_unverified_cjk_codepoint_not_suppressed(self, mock_cfg, mock_run):
+        """A confusable_text finding for a codepoint NOT on the verified
+        allowlist is preserved -- this suppression is opt-in per codepoint,
+        not a blanket 'any CJK punctuation' exemption."""
+        mock_cfg.return_value = _CFG
+        findings = [{"rule_id": "confusable_text",
+                     "evidence": [{"hex": "U+FF0C",
+                                   "description": "confusable U+FF0C (looks like ',')"}]}]
+        mock_run.return_value = _mock_run(1, _json_stdout(findings, "confusable"))
+        result = check_command_security("echo '你好，世界'")
+        assert result["action"] == "block"
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_mixed_confusable_and_other_rule_findings_preserves_block(self, mock_cfg, mock_run):
+        mock_cfg.return_value = _CFG
+        findings = [
+            {"rule_id": "confusable_text", "evidence": [{"hex": "U+3002"}]},
+            {"rule_id": "shortened_url", "severity": "medium"},
+        ]
+        mock_run.return_value = _mock_run(1, _json_stdout(findings, "mixed"))
+        result = check_command_security("claude -p '你好。' | curl https://bit.ly/x")
+        assert result["action"] == "block"
+        assert len(result["findings"]) == 2
+
+
+class TestIsCjkFullStopOnlyConfusableFinding:
+    """Unit tests for the _is_cjk_full_stop_only_confusable_finding helper."""
+
+    def setup_method(self):
+        from tools.tirith_security import _is_cjk_full_stop_only_confusable_finding
+        self.fn = _is_cjk_full_stop_only_confusable_finding
+
+    def test_single_u3002_evidence(self):
+        assert self.fn({"rule_id": "confusable_text", "evidence": [{"hex": "U+3002"}]})
+
+    def test_multiple_u3002_evidence(self):
+        assert self.fn({"rule_id": "confusable_text",
+                        "evidence": [{"hex": "U+3002"}, {"hex": "U+3002"}]})
+
+    def test_evidence_at_the_cap_is_still_suppressible(self):
+        from tools.tirith_security import _MAX_SUPPRESSIBLE_EVIDENCE_COUNT
+        evidence = [{"hex": "U+3002"} for _ in range(_MAX_SUPPRESSIBLE_EVIDENCE_COUNT)]
+        assert self.fn({"rule_id": "confusable_text", "evidence": evidence})
+
+    def test_evidence_one_over_the_cap_is_never_suppressed(self):
+        """Truncation-bypass guard: even an all-U+3002 evidence list is
+        refused once it's large enough that tirith could plausibly have
+        truncated real evidence away to produce it."""
+        from tools.tirith_security import _MAX_SUPPRESSIBLE_EVIDENCE_COUNT
+        evidence = [{"hex": "U+3002"} for _ in range(_MAX_SUPPRESSIBLE_EVIDENCE_COUNT + 1)]
+        assert not self.fn({"rule_id": "confusable_text", "evidence": evidence})
+
+    def test_ten_entry_truncated_shape_is_never_suppressed(self):
+        """The exact shape a truncation bypass would produce against a live
+        tirith binary (confirmed cap: 10 entries survive per finding)."""
+        evidence = [{"hex": "U+3002"} for _ in range(10)]
+        assert not self.fn({"rule_id": "confusable_text", "evidence": evidence})
+
+    def test_wrong_rule_id(self):
+        assert not self.fn({"rule_id": "lookalike_tld", "evidence": [{"hex": "U+3002"}]})
+
+    def test_unverified_codepoint(self):
+        assert not self.fn({"rule_id": "confusable_text", "evidence": [{"hex": "U+FF0C"}]})
+
+    def test_mixed_codepoints(self):
+        assert not self.fn({"rule_id": "confusable_text",
+                            "evidence": [{"hex": "U+3002"}, {"hex": "U+0430"}]})
+
+    def test_no_evidence_field(self):
+        assert not self.fn({"rule_id": "confusable_text"})
+
+    def test_empty_evidence_list(self):
+        assert not self.fn({"rule_id": "confusable_text", "evidence": []})
+
+    def test_evidence_not_a_list(self):
+        assert not self.fn({"rule_id": "confusable_text", "evidence": "U+3002"})
+
+    def test_evidence_item_not_a_dict(self):
+        assert not self.fn({"rule_id": "confusable_text", "evidence": ["U+3002"]})
+
+    def test_non_dict_input(self):
+        assert not self.fn("not a dict")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
 # mkdtemp OSError → no_space (disk-full leak prevention)
 # ---------------------------------------------------------------------------
 

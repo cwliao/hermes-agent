@@ -8,6 +8,7 @@ from hermes_cli.kanban_swarm import (
     MULTI_AGENT_LANE_IDS,
     SwarmWorkerSpec,
     _default_worker_max_runtime_seconds,
+    _swarm_context,
     create_swarm,
     extract_contract,
     latest_blackboard,
@@ -16,6 +17,20 @@ from hermes_cli.kanban_swarm import (
     validate_completion,
 )
 import pytest
+
+
+def test_swarm_context_names_kanban_comment_and_rules_out_observed_failure_modes():
+    """SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001 retest (2026-08-21):
+    two independent lanes each burned most of their runtime budget trying
+    to post a result via hand-written SQL (bash quoting bug) or
+    execute_code (blocked outright), instead of the kanban_comment tool
+    they already had. Lock the fix in: the swarm context must name the
+    tool explicitly and rule out both observed failure modes."""
+    context = _swarm_context("t_root123", "test goal")
+    assert "kanban_comment" in context
+    assert 'task_id="t_root123"' in context
+    assert "execute_code" in context
+    assert "sqlite3" in context
 
 
 def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path):

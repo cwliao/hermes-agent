@@ -43,7 +43,6 @@ LANE_SKILL_IDS = {
     "grok": "grok",
     "agy": "antigravity-cli",
 }
-DEFAULT_WORKER_MAX_RUNTIME_SECONDS = 120
 # SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001: a live 4-lane re-run
 # (docs/plans/2026-08-20-swarm-claude-grok-lane-timeout-recurrence-001.md,
 # "Resolution" section) showed every external-CLI lane (claude/grok/agy)
@@ -55,9 +54,24 @@ DEFAULT_WORKER_MAX_RUNTIME_SECONDS = 120
 # path handling, output polling -- see the companion agy ticket's own
 # transcript for a concrete example). Bounded like DEFAULT_MAX_IN_PROGRESS's
 # own comment already says of its value ("nothing establishes that three
-# beats two or four") -- 600s is 5x DEFAULT_WORKER_MAX_RUNTIME_SECONDS, not
+# beats two or four") -- 600s is 2x DEFAULT_WORKER_MAX_RUNTIME_SECONDS, not
 # a value derived from a successful external-lane run's actual step count
 # (no such run was observed in that investigation).
+#
+# DEFAULT_WORKER_MAX_RUNTIME_SECONDS itself was raised from 120 to 300 on
+# 2026-08-21 (SWARM-LANE-TIMEOUT-RETEST-002, same day as the Tirith/
+# blackboard fixes) after real-world Telegram-triggered swarms kept
+# hitting the 120s ceiling on the native_hermes lane specifically --
+# unrelated to the two bugs those fixes addressed. native_hermes has no
+# external-CLI subprocess overhead, so it doesn't need the external
+# lanes' full 600s, but 120s was too tight for anything beyond the
+# original test's clean 158s run: real runs under 3-way concurrent
+# dispatch (contention this whole investigation established is real and
+# affects every lane's per-step latency) needed up to ~220s+. 300s
+# leaves headroom above every observed native_hermes run without giving
+# it the same ceiling as lanes that need it for a structurally different
+# reason (more steps, not slower steps).
+DEFAULT_WORKER_MAX_RUNTIME_SECONDS = 300
 DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS = 600
 DEFAULT_GOAL_MAX_TURNS = 5
 

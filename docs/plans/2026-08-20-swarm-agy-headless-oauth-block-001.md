@@ -202,11 +202,14 @@ FROM messages WHERE session_id='20260820_214527_170e5c' ORDER BY timestamp;"
    ran; bash's `cd ... && agy ...` short-circuited on the failed `cd`.
 2. Second attempt, corrected path, `agy --dangerously-skip-permissions -p
    '...' --print-timeout 15m`: **`agy` itself printed a real Google OAuth
-   authorization URL** (`https://accounts.google.com/o/oauth2/auth?...`)
-   to stdout and exited with code 1. Captured verbatim in the `process`
-   tool's persisted result.
+   authorization URL** (`https://accounts.google.com/o/oauth2/auth?...`),
+   then genuinely waited ("Waiting for authentication (timeout 60s)...")
+   and exited with code 1 after that wait elapsed
+   ("Error: authentication timed out."). Captured verbatim in the
+   `process` tool's persisted result -- see the full excerpt below.
 3. Third attempt, `--sandbox` variant: same real "Authentication
-   required" response from `agy`, same OAuth URL, exit code 1.
+   required" response from `agy`, same OAuth URL, same 60s wait, same
+   timeout, exit code 1.
 
 **Verdict: NOT fabrication.** The worker's core claim -- that `agy`
 required interactive OAuth and could not proceed headless -- is
@@ -215,14 +218,30 @@ transcript, not invented by the worker's model (`ornith:35b`). The
 `fabrication-guard` mechanism (PR #68) does not need extending to cover
 this `kanban_block` reason, because there was nothing to catch here.
 
-One real inaccuracy in the worker's self-report, worth naming precisely:
-its `kanban_block` reason and comment both said the attempts "timed out
-after 60s waiting for browser auth URL to be manually entered." The
-transcript shows neither attempt hung or timed out -- both exited
-quickly and cleanly with a real OAuth-required response. The worker
-conflated "agy asked me to authenticate, so I'm blocked" with "agy timed
-out," which is a real but minor self-report inaccuracy, not evidence of
-fabrication of the underlying symptom.
+**Correction (caught by independent cross-review, not by the original
+pass of this investigation):** an earlier draft of this section claimed
+the worker's "timed out after 60s" framing was a minor inaccuracy,
+reasoning that the transcript showed a clean exit rather than a hang.
+That claim was itself wrong -- it was produced from a truncated read of
+the persisted `content` column (`substr(content, 1, 500)`, which cut off
+before the relevant text). The **full**, untruncated `content` for both
+`process` tool results (message ids 5262 and 5290) ends with:
+
+```
+Waiting for authentication (timeout 60s)...
+Or, paste the authorization code here and press Enter:
+Error: authentication timed out.
+Error: authentication failed or timed out
+```
+
+`agy` itself reports a genuine 60-second authentication wait that timed
+out, on both attempts. **The worker's original `kanban_block` reason and
+comment were accurate in every respect that could be checked** -- not
+just "not fabricated" but not even mildly imprecise. This is recorded as
+its own lesson: verify a transcript claim against the *full* field
+content before drawing a conclusion from it, especially when quoting
+that content as the basis for correcting someone else's (in this case, a
+worker model's) self-report.
 
 **Root cause, now separately confirmed:** the stored OAuth token
 (`~/.gemini/antigravity-cli/antigravity-oauth-token`) was stale at the

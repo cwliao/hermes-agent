@@ -1454,6 +1454,36 @@ class TestCjkFullStopConfusableSuppression:
 
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
+    def test_truncated_evidence_hiding_a_real_homoglyph_is_never_suppressed(
+        self, mock_cfg, mock_run
+    ):
+        """Regression test for a real, independently-verified bypass caught
+        in cross-review before this suppression ever merged: tirith's own
+        `evidence` array truncates at a fixed cap per finding (confirmed at
+        10 entries against a live tirith 0.3.1 binary, ordered by byte
+        offset). A command with ten-plus ordinary CJK full stops ahead of a
+        genuine homoglyph attack (e.g. Cyrillic U+0430 in a lookalike
+        domain) can report evidence that LOOKS entirely benign -- all
+        U+3002 -- while tirith silently dropped the actual attack evidence
+        past the cap. This is exactly that shape: 10 U+3002 entries and
+        nothing else reported, standing in for a finding that in reality
+        also flagged something tirith didn't have room to report. Must
+        NOT be suppressed -- the reported evidence count alone (10) is
+        enough to refuse suppression, regardless of what it contains."""
+        mock_cfg.return_value = _CFG
+        findings = [{
+            "rule_id": "confusable_text", "severity": "HIGH",
+            "evidence": [{"hex": "U+3002"} for _ in range(10)],
+        }]
+        mock_run.return_value = _mock_run(1, _json_stdout(findings, "confusable"))
+        result = check_command_security(
+            "claude -p '你好。你好。你好。你好。你好。你好。你好。你好。你好。你好。аpple.com'"
+        )
+        assert result["action"] == "block"
+        assert len(result["findings"]) == 1
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
     def test_block_with_only_u3002_evidence_downgraded_to_allow(self, mock_cfg, mock_run):
         """The exact shape observed live: action=block, single confusable_text
         finding, two U+3002 evidence entries and nothing else."""
@@ -1544,6 +1574,25 @@ class TestIsCjkFullStopOnlyConfusableFinding:
     def test_multiple_u3002_evidence(self):
         assert self.fn({"rule_id": "confusable_text",
                         "evidence": [{"hex": "U+3002"}, {"hex": "U+3002"}]})
+
+    def test_evidence_at_the_cap_is_still_suppressible(self):
+        from tools.tirith_security import _MAX_SUPPRESSIBLE_EVIDENCE_COUNT
+        evidence = [{"hex": "U+3002"} for _ in range(_MAX_SUPPRESSIBLE_EVIDENCE_COUNT)]
+        assert self.fn({"rule_id": "confusable_text", "evidence": evidence})
+
+    def test_evidence_one_over_the_cap_is_never_suppressed(self):
+        """Truncation-bypass guard: even an all-U+3002 evidence list is
+        refused once it's large enough that tirith could plausibly have
+        truncated real evidence away to produce it."""
+        from tools.tirith_security import _MAX_SUPPRESSIBLE_EVIDENCE_COUNT
+        evidence = [{"hex": "U+3002"} for _ in range(_MAX_SUPPRESSIBLE_EVIDENCE_COUNT + 1)]
+        assert not self.fn({"rule_id": "confusable_text", "evidence": evidence})
+
+    def test_ten_entry_truncated_shape_is_never_suppressed(self):
+        """The exact shape a truncation bypass would produce against a live
+        tirith binary (confirmed cap: 10 entries survive per finding)."""
+        evidence = [{"hex": "U+3002"} for _ in range(10)]
+        assert not self.fn({"rule_id": "confusable_text", "evidence": evidence})
 
     def test_wrong_rule_id(self):
         assert not self.fn({"rule_id": "lookalike_tld", "evidence": [{"hex": "U+3002"}]})

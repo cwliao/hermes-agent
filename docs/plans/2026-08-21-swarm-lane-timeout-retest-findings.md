@@ -94,6 +94,36 @@ found several other common marks (fullwidth comma/colon/semicolon/
 exclamation/question mark) did NOT reproduce the flag in isolated
 tests, so there was no evidence to add them.
 
+**Correction, found by cross-review before this ever merged (not by
+this investigation's own first pass):** the first version of this fix
+checked only whether every *reported* evidence entry was U+3002, with
+no bound on how many entries there were. Independently reproduced
+against a live `tirith 0.3.1` binary: `tirith`'s own JSON output
+truncates a finding's `evidence` array at a fixed cap -- confirmed at
+exactly 10 entries, ordered by byte offset, with no truncation flag
+anywhere in the output to detect this happened. A command containing
+ten-plus ordinary CJK full stops *before* a genuine homoglyph attack
+(e.g. Cyrillic `U+0430` in a lookalike domain like `аpple.com`) reports
+evidence that looks entirely benign -- ten `U+3002` entries -- while
+the real attack evidence is silently dropped past the cap, and the
+original suppression would have downgraded the whole finding,
+including the genuine attack, to `allow`. Confirmed exploitable
+end-to-end against the live binary before fixing, and confirmed closed
+afterward (same live binary, same exploit command → `block`; the real
+production false-positive command → still `allow`).
+
+**Fixed** by adding `_MAX_SUPPRESSIBLE_EVIDENCE_COUNT = 3`: the
+suppression now also requires the reported evidence count to be safely
+below any observed truncation threshold (measured cutoff: truncation
+first appears at 11 total entries; exactly 10 still reports the
+genuine attack). Below that count, `tirith` cannot have dropped
+anything, so "all reported evidence is U+3002" is trustworthy; at or
+above it, the suppression is refused regardless of what the reported
+evidence contains. The threshold is set well under the measured
+cutoff, not tuned to sit just below it, so this stays safe even if a
+future `tirith` version's actual cap differs from what was measured
+here.
+
 ### Finding 2: workers don't know how to post to the shared blackboard
 
 Both `claude`'s and `grok`'s transcripts show the SAME independent
@@ -156,7 +186,8 @@ otherwise-successful runs.
   `TestCjkFullStopConfusableSuppression`,
   `TestIsCjkFullStopOnlyConfusableFinding`) and
   `tests/hermes_cli/test_kanban_swarm.py` (1 new test locking in the
-  `kanban_comment` instruction text). 608 tests pass across
+  `kanban_comment` instruction text, plus a regression test for the
+  truncation-bypass correction above). 612 tests pass across
   `test_tirith_security.py`, `test_kanban_swarm.py`,
   `test_kanban_cli.py`, `test_tools/test_kanban_tools.py`, and
   `tests/tools/test_approval.py` (the last confirming no regression in

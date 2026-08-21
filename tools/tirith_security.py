@@ -905,14 +905,43 @@ def _is_app_tld_finding(finding: dict) -> bool:
 # rule flags -- do not guess. See _is_cjk_full_stop_only_confusable_finding.
 _BENIGN_CJK_CONFUSABLE_CODEPOINTS = frozenset({"U+3002"})  # IDEOGRAPHIC FULL STOP
 
+# tirith's own `evidence` array is truncated per finding -- confirmed
+# directly against a live tirith 0.3.1 binary: exactly 10 entries survive,
+# ordered by byte offset, when more than 10 confusable characters are
+# present in one finding; entries past the cap (including a genuine
+# Cyrillic/math-alphanumeric homoglyph placed after ten ordinary CJK full
+# stops) are silently dropped, with no truncation flag anywhere in
+# tirith's JSON output to detect this from the caller side. An earlier
+# version of this suppression checked only "is every *reported* evidence
+# entry U+3002", which a live security review caught as exploitable: a
+# command containing ten-plus CJK full stops ahead of a real homoglyph
+# attack would report evidence that looked entirely benign while the
+# attack evidence was truncated away, and the whole finding -- including
+# the genuine attack -- would be wrongly downgraded to allow.
+#
+# Fix: only ever suppress when the reported evidence count is safely
+# below any observed truncation threshold. Below that count, tirith
+# cannot have dropped anything (truncation only activates once the true
+# count exceeds the cap), so "all reported evidence is benign" is
+# trustworthy. Set well under the observed cutoff (confirmed truncation
+# at 11+ total entries; 10 exactly still reports the genuine attack) so
+# this stays safe even if a future tirith version's actual cap differs
+# from what was measured here -- this is deliberately NOT tuned to sit
+# just under the measured cap.
+_MAX_SUPPRESSIBLE_EVIDENCE_COUNT = 3
+
 
 def _is_cjk_full_stop_only_confusable_finding(finding: dict) -> bool:
     """Return True if this is a confusable_text finding whose entire evidence
-    set is drawn from :data:`_BENIGN_CJK_CONFUSABLE_CODEPOINTS`.
+    set is drawn from :data:`_BENIGN_CJK_CONFUSABLE_CODEPOINTS`, AND small
+    enough that tirith's own per-finding evidence truncation could not have
+    hidden a genuine, more severe piece of evidence (see
+    :data:`_MAX_SUPPRESSIBLE_EVIDENCE_COUNT`).
 
     Deliberately narrow: a finding with even one piece of evidence outside
-    this allowlist (a genuine math-alphanumeric/Cyrillic/Greek lookalike,
-    or a CJK punctuation mark not yet verified) is NOT suppressed.
+    the allowlist (a genuine math-alphanumeric/Cyrillic/Greek lookalike,
+    or a CJK punctuation mark not yet verified), or with an evidence count
+    at or above the truncation-safety cutoff, is NOT suppressed.
     """
     if not isinstance(finding, dict):
         return False
@@ -920,6 +949,8 @@ def _is_cjk_full_stop_only_confusable_finding(finding: dict) -> bool:
         return False
     evidence = finding.get("evidence")
     if not evidence or not isinstance(evidence, list):
+        return False
+    if len(evidence) > _MAX_SUPPRESSIBLE_EVIDENCE_COUNT:
         return False
     for item in evidence:
         if not isinstance(item, dict):

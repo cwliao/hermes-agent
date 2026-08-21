@@ -1192,13 +1192,16 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
         # pinned down. Rather than keep chasing an intermittent,
         # hard-to-reproduce cause, make this function's own return
         # value trustworthy regardless of what's dropping the write:
-        # read back what was just written, in the same transaction,
-        # before reporting success. This can never mask a fresh bug in
-        # add_notify_sub itself (a genuine write failure now correctly
-        # reports subscribed=false, letting the caller fall back to an
-        # explicit kanban_notify-subscribe or polling, per this
-        # function's own documented contract) and costs one indexed
-        # SELECT on an already-open write transaction.
+        # read back what was just written before reporting success.
+        # add_notify_sub's own write_txn already commits before
+        # returning, so this is a plain read-after-commit on the same
+        # connection (not a peek inside a still-open transaction) --
+        # SQLite guarantees that sees the just-committed row. This can
+        # never mask a fresh bug in add_notify_sub itself (a genuine
+        # write failure now correctly reports subscribed=false, letting
+        # the caller fall back to an explicit kanban_notify-subscribe or
+        # polling, per this function's own documented contract) and
+        # costs one cheap, indexed SELECT.
         confirmed = any(
             row.get("platform") == platform and row.get("chat_id") == chat_id
             for row in _kb.list_notify_subs(conn, task_id)

@@ -421,6 +421,77 @@ def test_excuse_blocked_workers_below_quorum_ignores_unrelated_blocked_tasks(tmp
         conn.close()
 
 
+def test_excuse_blocked_workers_below_quorum_never_touches_sticky_block(tmp_path):
+    """A worker/operator-initiated kanban_block (sticky -- caught by
+    independent cross-review before merge) must never be auto-excused,
+    even when siblings already satisfy the quorum. Only the dispatcher's
+    own circuit-breaker gave_up path is eligible."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = _make_quorum_swarm(conn, worker_quorum=3)
+        by_lane = {
+            extract_contract(kb.get_task(conn, tid).body)["expected_lane_id"]: tid
+            for tid in created.worker_ids
+        }
+        for lane in ("native_hermes", "claude", "grok"):
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (by_lane[lane],))
+        # agy is still running and a worker deliberately asks for human
+        # review -- block_task requires running/ready, so set that first.
+        conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (by_lane["agy"],))
+        conn.commit()
+        assert kb.block_task(conn, by_lane["agy"], reason="need human input", kind="needs_input")
+        assert kb.get_task(conn, by_lane["agy"]).status == "blocked"
+
+        excused = excuse_blocked_workers_below_quorum(conn)
+
+        assert excused == 0
+        assert kb.get_task(conn, by_lane["agy"]).status == "blocked"
+        assert kb.get_task(conn, created.verifier_id).status == "todo"
+    finally:
+        conn.close()
+
+
+def test_excuse_blocked_workers_below_quorum_skips_task_no_longer_blocked(tmp_path):
+    """Defense-in-depth: if the task transitioned away from 'blocked'
+    between the initial scan and the archive attempt (e.g. a concurrent
+    kanban unblock), it must not be archived anyway."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = _make_quorum_swarm(conn, worker_quorum=3)
+        by_lane = {
+            extract_contract(kb.get_task(conn, tid).body)["expected_lane_id"]: tid
+            for tid in created.worker_ids
+        }
+        for lane in ("native_hermes", "claude", "grok"):
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (by_lane[lane],))
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (by_lane["agy"],))
+        conn.commit()
+
+        # Simulate a concurrent kanban unblock landing between the initial
+        # scan and this function's own pre-archive re-check by making the
+        # (already-called-per-row, always-False-here) sticky-block lookup
+        # revive the task as a side effect -- it runs earlier in the same
+        # iteration than the re-check being tested.
+        import hermes_cli.kanban_swarm as ks_module
+        original = ks_module.kb._has_sticky_block
+
+        def _sticky_check_that_revives(conn, task_id):
+            if task_id == by_lane["agy"]:
+                conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (task_id,))
+            return original(conn, task_id)
+
+        ks_module.kb._has_sticky_block = _sticky_check_that_revives
+        try:
+            excused = excuse_blocked_workers_below_quorum(conn)
+        finally:
+            ks_module.kb._has_sticky_block = original
+
+        assert excused == 0
+        assert kb.get_task(conn, by_lane["agy"]).status == "ready"
+    finally:
+        conn.close()
+
+
 def test_lane_bound_swarm_allows_two_of_three_external_lanes(tmp_path):
     conn = kb.connect(tmp_path / "kanban.db")
     try:

@@ -602,6 +602,28 @@ def excuse_blocked_workers_below_quorum(conn: sqlite3.Connection) -> int:
     ``[swarm:contract]`` line can ever be selected, and most boards
     have zero of those at any given moment.
 
+    **Never touches a sticky (worker/operator-initiated ``kanban_block``)
+    block** -- caught by independent cross-review before this ever
+    merged: a first version selected on ``status = 'blocked'`` alone,
+    which is exactly what the dispatcher's own circuit breaker
+    (``_record_task_failure``, emits a ``"gave_up"`` event) AND a
+    deliberate worker/operator ``kanban_block`` call (``block_task``,
+    emits a ``"blocked"`` event) both set -- there was nothing
+    distinguishing "permanently gave up, safe to excuse" from
+    "deliberately paused for human review, must stay put until an
+    explicit unblock." Reuses ``kb._has_sticky_block``, the exact same
+    primitive ``recompute_ready`` already relies on for this identical
+    distinction (see its own docstring, case 1) -- so this function and
+    ``recompute_ready`` can never disagree about what counts as sticky.
+
+    Also re-checks the task is still ``blocked`` immediately before
+    archiving (defense in depth against a human running
+    ``kanban unblock`` concurrently with this call, between the initial
+    snapshot query and the archive; SQLite's write-txn locking under
+    this repo's single-instance dispatcher makes the actual window
+    negligible, but the check is cheap and removes the TOCTOU
+    entirely rather than relying on that alone).
+
     Returns the number of tasks archived this call.
     """
     excused = 0
@@ -624,6 +646,9 @@ def excuse_blocked_workers_below_quorum(conn: sqlite3.Connection) -> int:
         worker_ids = [str(w) for w in topology.get("worker_ids", []) if w]
         if row["id"] not in worker_ids:
             continue
+        if kb._has_sticky_block(conn, row["id"]):
+            # Deliberately paused for human review -- never auto-excuse.
+            continue
         done_count = 0
         for worker_id in worker_ids:
             if worker_id == row["id"]:
@@ -634,6 +659,11 @@ def excuse_blocked_workers_below_quorum(conn: sqlite3.Connection) -> int:
             if sibling is not None and sibling["status"] == "done":
                 done_count += 1
         if done_count >= quorum:
+            still_blocked = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (row["id"],)
+            ).fetchone()
+            if still_blocked is None or still_blocked["status"] != "blocked":
+                continue
             if kb.archive_task(conn, row["id"]):
                 excused += 1
     return excused

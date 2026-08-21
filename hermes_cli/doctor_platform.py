@@ -240,6 +240,11 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
                       ("Systemd linger disabled", "(gateway may stop after logout)")):
         check_info("Run: sudo loginctl enable-linger $USER")
         issues.append("Enable linger for the gateway user service: sudo loginctl enable-linger $USER")
+    try:
+        from hermes_cli.doctor import _check_gateway_release_drift
+        _check_gateway_release_drift(issues)
+    except Exception:
+        pass
 
 
 _TCC_CDHASH_DETAIL = (

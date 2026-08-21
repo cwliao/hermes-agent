@@ -290,6 +290,43 @@ def test_doctor_reports_vercel_backend_diagnostics(monkeypatch, tmp_path):
     assert "snapshot filesystem only" in out
 
 
+
+def test_check_gateway_service_linger_warns_when_disabled(monkeypatch, tmp_path, capsys):
+    unit_path = tmp_path / "hermes-gateway.service"
+    unit_path.write_text("[Unit]\n")
+
+    monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
+    monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda: unit_path)
+    monkeypatch.setattr(gateway_cli, "get_systemd_linger_status", lambda: (False, ""))
+    # Not this test's concern — see test_doctor_gateway_release_drift.py.
+    monkeypatch.setattr(gateway_cli, "_probe_systemd_service_running", lambda: (False, False))
+
+    issues = []
+    doctor._check_gateway_service_linger(issues)
+
+    out = capsys.readouterr().out
+    assert "Gateway Service" in out
+    assert "Systemd linger disabled" in out
+    assert "loginctl enable-linger" in out
+    assert issues == [
+        "Enable linger for the gateway user service: sudo loginctl enable-linger $USER"
+    ]
+
+
+def test_check_gateway_service_linger_skips_when_service_not_installed(monkeypatch, tmp_path, capsys):
+    unit_path = tmp_path / "missing.service"
+
+    monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
+    monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda: unit_path)
+
+    issues = []
+    doctor._check_gateway_service_linger(issues)
+
+    out = capsys.readouterr().out
+    assert out == ""
+    assert issues == []
+
+
 # ── Memory provider section (doctor should only check the *active* provider) ──
 
 

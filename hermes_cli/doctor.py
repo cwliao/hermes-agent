@@ -5,7 +5,9 @@ Check bodies live in the ``doctor_*`` siblings.
 """
 
 import os
+import subprocess
 import sys
+from pathlib import Path
 
 from hermes_cli.config import get_env_path, get_hermes_home, get_project_root
 from hermes_cli.env_loader import load_hermes_dotenv
@@ -20,7 +22,9 @@ _env_path = get_env_path()
 load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
 
 from hermes_cli.colors import Colors, color
-from hermes_cli.doctor_report import Finding, _section, check_bool, check_info, doctor_check, warn_on_error
+from hermes_cli.doctor_report import (
+    Finding, _section, check_bool, check_info, check_ok, check_warn, doctor_check, warn_on_error,
+)
 from hermes_cli.doctor_connectivity import _has_healthy_oauth_fallback_for_apikey_provider, build_probes, run_probes
 from hermes_cli.doctor_tools import _safe_which
 
@@ -36,6 +40,7 @@ from hermes_cli.doctor_platform import (
     _check_certificates,
     _check_command_installation,
     _check_gateway_supervision,
+    _check_gateway_service_linger,
     _check_python_environment,
     _check_required_packages,
     _check_security_advisories,
@@ -182,6 +187,67 @@ def run_doctor(args):
         from hermes_cli.doctor_live import maybe_run_live_checks
         maybe_run_live_checks(args, total.manual_issues)
     _print_summary(should_fix, total)
+
+
+def _resolve_cli_release_sha() -> tuple[str | None, bool]:
+    """Return the running CLI's release/checkout SHA and dirty state."""
+    try:
+        from hermes_cli.release_markers import CANONICAL_RELEASE_MARKER
+    except Exception:
+        return None, False
+    marker = PROJECT_ROOT / CANONICAL_RELEASE_MARKER
+    if marker.is_file():
+        try:
+            return marker.read_text(encoding="utf-8").strip().lower() or None, False
+        except OSError:
+            pass
+    if not (PROJECT_ROOT / ".git").exists():
+        return None, False
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.strip().lower()
+        dirty = bool(subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain"],
+            check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.strip())
+        return head or None, dirty
+    except Exception:
+        return None, False
+
+
+def _check_gateway_release_drift(issues: list[str]) -> None:
+    """Warn when the CLI checkout differs from the live gateway release."""
+    try:
+        from hermes_cli.gateway import _probe_systemd_service_running, _read_systemd_unit_environment
+    except Exception:
+        return
+    _, running = _probe_systemd_service_running()
+    if not running:
+        return
+    gateway_sha = (_read_systemd_unit_environment().get("HERMES_RELEASE_SHA") or "").strip().lower()
+    if not gateway_sha:
+        return
+    cli_sha, cli_dirty = _resolve_cli_release_sha()
+    if cli_sha is None:
+        check_info(f"Gateway daemon release: {gateway_sha[:10]} (CLI code root has no release identity)")
+        return
+    if cli_dirty:
+        check_warn("Skipping CLI/gateway release comparison", "(this checkout has uncommitted changes)")
+        return
+    if cli_sha == gateway_sha:
+        check_ok("CLI and gateway daemon are on the same release", f"({cli_sha[:10]})")
+        return
+    check_warn(
+        "CLI code differs from the live gateway daemon's pinned release",
+        f"(CLI={cli_sha[:10]}, daemon={gateway_sha[:10]})",
+    )
+    issues.append(
+        "hermes CLI and hermes-gateway.service are running different code "
+        f"(CLI={cli_sha[:10]}, daemon={gateway_sha[:10]}). Redeploy the gateway "
+        "or check out the daemon's commit before trusting CLI diagnostics."
+    )
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

@@ -251,7 +251,76 @@ def _completion_requirements(contract: dict[str, Any]) -> str:
     lines.append(
         "Send these as completion metadata. Do not complete with a subset."
     )
+    lines.append("")
+    lines.append(_completion_call_example(contract))
     return "\n".join(lines)
+
+
+def _completion_call_example(contract: dict[str, Any]) -> str:
+    """A literal, copy-pasteable kanban_complete call shape for this role.
+
+    SWARM-LANE-TIMEOUT-RETEST-002 (2026-08-21): a real synthesizer got
+    stuck in a loop, failing kanban_complete 19 times over ~10 minutes
+    with a different missing field each try (role, result_present,
+    outcome, root_id -- never all at once), then self-blocked claiming
+    "the kernel validator is buggy, developer must fix it." Independently
+    disproven: a correctly-shaped call passes validate_completion cleanly
+    on the very same task. The contract's field list above was accurate
+    but abstract ("field = value" lines) -- it never showed which fields
+    are top-level tool-call parameters (task_id, result, summary) versus
+    which belong nested inside metadata, which is the exact ambiguity a
+    weak model kept tripping on. This renders one concrete, directly
+    copy-pasteable example of the actual tool call, removing that
+    ambiguity outright instead of asking the model to infer it.
+    """
+    role = contract.get("role")
+    root_id = contract.get("root_id")
+    if role == "worker":
+        metadata = {
+            "role": "worker",
+            "root_id": root_id,
+            "lane_id": contract.get("expected_lane_id"),
+            "preflight_skill_id": contract.get("preflight_skill_id") or "",
+            "outcome": "completed",
+            "verified_clean": True,
+        }
+        example = {
+            "task_id": "<this task's id>",
+            "summary": "<1-3 sentence handoff>",
+            "metadata": metadata,
+        }
+    elif role == "verifier":
+        expected = contract.get("expected_lane_count")
+        metadata = {
+            "role": "verifier",
+            "root_id": root_id,
+            "gate": "pass",
+            "expected_lane_count": expected,
+            "verified_lane_count": expected,
+        }
+        example = {
+            "task_id": "<this task's id>",
+            "summary": "<1-3 sentence handoff>",
+            "metadata": metadata,
+        }
+    else:  # synthesizer
+        metadata = {
+            "role": "synthesizer",
+            "root_id": root_id,
+            "outcome": "completed",
+            "result_present": True,
+        }
+        example = {
+            "task_id": "<this task's id>",
+            "result": "<your final, non-empty deliverable text>",
+            "metadata": metadata,
+        }
+    return (
+        "Example call (task_id/result/summary are top-level kanban_complete "
+        "parameters; everything else goes inside metadata):\n  kanban_complete("
+        + json.dumps(example, ensure_ascii=False, sort_keys=False)
+        + ")"
+    )
 
 
 def extract_contract(body: Optional[str]) -> Optional[dict[str, Any]]:

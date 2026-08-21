@@ -1176,6 +1176,45 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             thread_id=thread_id, user_id=user_id,
             notifier_profile=notifier_profile,
         )
+        # SWARM-LANE-TIMEOUT-RETEST-002-LEFTOVERS: a real swarm's
+        # kanban_swarm call reported {"subscribed": true} for its
+        # synthesizer, yet kanban_notify_subs held zero rows for that
+        # task minutes later -- confirmed against the live board, not a
+        # query mistake. add_notify_sub's own write mechanism was
+        # separately verified solid (a direct call + fresh reconnect
+        # both saw the row); the delete-cascade paths
+        # (delete_task/delete_archived_task) don't apply (wrong
+        # task_id scope, and neither was invoked on this task); the
+        # sequential tool-execution path (the common single-call case)
+        # runs on the same thread that already bound the session
+        # ContextVars, so a thread-pool context-loss theory doesn't
+        # explain the common case either. The exact root cause was not
+        # pinned down. Rather than keep chasing an intermittent,
+        # hard-to-reproduce cause, make this function's own return
+        # value trustworthy regardless of what's dropping the write:
+        # read back what was just written before reporting success.
+        # add_notify_sub's own write_txn already commits before
+        # returning, so this is a plain read-after-commit on the same
+        # connection (not a peek inside a still-open transaction) --
+        # SQLite guarantees that sees the just-committed row. This can
+        # never mask a fresh bug in add_notify_sub itself (a genuine
+        # write failure now correctly reports subscribed=false, letting
+        # the caller fall back to an explicit kanban_notify-subscribe or
+        # polling, per this function's own documented contract) and
+        # costs one cheap, indexed SELECT.
+        confirmed = any(
+            row.get("platform") == platform and row.get("chat_id") == chat_id
+            for row in _kb.list_notify_subs(conn, task_id)
+        )
+        if not confirmed:
+            logger.warning(
+                "_maybe_auto_subscribe: add_notify_sub reported no error but "
+                "the row is not readable back afterward (task_id=%r platform=%r "
+                "chat_id_set=%r) -- reporting subscribed=false so the caller "
+                "can fall back instead of silently losing delivery",
+                task_id, platform, bool(chat_id),
+            )
+            return False
         return True
     except Exception as _exc:
         logger.warning(

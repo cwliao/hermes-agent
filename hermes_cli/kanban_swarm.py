@@ -44,7 +44,31 @@ LANE_SKILL_IDS = {
     "agy": "antigravity-cli",
 }
 DEFAULT_WORKER_MAX_RUNTIME_SECONDS = 120
+# SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001: a live 4-lane re-run
+# (docs/plans/2026-08-20-swarm-claude-grok-lane-timeout-recurrence-001.md,
+# "Resolution" section) showed every external-CLI lane (claude/grok/agy)
+# hitting a 300s ceiling on both attempts under 3-way concurrent dispatch,
+# while native_hermes (in-process, no external CLI subprocess) finished
+# comfortably in 158s -- not because external lanes are slower per step
+# (heartbeat gaps were similar across all lanes, ~60-90s), but because they
+# need structurally more steps for equivalent work (subprocess spawn, cd/
+# path handling, output polling -- see the companion agy ticket's own
+# transcript for a concrete example). Bounded like DEFAULT_MAX_IN_PROGRESS's
+# own comment already says of its value ("nothing establishes that three
+# beats two or four") -- 600s is 5x DEFAULT_WORKER_MAX_RUNTIME_SECONDS, not
+# a value derived from a successful external-lane run's actual step count
+# (no such run was observed in that investigation).
+DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS = 600
 DEFAULT_GOAL_MAX_TURNS = 5
+
+
+def _default_worker_max_runtime_seconds(lane_id: Optional[str]) -> int:
+    """Lane-aware fallback used only when the caller leaves the swarm-wide
+    ``worker_max_runtime_seconds`` unset (``None``) -- an explicit value
+    still applies uniformly to every worker, preserving prior behavior."""
+    if lane_id in EXTERNAL_LANE_IDS:
+        return DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS
+    return DEFAULT_WORKER_MAX_RUNTIME_SECONDS
 
 
 @dataclass(frozen=True)
@@ -226,7 +250,7 @@ def create_swarm(
     priority: int = 0,
     idempotency_key: Optional[str] = None,
     goal_max_turns: int = DEFAULT_GOAL_MAX_TURNS,
-    worker_max_runtime_seconds: int = DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
+    worker_max_runtime_seconds: Optional[int] = None,
     origin: Optional[dict] = None,
 ) -> SwarmCreated:
     """Create a durable Kanban swarm graph.
@@ -274,7 +298,9 @@ def create_swarm(
                 f"lane-bound swarms require at least {MIN_EXTERNAL_LANES} of "
                 + ", ".join(EXTERNAL_LANE_IDS)
             )
-        if goal_max_turns < 1 or worker_max_runtime_seconds < 1:
+        if goal_max_turns < 1 or (
+            worker_max_runtime_seconds is not None and worker_max_runtime_seconds < 1
+        ):
             raise ValueError("goal_max_turns and worker_max_runtime_seconds must be positive")
 
     # Resolve and validate every worker BEFORE creating any card.
@@ -385,7 +411,15 @@ def create_swarm(
             max_runtime_seconds=(
                 spec.max_runtime_seconds
                 if spec.max_runtime_seconds is not None
-                else (worker_max_runtime_seconds if lane_mode else None)
+                else (
+                    (
+                        worker_max_runtime_seconds
+                        if worker_max_runtime_seconds is not None
+                        else _default_worker_max_runtime_seconds(worker_lane)
+                    )
+                    if lane_mode
+                    else None
+                )
             ),
             goal_mode=lane_mode,
             goal_max_turns=goal_max_turns if lane_mode else None,

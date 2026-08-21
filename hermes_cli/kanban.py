@@ -393,8 +393,15 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_swarm.add_argument("--goal-max-turns", type=int, default=ks.DEFAULT_GOAL_MAX_TURNS,
                          help="Goal-loop turn budget for a lane-bound swarm")
     p_swarm.add_argument("--worker-max-runtime", type=int,
-                         default=ks.DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
-                         help="Per-worker runtime cap in seconds")
+                         default=None,
+                         help=(
+                             "Per-worker runtime cap in seconds, applied uniformly to "
+                             "every worker if given. Omit to use the lane-aware default: "
+                             f"{ks.DEFAULT_WORKER_MAX_RUNTIME_SECONDS}s for native_hermes, "
+                             f"{ks.DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS}s for "
+                             "claude/grok/agy (see SWARM-CLAUDE-GROK-LANE-TIMEOUT-"
+                             "RECURRENCE-001)."
+                         ))
     p_swarm.add_argument("--verifier", required=True, help="Verifier profile")
     p_swarm.add_argument("--synthesizer", required=True, help="Synthesizer/writer profile")
     p_swarm.add_argument("--tenant", default=None, help="Tenant namespace")
@@ -1510,9 +1517,7 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
             priority=args.priority,
             idempotency_key=getattr(args, "idempotency_key", None),
             goal_max_turns=getattr(args, "goal_max_turns", ks.DEFAULT_GOAL_MAX_TURNS),
-            worker_max_runtime_seconds=getattr(
-                args, "worker_max_runtime", ks.DEFAULT_WORKER_MAX_RUNTIME_SECONDS
-            ),
+            worker_max_runtime_seconds=getattr(args, "worker_max_runtime", None),
         )
         _maybe_auto_subscribe_swarm(conn, created.synthesizer_id)
     if getattr(args, "json", False):

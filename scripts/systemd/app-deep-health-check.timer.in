@@ -1,3 +1,7 @@
+# T0213 Objective #3 -- NOT enabled by rendering alone. See
+# install_ops_timers.py's --enable flag, or run
+# `systemctl --user enable --now app-deep-health-check.timer`
+# deliberately after review.
 [Unit]
 Description=T0213 Objective #3: DocuBot/DocHelper deep health check schedule
 

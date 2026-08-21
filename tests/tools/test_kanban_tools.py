@@ -1202,6 +1202,55 @@ def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worke
     assert d["subscribed"] is False, d
 
 
+def test_maybe_auto_subscribe_reports_false_when_write_does_not_stick(monkeypatch, worker_env):
+    """SWARM-LANE-TIMEOUT-RETEST-002-LEFTOVERS: a real swarm's kanban_swarm
+    call reported subscribed=true for its synthesizer, but kanban_notify_subs
+    held zero rows for that task minutes later. add_notify_sub raising an
+    exception was already covered (test above); this covers the other real
+    failure shape -- add_notify_sub returns normally (no exception) but the
+    row is not actually readable back, whatever the underlying cause. Must
+    not be silently reported as success."""
+    from tools import kanban_tools as kt
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-42")
+
+    from hermes_cli import kanban_db as kb
+
+    def _no_op_write(*a, **kw):
+        return None  # exits cleanly, never actually inserts anything
+
+    monkeypatch.setattr(kb, "add_notify_sub", _no_op_write)
+
+    out = kt._handle_create({
+        "title": "auto-sub catches a write that silently does not persist",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+    assert d["subscribed"] is False, d
+    assert _list_subs_for_task(d["task_id"]) == []
+
+
+def test_maybe_auto_subscribe_confirms_a_genuine_write(monkeypatch, worker_env):
+    """Companion to the two failure-shape tests above: the read-back check
+    must not produce false negatives for an ordinary, successful write."""
+    from tools import kanban_tools as kt
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-42")
+
+    out = kt._handle_create({
+        "title": "auto-sub genuine write still confirms",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+    assert d["subscribed"] is True, d
+    subs = _sub_index(_list_subs_for_task(d["task_id"]))
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "chat-42"
+
+
 # ---------------------------------------------------------------------------
 # Attachments — kanban_attach / kanban_attach_url / kanban_attachments
 # ---------------------------------------------------------------------------

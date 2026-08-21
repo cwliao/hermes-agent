@@ -1,3 +1,7 @@
+# T0213 Objective #1 -- NOT enabled by rendering alone. See
+# install_ops_timers.py's --enable flag, or run
+# `systemctl --user enable --now failed-unit-allowlist-repair.timer`
+# deliberately after review.
 [Unit]
 Description=T0213 Objective #1: failed-unit allowlist repair schedule
 

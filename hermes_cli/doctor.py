@@ -258,6 +258,67 @@ def _check_gateway_release_drift(issues: list[str]) -> None:
     )
 
 
+def _resolve_cli_release_sha() -> tuple[str | None, bool]:
+    """Return the running CLI's release/checkout SHA and dirty state."""
+    try:
+        from hermes_cli.release_markers import CANONICAL_RELEASE_MARKER
+    except Exception:
+        return None, False
+    marker = PROJECT_ROOT / CANONICAL_RELEASE_MARKER
+    if marker.is_file():
+        try:
+            return marker.read_text(encoding="utf-8").strip().lower() or None, False
+        except OSError:
+            pass
+    if not (PROJECT_ROOT / ".git").exists():
+        return None, False
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.strip().lower()
+        dirty = bool(subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain"],
+            check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.strip())
+        return head or None, dirty
+    except Exception:
+        return None, False
+
+
+def _check_gateway_release_drift(issues: list[str]) -> None:
+    """Warn when the CLI checkout differs from the live gateway release."""
+    try:
+        from hermes_cli.gateway import _probe_systemd_service_running, _read_systemd_unit_environment
+    except Exception:
+        return
+    _, running = _probe_systemd_service_running()
+    if not running:
+        return
+    gateway_sha = (_read_systemd_unit_environment().get("HERMES_RELEASE_SHA") or "").strip().lower()
+    if not gateway_sha:
+        return
+    cli_sha, cli_dirty = _resolve_cli_release_sha()
+    if cli_sha is None:
+        check_info(f"Gateway daemon release: {gateway_sha[:10]} (CLI code root has no release identity)")
+        return
+    if cli_dirty:
+        check_warn("Skipping CLI/gateway release comparison", "(this checkout has uncommitted changes)")
+        return
+    if cli_sha == gateway_sha:
+        check_ok("CLI and gateway daemon are on the same release", f"({cli_sha[:10]})")
+        return
+    check_warn(
+        "CLI code differs from the live gateway daemon's pinned release",
+        f"(CLI={cli_sha[:10]}, daemon={gateway_sha[:10]})",
+    )
+    issues.append(
+        "hermes CLI and hermes-gateway.service are running different code "
+        f"(CLI={cli_sha[:10]}, daemon={gateway_sha[:10]}). Redeploy the gateway "
+        "or check out the daemon's commit before trusting CLI diagnostics."
+    )
+
+
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
 # Names external plugins imported from this module before the Sep 2026 decomposition.
 # Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).

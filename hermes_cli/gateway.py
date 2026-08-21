@@ -984,11 +984,7 @@ def launch_detached_gateway_restart_by_cmdline(old_pid: int, run_argv: list[str]
 
 def launch_detached_profile_gateway_restart(profile: str, old_pid: int) -> bool:
     """Relaunch a manually-run profile gateway after its current PID exits."""
-    return old_pid > 0 and _spawn_gateway_restart_watcher(
-        old_pid,
-        _gateway_run_args_for_profile(profile),
-        host=profile == "default",
-    )
+    return old_pid > 0 and _spawn_gateway_restart_watcher(old_pid, _gateway_run_args_for_profile(profile))
 
 
 GATEWAY_RESTART_WATCHER_TIMEOUT_S = 120
@@ -1100,7 +1096,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
         cmd = sys.argv[2:]
         _respawn_cwd = {respawn_cwd_literal}
         _respawn_env_overlay = {respawn_env_literal}
-        deadline = time.monotonic() + {watcher_timeout_literal}
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             # ``os.kill(pid, 0)`` is not a no-op on Windows — use the cross-platform existence check.
             if not pid_exists_stdlib(pid):
@@ -1165,15 +1161,9 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
 
     watcher_argv = [sys.executable, "-c", watcher, str(old_pid), *run_argv]
     devnull = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    # Host respawn must not inherit a named launcher's dotenv. The watcher copies os.environ
-    # into the gateway child, so the scrub has to be the watcher's own environ.
-    watcher_env = _host_gateway_watcher_env() if (
-        _restart_argv_is_host_gateway(run_argv) if host is None else host
-    ) else None
-    popen_env = {"env": watcher_env} if watcher_env is not None else {}
     # Same detach for the watcher itself, so closing the terminal doesn't kill it.
     try:
-        subprocess.Popen(watcher_argv, **devnull, **popen_env, **windows_detach_popen_kwargs())
+        subprocess.Popen(watcher_argv, **devnull, **windows_detach_popen_kwargs())
     except OSError:
         # Parent job object rejected CREATE_BREAKAWAY_FROM_JOB; retry without it (Windows only —
         # ``start_new_session=True`` cannot raise OSError on POSIX).
@@ -1182,7 +1172,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
             else {"start_new_session": True}
         )
         try:
-            subprocess.Popen(watcher_argv, **devnull, **popen_env, **fallback_kwargs)
+            subprocess.Popen(watcher_argv, **devnull, **fallback_kwargs)
         except OSError:
             return False
     return True
@@ -1243,6 +1233,7 @@ def _unit_environment_value(unit_path: Path, name: str) -> str | None:
 def _hermes_home_pinned_by_unit(unit_path: Path) -> str | None:
     """``HERMES_HOME`` pinned by the unit file at *unit_path*, or None when absent/unreadable."""
     return _unit_environment_value(unit_path, "HERMES_HOME")
+
 
 
 def _read_systemd_unit_environment(system: bool = False) -> dict[str, str]:

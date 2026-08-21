@@ -50,14 +50,20 @@ almost 4 hours late.
 **Why the delay**: CPython's `sys.stdout`, when the underlying fd is not a
 tty (true here — systemd captures it as a pipe into the journal), defaults
 to full block buffering, not line buffering. Nothing in this codebase
-overrides that default for stdout. By contrast,
-`hermes_logging.py:99-120`'s `_safe_stderr()` — used to build the
-`logging.StreamHandler` at `gateway/run.py:22162-22165` that emits the
-"Shutdown context: SIGTERM" WARNING — explicitly wraps stderr with
-`line_buffering=True`. So every `logger.warning(...)` call is flushed to the
-journal immediately, while the one `print()` banner on stdout sits in an
-in-process C buffer indefinitely, because the banner is short and nothing
-else writes to stdout afterward to fill and auto-flush that buffer.
+overrides that default for stdout — confirmed no `PYTHONUNBUFFERED` is set
+anywhere in the live unit or any of its systemd drop-ins on this host. By
+contrast, `logger.warning(...)` calls (like "Shutdown context: SIGTERM",
+via the `logging.StreamHandler` built at `gateway/run.py:22162-22165`) are
+flushed to the journal immediately, because CPython's `sys.stderr` is
+unbuffered/write-through by default regardless of tty — independent of
+`hermes_logging.py:99-120`'s `_safe_stderr()` wrapper, which only kicks in
+when `sys.stderr.encoding` is not already UTF-8 (a Windows legacy-codec
+fallback); on this host `sys.stderr.encoding == "utf-8"`, so that wrapper
+returns the raw stream unmodified and plays no part here. So every
+`logger.warning(...)` call reaches the journal immediately, while the one
+`print()` banner on stdout sits in an in-process C buffer indefinitely,
+because the banner is short and nothing else writes to stdout afterward to
+fill and auto-flush that buffer.
 
 The buffer is finally drained by an **explicit, deliberate flush** at
 shutdown: `gateway/run.py:22612-22648`'s `_exit_after_graceful_shutdown()`
@@ -108,15 +114,24 @@ a planned `--replace` takeover **nor** a planned `hermes gateway stop`
 (those two write a marker file first and are detected via `planned_takeover`
 / `planned_stop`, landing in different branches at lines 22250-22259 that
 never set this flag). A bare `systemctl --user restart hermes-gateway.service`
-— or, on this host, `hermes gateway restart` calling into systemd
-(`hermes_cli/gateway.py:6957`, `systemd_restart(system=system)`) — sends
-SIGTERM directly via systemd's own stop transaction, with no
-`hermes`-level planned-stop marker ever written. So from inside the
-process, that SIGTERM is indistinguishable from an unexpected external
-kill, `_signal_initiated_shutdown` is True, `runner._restart_requested` is
-False, and the code deliberately exits 1 by design — logging exactly that
+sends SIGTERM directly via systemd's own stop transaction, with no
+`hermes`-level planned-stop marker ever written, so from inside the
+process that SIGTERM is indistinguishable from an unexpected external kill,
+`_signal_initiated_shutdown` is True, `runner._restart_requested` is False,
+and the code deliberately exits 1 by design — logging exactly that
 reasoning to `agent.log` one line before it happens (the `logger.info(...)`
 right above the `return False`).
+
+Note this is *not* usually what `hermes gateway restart` itself does:
+`systemd_restart()` (`hermes_cli/gateway.py:3286`) first tries a graceful
+SIGUSR1-based restart (a genuinely planned path, exiting with code 75, kept
+out of this branch entirely), and only falls back to a plain
+`systemctl restart` — the bare-SIGTERM path this section describes — if
+that graceful attempt doesn't complete in time. So the pattern's usual
+real-world trigger on this host is more likely a bare `systemctl restart`,
+an external kill, or a container/OOM signal than the everyday
+`hermes gateway restart` CLI command, which mostly takes the graceful
+exit-75 route instead.
 
 This is intentional, working as designed: the comment block right above it
 (`gateway/run.py:22532-22539`) explains the goal — covering `hermes update`

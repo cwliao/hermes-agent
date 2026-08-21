@@ -1,5 +1,3 @@
-import pytest
-
 import json
 
 from hermes_cli import kanban_db as kb
@@ -9,6 +7,7 @@ from hermes_cli.kanban_swarm import (
     DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
     MULTI_AGENT_LANE_IDS,
     SwarmWorkerSpec,
+    _completion_call_example,
     _default_worker_max_runtime_seconds,
     _swarm_context,
     create_swarm,
@@ -870,6 +869,77 @@ def test_completion_requirements_satisfy_validate_completion(tmp_path):
             assert reason is None, f"{contract['role']}: {reason}"
     finally:
         conn.close()
+
+
+def _metadata_and_result_from_example_call(example_text):
+    """Parse the literal 'kanban_complete({...})' example line back into
+    (metadata, result) for the anti-drift test below, mirroring
+    _metadata_from_body's "parse what the agent is actually shown" spirit."""
+    marker = "kanban_complete("
+    start = example_text.index(marker) + len(marker)
+    end = example_text.rindex(")")
+    call = json.loads(example_text[start:end])
+    return call.get("metadata"), call.get("result")
+
+
+def test_completion_call_example_satisfies_validate_completion(tmp_path):
+    """SWARM-LANE-TIMEOUT-RETEST-002 (2026-08-21): a real synthesizer
+    failed kanban_complete 19 times over ~10 minutes, then self-blocked
+    falsely claiming the kernel validator was buggy -- independently
+    disproven by testing a correctly-shaped call against the very same
+    task. This is the anti-drift check for the concrete example added in
+    response: if _completion_call_example and validate_completion ever
+    disagree, this fails -- whichever side moved."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Ask four independent agents for one joke and synthesize it.",
+            workers=[
+                SwarmWorkerSpec(
+                    profile=lane, title=f"{lane} joke", body="Return one joke.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+            tenant="delivery-test",
+        )
+        tasks = [kb.get_task(conn, tid) for tid in created.worker_ids]
+        tasks.append(kb.get_task(conn, created.verifier_id))
+        tasks.append(kb.get_task(conn, created.synthesizer_id))
+
+        for task in tasks:
+            contract = extract_contract(task.body)
+            assert contract is not None
+            example_lines = [
+                line for line in task.body.splitlines()
+                if line.startswith("  kanban_complete(")
+            ]
+            assert len(example_lines) == 1, task.body
+            metadata, result = _metadata_and_result_from_example_call(example_lines[0])
+            reason = validate_completion(task, metadata=metadata, result=result)
+            assert reason is None, f"{contract['role']}: {reason}"
+    finally:
+        conn.close()
+
+
+def test_completion_call_example_distinguishes_top_level_from_metadata_fields():
+    """The concrete regression: result/summary/task_id must render as
+    top-level kanban_complete parameters, never nested inside metadata --
+    that exact ambiguity is what the real stuck synthesizer kept
+    mis-resolving across 19 failed attempts."""
+    worker_example = _completion_call_example({
+        "role": "worker", "root_id": "t_root", "expected_lane_id": "claude",
+        "preflight_skill_id": "claude-code",
+    })
+    assert '"summary"' in worker_example
+    assert '"summary"' not in worker_example.split('"metadata"')[1]
+
+    synth_example = _completion_call_example({"role": "synthesizer", "root_id": "t_root"})
+    assert '"result": "<your final, non-empty deliverable text>"' in synth_example
+    assert '"result"' not in synth_example.split('"metadata"')[1]
 
 
 def test_completion_requirements_reject_a_subset(tmp_path):

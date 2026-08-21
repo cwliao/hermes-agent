@@ -105,6 +105,86 @@ def _require_text(value: str, field_name: str) -> str:
     return text
 
 
+def _swarm_context(root_id: str, goal: str) -> str:
+    # SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001 retest (2026-08-21): two
+    # independent lanes, in two independent live runs, exhausted most of
+    # their runtime budget failing to post a result at all -- not because
+    # they were slow, but because "using structured comments" didn't tell
+    # them WHICH tool does that. Both improvised: one hand-wrote raw SQL
+    # against kanban.db via the shell (a bash quoting bug), the other used
+    # execute_code (BLOCKED outright for unattended workers by design). The
+    # kanban_comment tool call they actually needed was available and each
+    # lane's own transcript shows it using that same tool correctly earlier
+    # in the very same turn (kanban_show/kanban_comment against its OWN
+    # task) -- the ambiguity was specific to "how do I write to the shared
+    # blackboard", not general tool unfamiliarity. Spelling out the tool
+    # name and exact call shape, and explicitly ruling out the two failure
+    # modes actually observed, directly addresses what the transcripts show
+    # went wrong.
+    return (
+        "\n\n## Swarm protocol\n"
+        f"- Swarm root / shared blackboard: `{root_id}`.\n"
+        "- Read sibling/parent handoffs from Kanban context before working.\n"
+        "- Put machine-readable facts in completion metadata.\n"
+        "- To post cross-worker notes on the shared blackboard, call the "
+        f'`kanban_comment` tool with task_id="{root_id}" and your note as '
+        "`body`. Do NOT write directly to kanban.db via shell/sqlite3 or "
+        "execute_code -- execute_code is blocked outright for unattended "
+        "workers, and hand-written SQL bypasses the audit trail even when "
+        "it works.\n"
+        f"- Goal: {goal.strip()}\n"
+    )
+
+
+def _activate_root_inline(
+    conn: sqlite3.Connection,
+    root_id: str,
+    *,
+    summary: str,
+    metadata: dict[str, Any],
+) -> bool:
+    """Inline blocked→done CAS flip + event insert for the swarm root.
+
+    Runs INSIDE create_swarm's outer write_txn, so it must not call
+    ``kb.complete_task`` — that helper opens its own transaction and fires
+    post-commit side effects (workspace cleanup, failure-counter clear,
+    ``recompute_ready``) that would execute while the outer transaction can
+    still roll back. Instead we do the minimal durable writes here and let
+    the caller run ``recompute_ready`` after the outer commit.
+    """
+    import time as _time
+
+    now = int(_time.time())
+    cur = conn.execute(
+        """
+        UPDATE tasks
+           SET status       = 'done',
+               completed_at = ?,
+               claim_lock   = NULL,
+               claim_expires= NULL,
+               worker_pid   = NULL
+         WHERE id = ?
+           AND status = 'blocked'
+        """,
+        (now, root_id),
+    )
+    if cur.rowcount != 1:
+        return False
+    run_id = kb._synthesize_ended_run(
+        conn,
+        root_id,
+        outcome="completed",
+        summary=summary,
+        metadata=metadata,
+    )
+    kb._append_event(
+        conn,
+        root_id,
+        "completed",
+        {"result_len": 0, "summary": summary[:400] or None},
+        run_id=run_id,
+    )
+    return True
 def _contract_line(contract: dict[str, Any]) -> str:
     return CONTRACT_PREFIX + json.dumps(contract, ensure_ascii=False, sort_keys=True)
 
@@ -210,15 +290,6 @@ def validate_completion(
         if metadata.get("result_present") is not True or not (result or "").strip():
             return "synthesizer completion requires result_present=true and a result"
     return None
-
-
-def _swarm_context(root_id: str, goal: str) -> str:
-    return (
-        f"\n\n## Swarm protocol\n- Swarm root / shared blackboard: `{root_id}`.\n- Read "
-        f"sibling/parent handoffs from Kanban context before working.\n- Put machine-readable "
-        f"facts in completion metadata.\n- Put cross-worker notes on the root task using "
-        f"structured comments.\n- Goal: {goal.strip()}\n"
-    )
 
 
 def _activate_root_inline(

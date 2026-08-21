@@ -3,8 +3,11 @@ import json
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_swarm import (
+    DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS,
+    DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
     MULTI_AGENT_LANE_IDS,
     SwarmWorkerSpec,
+    _default_worker_max_runtime_seconds,
     create_swarm,
     extract_contract,
     latest_blackboard,
@@ -150,10 +153,85 @@ def test_lane_bound_swarm_persists_contracts_goal_budget_and_runtime(tmp_path):
         assert root.goal_max_turns == 5
         assert all(task.goal_mode is True for task in workers)
         assert all(task.goal_max_turns == 5 for task in workers)
-        assert all(task.max_runtime_seconds == 120 for task in workers)
+        # SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001: lane-aware default when
+        # worker_max_runtime_seconds is left unset -- native_hermes keeps the
+        # original 120s default; every external-CLI lane gets a higher ceiling.
+        by_lane = {
+            extract_contract(task.body)["expected_lane_id"]: task for task in workers
+        }
+        assert by_lane["native_hermes"].max_runtime_seconds == 120
+        for lane in ("claude", "grok", "agy"):
+            assert by_lane[lane].max_runtime_seconds == 600
         assert [extract_contract(task.body)["expected_lane_id"] for task in workers] == list(MULTI_AGENT_LANE_IDS)
         assert extract_contract(verifier.body)["expected_lane_count"] == 4
         assert extract_contract(synthesizer.body)["verifier_id"] == created.verifier_id
+    finally:
+        conn.close()
+
+
+def test_default_worker_max_runtime_seconds_is_lane_aware():
+    assert _default_worker_max_runtime_seconds("native_hermes") == DEFAULT_WORKER_MAX_RUNTIME_SECONDS
+    assert _default_worker_max_runtime_seconds(None) == DEFAULT_WORKER_MAX_RUNTIME_SECONDS
+    for lane in ("claude", "grok", "agy"):
+        assert (
+            _default_worker_max_runtime_seconds(lane)
+            == DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS
+        )
+    assert DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS > DEFAULT_WORKER_MAX_RUNTIME_SECONDS
+
+
+def test_explicit_worker_max_runtime_seconds_applies_uniformly_across_lanes(tmp_path):
+    """An explicit swarm-wide override still wins over the lane-aware default,
+    for every lane including native_hermes -- preserves the pre-existing
+    behavior for callers that already pass this explicitly."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Ask four independent agents for one joke and synthesize it.",
+            workers=[
+                SwarmWorkerSpec(
+                    profile=lane, title=f"{lane} joke", body="Return one joke.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+            tenant="delivery-test",
+            worker_max_runtime_seconds=300,
+        )
+        workers = [kb.get_task(conn, tid) for tid in created.worker_ids]
+        assert all(task.max_runtime_seconds == 300 for task in workers)
+    finally:
+        conn.close()
+
+
+def test_per_worker_max_runtime_seconds_still_beats_swarm_and_lane_defaults(tmp_path):
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Ask four independent agents for one joke and synthesize it.",
+            workers=[
+                SwarmWorkerSpec(
+                    profile=lane, title=f"{lane} joke", body="Return one joke.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+                    max_runtime_seconds=42 if lane == "claude" else None,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+            tenant="delivery-test",
+        )
+        by_lane = {
+            extract_contract(kb.get_task(conn, tid).body)["expected_lane_id"]: kb.get_task(conn, tid)
+            for tid in created.worker_ids
+        }
+        assert by_lane["claude"].max_runtime_seconds == 42
+        assert by_lane["native_hermes"].max_runtime_seconds == 120
+        assert by_lane["grok"].max_runtime_seconds == 600
     finally:
         conn.close()
 

@@ -1312,8 +1312,9 @@ def _handle_swarm(args: dict, **kw) -> str:
     synthesizer_assignee = args.get("synthesizer_assignee") or default_profile
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
     try:
-        worker_max_runtime_seconds = int(
-            args.get("worker_max_runtime_seconds", ks.DEFAULT_WORKER_MAX_RUNTIME_SECONDS)
+        _raw_worker_max_runtime = args.get("worker_max_runtime_seconds")
+        worker_max_runtime_seconds = (
+            int(_raw_worker_max_runtime) if _raw_worker_max_runtime is not None else None
         )
         goal_max_turns = int(args.get("goal_max_turns", ks.DEFAULT_GOAL_MAX_TURNS))
     except (TypeError, ValueError):
@@ -1936,7 +1937,12 @@ KANBAN_SWARM_SCHEMA = {
             },
             "worker_max_runtime_seconds": {
                 "type": "integer",
-                "description": f"Per-worker runtime cap. Default {_KS.DEFAULT_WORKER_MAX_RUNTIME_SECONDS}s.",
+                "description": (
+                    "Per-worker runtime cap, applied uniformly to every worker if given. "
+                    f"Omit to use the lane-aware default: {_KS.DEFAULT_WORKER_MAX_RUNTIME_SECONDS}s "
+                    f"for native_hermes, {_KS.DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS}s "
+                    "for claude/grok/agy (see SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001)."
+                ),
             },
             "goal_max_turns": {
                 "type": "integer",

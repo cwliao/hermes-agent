@@ -114,6 +114,9 @@ class DispatchResult:
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
+    quorum_excused: int = 0
+    """Blocked swarm workers archived this tick after enough sibling workers
+    completed to satisfy their configured partial quorum."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
     stale: list[str] = field(default_factory=list)
@@ -1662,6 +1665,8 @@ def _run_reclaim_phase(
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.timed_out = enforce_max_runtime(conn)
+    from hermes_cli import kanban_swarm as _ks
+    result.quorum_excused = _ks.excuse_blocked_workers_below_quorum(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 

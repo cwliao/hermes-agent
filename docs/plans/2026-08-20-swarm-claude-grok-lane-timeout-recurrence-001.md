@@ -207,7 +207,15 @@ now supports a **combination, not a single cause**:
    background spawn with a different flag -> another `process wait` ->
    `kanban_block`/`kanban_comment` -- each of those is a separate
    turn/heartbeat-bearing step that an in-process `native_hermes` lane
-   simply does not pay for.
+   simply does not pay for. **Caveat, per independent cross-review:**
+   this specific step-by-step breakdown is documented in detail for only
+   one lane (`agy`, via its own transcript) -- `claude`'s and `grok`'s
+   equivalent transcripts were not examined turn-by-turn in this pass.
+   The heartbeat-count comparison (native_hermes: 3; every external
+   lane: 4-5 without reaching `completed`) supports the same conclusion
+   for all three external lanes, but "structurally needs more steps" as
+   a *mechanism* is confirmed in detail for `agy` and inferred, not yet
+   directly confirmed the same way, for `claude`/`grok`.
 3. Combining (1) and (2): a fixed 300s ceiling that is comfortably
    enough for `native_hermes` under the current contention level is
    **not** enough for any external-CLI lane under the *same* contention

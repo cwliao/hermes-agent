@@ -111,12 +111,32 @@ def _require_text(value: str, field_name: str) -> str:
 
 
 def _swarm_context(root_id: str, goal: str) -> str:
+    # SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001 retest (2026-08-21): two
+    # independent lanes, in two independent live runs, exhausted most of
+    # their runtime budget failing to post a result at all -- not because
+    # they were slow, but because "using structured comments" didn't tell
+    # them WHICH tool does that. Both improvised: one hand-wrote raw SQL
+    # against kanban.db via the shell (a bash quoting bug), the other used
+    # execute_code (BLOCKED outright for unattended workers by design). The
+    # kanban_comment tool call they actually needed was available and each
+    # lane's own transcript shows it using that same tool correctly earlier
+    # in the very same turn (kanban_show/kanban_comment against its OWN
+    # task) -- the ambiguity was specific to "how do I write to the shared
+    # blackboard", not general tool unfamiliarity. Spelling out the tool
+    # name and exact call shape, and explicitly ruling out the two failure
+    # modes actually observed, directly addresses what the transcripts show
+    # went wrong.
     return (
         "\n\n## Swarm protocol\n"
         f"- Swarm root / shared blackboard: `{root_id}`.\n"
         "- Read sibling/parent handoffs from Kanban context before working.\n"
         "- Put machine-readable facts in completion metadata.\n"
-        "- Put cross-worker notes on the root task using structured comments.\n"
+        "- To post cross-worker notes on the shared blackboard, call the "
+        f'`kanban_comment` tool with task_id="{root_id}" and your note as '
+        "`body`. Do NOT write directly to kanban.db via shell/sqlite3 or "
+        "execute_code -- execute_code is blocked outright for unattended "
+        "workers, and hand-written SQL bypasses the audit trail even when "
+        "it works.\n"
         f"- Goal: {goal.strip()}\n"
     )
 

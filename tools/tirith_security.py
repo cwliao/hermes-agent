@@ -851,6 +851,33 @@ def check_command_security(command: str) -> dict:
             findings = []
             summary = ""
 
+    # SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001 retest (2026-08-21):
+    # suppress confusable_text findings whose entire evidence set is
+    # U+3002 (IDEOGRAPHIC FULL STOP), regardless of whether tirith reported
+    # block or warn (unlike the .app suppression above, this one really did
+    # arrive as "block" for a real kanban swarm worker in production).
+    # U+3002 is the ordinary full stop for Chinese/Japanese prose -- it ends
+    # nearly every CJK sentence -- and tirith's "looks like '.'" heuristic
+    # flags it as a possible homoglyph attack merely for appearing near
+    # ASCII CLI flags (e.g. `claude -p '...中文...。' --allowedTools ''`),
+    # which is unavoidable for any CJK-language worker prompt passed to an
+    # external CLI. Confirmed via direct `tirith check` runs against the
+    # exact command that triggered this live: deterministically flagged,
+    # evidence was U+3002 at two offsets and nothing else. Narrow and
+    # conservative on purpose -- a finding with ANY other evidence (a real
+    # math-alphanumeric or Cyrillic/Greek lookalike character, or a
+    # DIFFERENT confusable codepoint not on this list) is NOT suppressed,
+    # preserving detection for actual homoglyph attacks. See
+    # docs/plans/2026-08-21-swarm-lane-timeout-retest-findings.md.
+    if action in {"block", "warn"} and findings:
+        non_suppressible = [
+            f for f in findings if not _is_cjk_full_stop_only_confusable_finding(f)
+        ]
+        if not non_suppressible:
+            action = "allow"
+            findings = []
+            summary = ""
+
     return {"action": action, "findings": findings, "summary": summary}
 
 
@@ -869,3 +896,34 @@ def _is_app_tld_finding(finding: dict) -> bool:
         if val is not None and ".app" in str(val).lower():
             return True
     return False
+
+
+# Confusable Unicode codepoints known to be ordinary, legitimate CJK
+# punctuation rather than homoglyph-attack material. Only add a codepoint
+# here after confirming it is (a) extremely common in normal CJK prose and
+# (b) verified via a direct `tirith check` run to actually be what this
+# rule flags -- do not guess. See _is_cjk_full_stop_only_confusable_finding.
+_BENIGN_CJK_CONFUSABLE_CODEPOINTS = frozenset({"U+3002"})  # IDEOGRAPHIC FULL STOP
+
+
+def _is_cjk_full_stop_only_confusable_finding(finding: dict) -> bool:
+    """Return True if this is a confusable_text finding whose entire evidence
+    set is drawn from :data:`_BENIGN_CJK_CONFUSABLE_CODEPOINTS`.
+
+    Deliberately narrow: a finding with even one piece of evidence outside
+    this allowlist (a genuine math-alphanumeric/Cyrillic/Greek lookalike,
+    or a CJK punctuation mark not yet verified) is NOT suppressed.
+    """
+    if not isinstance(finding, dict):
+        return False
+    if finding.get("rule_id") != "confusable_text":
+        return False
+    evidence = finding.get("evidence")
+    if not evidence or not isinstance(evidence, list):
+        return False
+    for item in evidence:
+        if not isinstance(item, dict):
+            return False
+        if item.get("hex") not in _BENIGN_CJK_CONFUSABLE_CODEPOINTS:
+            return False
+    return True

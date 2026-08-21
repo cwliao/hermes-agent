@@ -1117,6 +1117,24 @@ def _hermes_home_pinned_by_unit(unit_path: Path) -> str | None:
     return None
 
 
+def _read_systemd_unit_environment(system: bool = False) -> dict[str, str]:
+    """Return environment assignments from the active gateway unit."""
+    values = _parse_kv_pairs(
+        _systemctl_show(("Environment",), system=system).get("Environment", "").split()
+    )
+    unit_path = get_systemd_unit_path(system=system)
+    try:
+        for line in unit_path.read_text(encoding="utf-8").splitlines():
+            body = line.strip()
+            if not body.startswith("Environment="):
+                continue
+            raw = body[len("Environment="):].strip().strip('"')
+            values.update(_parse_kv_pairs([raw]))
+    except OSError:
+        pass
+    return values
+
+
 def _hermes_home_from_systemd_unit_file(system: bool = False) -> str | None:
     """``HERMES_HOME`` from the on-disk unit file - what refresh/compare already read, and reliable under ``sudo``."""
     return _hermes_home_pinned_by_unit(get_systemd_unit_path(system=system))

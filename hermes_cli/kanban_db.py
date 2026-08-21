@@ -3878,7 +3878,6 @@ def schedule_task(
         return True
 
 
-# --- Worker context builder (what a spawned worker sees) ---
 
 def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     """Everything a worker should read about its task: header, body,

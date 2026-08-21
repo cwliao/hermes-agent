@@ -1155,10 +1155,12 @@ def _handle_swarm(args: dict, **kw) -> str:
         worker_max_runtime_seconds = (
             int(_raw_worker_max_runtime) if _raw_worker_max_runtime is not None else None
         )
+        _raw_worker_quorum = args.get("worker_quorum")
+        worker_quorum = int(_raw_worker_quorum) if _raw_worker_quorum is not None else None
         goal_max_turns = int(args.get("goal_max_turns", ks.DEFAULT_GOAL_MAX_TURNS))
     except (TypeError, ValueError):
         return tool_error(
-            "worker_max_runtime_seconds and goal_max_turns must be integers"
+            "worker_max_runtime_seconds, worker_quorum, and goal_max_turns must be integers"
         )
 
     with _board(args.get("board")) as (kb, conn):
@@ -1186,13 +1188,12 @@ def _handle_swarm(args: dict, **kw) -> str:
             tenant=tenant,
             created_by=os.environ.get("HERMES_PROFILE") or "swarm-orchestrator",
             worker_max_runtime_seconds=worker_max_runtime_seconds,
+            worker_quorum=worker_quorum,
             goal_max_turns=goal_max_turns,
             origin=origin,
         )
         subscribed = _maybe_auto_subscribe(conn, created.synthesizer_id)
         return _ok(subscribed=subscribed, **created.as_dict())
-
-
 @_kanban_handler("kanban_link")
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact (cycles/self-links → ValueError)."""
@@ -1249,6 +1250,17 @@ KANBAN_SWARM_SCHEMA = {
                     f"Omit to use the lane-aware default: {_KS.DEFAULT_WORKER_MAX_RUNTIME_SECONDS}s "
                     f"for native_hermes, {_KS.DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS}s "
                     "for claude/grok/agy (see SWARM-CLAUDE-GROK-LANE-TIMEOUT-RECURRENCE-001)."
+                ),
+            },
+            "worker_quorum": {
+                "type": "integer",
+                "description": (
+                    "Let the swarm complete once this many workers reach 'done', instead "
+                    "of requiring every worker (lane-bound swarms only). Without this, one "
+                    "permanently-failed lane deadlocks the verifier forever -- it never "
+                    "becomes ready, the synthesizer never runs, and nothing ever gets "
+                    "delivered back to the user. Omit only when every lane genuinely must "
+                    "succeed. See SWARM-PARTIAL-QUORUM-001."
                 ),
             },
             "goal_max_turns": {

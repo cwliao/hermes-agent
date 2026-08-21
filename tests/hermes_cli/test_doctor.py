@@ -250,6 +250,8 @@ def test_check_gateway_service_linger_warns_when_disabled(monkeypatch, tmp_path,
     monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
     monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda: unit_path)
     monkeypatch.setattr(gateway_cli, "get_systemd_linger_status", lambda: (False, ""))
+    # Not this test's concern — see test_doctor_gateway_release_drift.py.
+    monkeypatch.setattr(gateway_cli, "_probe_systemd_service_running", lambda: (False, False))
 
     issues = []
     doctor._check_gateway_service_linger(issues)

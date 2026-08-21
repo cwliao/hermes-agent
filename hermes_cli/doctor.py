@@ -346,6 +346,98 @@ def check_certificates() -> None:
         check_warn("SSL certificate check skipped", str(e))
 
 
+def _resolve_cli_release_sha() -> tuple[str | None, bool]:
+    """Return (sha, is_dirty) describing what code this ``hermes`` CLI invocation is
+    actually running.
+
+    Checks the canonical release marker first (present in
+    ``release_snapshot.py``-built snapshots, e.g. what ``hermes-gateway.service``
+    itself typically runs from). Falls back to ``git rev-parse HEAD`` for a live,
+    editable checkout, which is what ``~/.local/bin/hermes`` resolves against by
+    design (it unconditionally unsets ``PYTHONPATH``/``PYTHONHOME`` before exec'ing
+    the venv's own ``hermes``, so it always sees this checkout's current on-disk
+    state, not whatever release the gateway daemon is pinned to).
+    """
+    try:
+        from hermes_cli.release_markers import CANONICAL_RELEASE_MARKER
+    except Exception:
+        return None, False
+    marker = PROJECT_ROOT / CANONICAL_RELEASE_MARKER
+    if marker.is_file():
+        try:
+            sha = marker.read_text(encoding="utf-8").strip().lower()
+            return (sha or None), False
+        except OSError:
+            pass
+    if not (PROJECT_ROOT / ".git").exists():
+        return None, False
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.strip().lower()
+        dirty = bool(subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain"],
+            check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.strip())
+        return (head or None), dirty
+    except Exception:
+        return None, False
+
+
+def _check_gateway_release_drift(issues: list[str]) -> None:
+    """Warn when the ``hermes`` CLI and the live ``hermes-gateway.service`` daemon
+    are running different code.
+
+    The CLI wrapper always resolves against this checkout's current on-disk
+    state (see :func:`_resolve_cli_release_sha`), while the gateway daemon is
+    typically pinned to a separately built release snapshot via a systemd
+    drop-in's ``PYTHONPATH``/``HERMES_RELEASE_SHA``. The two can silently
+    diverge right after a merge that hasn't been redeployed yet — this is a
+    diagnostic, not something ``--fix`` can safely automate (redeploying a
+    live, single-instance production service is a deliberate operator
+    action). See
+    docs/plans/2026-08-20-session-handover-notify-subs-and-lane-failures.md
+    for the incident this check was written to catch earlier next time.
+    """
+    try:
+        from hermes_cli.gateway import _probe_systemd_service_running, _read_systemd_unit_environment
+    except Exception:
+        return
+    _, running = _probe_systemd_service_running()
+    if not running:
+        return
+    gateway_sha = (_read_systemd_unit_environment().get("HERMES_RELEASE_SHA") or "").strip().lower()
+    if not gateway_sha:
+        # Older deploy without the SHA env var pinned, or a non-release-snapshot
+        # deployment model — nothing reliable to compare against.
+        return
+    cli_sha, cli_dirty = _resolve_cli_release_sha()
+    if cli_sha is None:
+        check_info(f"Gateway daemon release: {gateway_sha[:10]} (CLI code root has no git/release identity to compare)")
+        return
+    if cli_dirty:
+        check_warn(
+            "Skipping CLI/gateway release comparison",
+            "(this checkout has uncommitted changes; the comparison would be misleading)",
+        )
+        return
+    if cli_sha == gateway_sha:
+        check_ok("CLI and gateway daemon are on the same release", f"({cli_sha[:10]})")
+    else:
+        check_warn(
+            "CLI code differs from the live gateway daemon's pinned release",
+            f"(CLI={cli_sha[:10]}, daemon={gateway_sha[:10]})",
+        )
+        issues.append(
+            "hermes CLI and hermes-gateway.service are running different code "
+            f"(CLI={cli_sha[:10]}, daemon={gateway_sha[:10]}). Expected right "
+            "after a merge that hasn't been redeployed yet; if unexpected, "
+            "redeploy the gateway (see scripts/release_snapshot.py) or check "
+            "out the daemon's commit before trusting CLI output for debugging."
+        )
+
+
 def _check_gateway_service_linger(issues: list[str]) -> None:
     """Warn when a systemd user gateway service will stop after logout.
 
@@ -388,6 +480,8 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         issues.append("Enable linger for the gateway user service: sudo loginctl enable-linger $USER")
     else:
         check_warn("Could not verify systemd linger", f"({linger_detail})")
+
+    _check_gateway_release_drift(issues)
 
 
 _APIKEY_PROVIDERS_CACHE: list | None = None

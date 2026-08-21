@@ -10,6 +10,7 @@ from hermes_cli.kanban_swarm import (
     _default_worker_max_runtime_seconds,
     _swarm_context,
     create_swarm,
+    excuse_blocked_workers_below_quorum,
     extract_contract,
     latest_blackboard,
     parse_worker_arg,
@@ -248,6 +249,174 @@ def test_per_worker_max_runtime_seconds_still_beats_swarm_and_lane_defaults(tmp_
         assert by_lane["claude"].max_runtime_seconds == 42
         assert by_lane["native_hermes"].max_runtime_seconds == DEFAULT_WORKER_MAX_RUNTIME_SECONDS
         assert by_lane["grok"].max_runtime_seconds == DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# SWARM-PARTIAL-QUORUM-001: one permanently-blocked worker must not deadlock
+# the verifier forever when the caller opts into a quorum.
+# ---------------------------------------------------------------------------
+
+def _make_quorum_swarm(conn, worker_quorum):
+    return create_swarm(
+        conn,
+        goal="Four independent lanes each produce one joke.",
+        workers=[
+            SwarmWorkerSpec(
+                profile=lane, title=f"{lane} joke", body="Return one joke.",
+                skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+            )
+            for lane in MULTI_AGENT_LANE_IDS
+        ],
+        verifier_assignee="verifier",
+        synthesizer_assignee="synthesizer",
+        tenant="quorum-test",
+        worker_quorum=worker_quorum,
+    )
+
+
+def test_worker_quorum_out_of_range_rejected(tmp_path):
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        with pytest.raises(ValueError, match="worker_quorum must be between 1 and 4"):
+            _make_quorum_swarm(conn, worker_quorum=5)
+        with pytest.raises(ValueError, match="worker_quorum must be between 1 and 4"):
+            _make_quorum_swarm(conn, worker_quorum=0)
+    finally:
+        conn.close()
+
+
+def test_worker_quorum_requires_lane_mode(tmp_path):
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        with pytest.raises(ValueError, match="worker_quorum is only meaningful for lane-bound swarms"):
+            create_swarm(
+                conn,
+                goal="Plain non-lane swarm.",
+                workers=[SwarmWorkerSpec(profile="a", title="A", body="do it")],
+                verifier_assignee="verifier",
+                synthesizer_assignee="synthesizer",
+                worker_quorum=1,
+            )
+    finally:
+        conn.close()
+
+
+def test_worker_quorum_sets_verifier_expected_lane_count_and_stores_topology(tmp_path):
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = _make_quorum_swarm(conn, worker_quorum=3)
+        verifier = kb.get_task(conn, created.verifier_id)
+        contract = extract_contract(verifier.body)
+        assert contract["expected_lane_count"] == 3
+        assert "quorum of 3 out of 4" in verifier.body
+        topology = latest_blackboard(conn, created.root_id).get("topology")
+        assert topology["worker_quorum"] == 3
+    finally:
+        conn.close()
+
+
+def test_worker_quorum_none_keeps_full_lane_count(tmp_path):
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = _make_quorum_swarm(conn, worker_quorum=None)
+        verifier = kb.get_task(conn, created.verifier_id)
+        contract = extract_contract(verifier.body)
+        assert contract["expected_lane_count"] == 4
+        assert "quorum" not in verifier.body
+        topology = latest_blackboard(conn, created.root_id).get("topology")
+        assert topology["worker_quorum"] is None
+    finally:
+        conn.close()
+
+
+def test_excuse_blocked_workers_below_quorum_archives_once_satisfied(tmp_path):
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = _make_quorum_swarm(conn, worker_quorum=3)
+        by_lane = {
+            extract_contract(kb.get_task(conn, tid).body)["expected_lane_id"]: tid
+            for tid in created.worker_ids
+        }
+        # Three siblings genuinely complete.
+        for lane in ("native_hermes", "claude", "grok"):
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (by_lane[lane],))
+        # The fourth exhausted its retries and the dispatcher gave up on it.
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (by_lane["agy"],))
+        conn.commit()
+
+        excused = excuse_blocked_workers_below_quorum(conn)
+
+        assert excused == 1
+        assert kb.get_task(conn, by_lane["agy"]).status == "archived"
+        # Excusing must unblock the verifier via the ordinary
+        # "every parent done or archived" promotion rule.
+        assert kb.get_task(conn, created.verifier_id).status == "ready"
+    finally:
+        conn.close()
+
+
+def test_excuse_blocked_workers_below_quorum_noop_below_quorum(tmp_path):
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = _make_quorum_swarm(conn, worker_quorum=3)
+        by_lane = {
+            extract_contract(kb.get_task(conn, tid).body)["expected_lane_id"]: tid
+            for tid in created.worker_ids
+        }
+        # Only two siblings done -- below the quorum of 3.
+        for lane in ("native_hermes", "claude"):
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (by_lane[lane],))
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (by_lane["agy"],))
+        conn.commit()
+
+        excused = excuse_blocked_workers_below_quorum(conn)
+
+        assert excused == 0
+        assert kb.get_task(conn, by_lane["agy"]).status == "blocked"
+        assert kb.get_task(conn, created.verifier_id).status == "todo"
+    finally:
+        conn.close()
+
+
+def test_excuse_blocked_workers_below_quorum_noop_without_quorum_configured(tmp_path):
+    """Swarms created without worker_quorum keep the strict all-workers
+    behavior unchanged -- a blocked worker is never excused."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = _make_quorum_swarm(conn, worker_quorum=None)
+        by_lane = {
+            extract_contract(kb.get_task(conn, tid).body)["expected_lane_id"]: tid
+            for tid in created.worker_ids
+        }
+        for lane in ("native_hermes", "claude", "grok"):
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (by_lane[lane],))
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (by_lane["agy"],))
+        conn.commit()
+
+        excused = excuse_blocked_workers_below_quorum(conn)
+
+        assert excused == 0
+        assert kb.get_task(conn, by_lane["agy"]).status == "blocked"
+        assert kb.get_task(conn, created.verifier_id).status == "todo"
+    finally:
+        conn.close()
+
+
+def test_excuse_blocked_workers_below_quorum_ignores_unrelated_blocked_tasks(tmp_path):
+    """A blocked task with no swarm worker contract at all (an ordinary
+    task that happens to also be blocked) must never be touched."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        plain_id = kb.create_task(conn, title="unrelated", body="just a task", assignee="someone")
+        conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (plain_id,))
+        conn.commit()
+
+        excused = excuse_blocked_workers_below_quorum(conn)
+
+        assert excused == 0
+        assert kb.get_task(conn, plain_id).status == "blocked"
     finally:
         conn.close()
 

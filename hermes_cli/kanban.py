@@ -402,6 +402,15 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                              "claude/grok/agy (see SWARM-CLAUDE-GROK-LANE-TIMEOUT-"
                              "RECURRENCE-001)."
                          ))
+    p_swarm.add_argument(
+        "--worker-quorum", type=int, default=None,
+        help=(
+            "Let the swarm complete once this many workers reach 'done', "
+            "instead of requiring every worker (lane-bound swarms only). "
+            "Without this, one permanently-failed lane deadlocks the "
+            "verifier forever. See SWARM-PARTIAL-QUORUM-001."
+        ),
+    )
     p_swarm.add_argument("--verifier", required=True, help="Verifier profile")
     p_swarm.add_argument("--synthesizer", required=True, help="Synthesizer/writer profile")
     p_swarm.add_argument("--tenant", default=None, help="Tenant namespace")
@@ -1518,6 +1527,7 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
             idempotency_key=getattr(args, "idempotency_key", None),
             goal_max_turns=getattr(args, "goal_max_turns", ks.DEFAULT_GOAL_MAX_TURNS),
             worker_max_runtime_seconds=getattr(args, "worker_max_runtime", None),
+            worker_quorum=getattr(args, "worker_quorum", None),
         )
         _maybe_auto_subscribe_swarm(conn, created.synthesizer_id)
     if getattr(args, "json", False):

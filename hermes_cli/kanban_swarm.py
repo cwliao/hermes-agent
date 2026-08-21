@@ -285,6 +285,7 @@ def create_swarm(
     idempotency_key: Optional[str] = None,
     goal_max_turns: int = DEFAULT_GOAL_MAX_TURNS,
     worker_max_runtime_seconds: Optional[int] = None,
+    worker_quorum: Optional[int] = None,
     origin: Optional[dict] = None,
 ) -> SwarmCreated:
     """Create a durable Kanban swarm graph.
@@ -292,6 +293,46 @@ def create_swarm(
     The returned graph is immediately dispatchable: the planning root is marked
     ``done`` with topology metadata, parallel workers are ``ready``, the verifier
     waits for every worker, and the synthesizer waits for the verifier.
+
+    ``worker_quorum`` (SWARM-PARTIAL-QUORUM-001, opt-in, ``None`` by
+    default): when set, the swarm can complete once this many workers
+    reach ``done``, instead of requiring literally every worker.
+    Without it, one permanently failed lane (a worker that exhausts the
+    dispatcher's retry budget and lands in ``blocked``) deadlocks the
+    verifier forever -- ``recompute_ready`` only promotes a task once
+    *every* parent is ``done`` or ``archived``, and a ``blocked`` worker
+    is neither. This is exactly what happened repeatedly to real 4-lane
+    swarms in docs/plans/2026-08-21-swarm-lane-timeout-retest-findings.md's
+    follow-up testing -- three lanes would finish and the swarm would
+    still never deliver a result over Telegram, because the fourth
+    lane's dispatcher-level circuit breaker tripped and nothing ever
+    excused it.
+
+    Setting a quorum does two things together, both required -- neither
+    alone is sufficient:
+
+    1. The verifier's own completion contract requires
+       ``verified_lane_count == worker_quorum`` instead of the full
+       worker count, so the verifier can actually pass with partial
+       evidence (previously hard-coded to require every lane; see
+       ``_completion_requirements``'s own docstring for why that
+       equality is load-bearing).
+    2. ``excuse_blocked_workers_below_quorum`` (called from the
+       dispatcher's periodic tick, see ``kanban_db.dispatch_once``)
+       archives a swarm worker once it's ``blocked`` (permanently
+       failed) AND enough of its siblings have already reached
+       ``done`` to satisfy the quorum -- which lets
+       ``recompute_ready``'s existing, unmodified "every parent done
+       or archived" rule promote the verifier normally. This is
+       deliberately reactive/lazy (checked once per dispatcher tick),
+       not synchronous with the failure itself, to avoid adding
+       swarm-specific logic into ``_record_task_failure``'s generic,
+       every-task-type failure-counting path.
+
+    Swarms created without ``worker_quorum`` (``None``, the default)
+    are completely unaffected -- ``excuse_blocked_workers_below_quorum``
+    is a no-op for them, and the verifier's contract still requires
+    every lane, exactly as before this parameter existed.
 
     ``origin`` (WORKER-SUBPROCESS-SESSION-ENV-001), when given, is a dict of
     ``origin_platform``/``origin_chat_id``/``origin_thread_id``/
@@ -336,6 +377,13 @@ def create_swarm(
             worker_max_runtime_seconds is not None and worker_max_runtime_seconds < 1
         ):
             raise ValueError("goal_max_turns and worker_max_runtime_seconds must be positive")
+        if worker_quorum is not None and not (1 <= worker_quorum <= len(worker_specs)):
+            raise ValueError(
+                f"worker_quorum must be between 1 and {len(worker_specs)} "
+                "(the number of workers in this swarm)"
+            )
+    elif worker_quorum is not None:
+        raise ValueError("worker_quorum is only meaningful for lane-bound swarms")
 
     # Resolve and validate every worker BEFORE creating any card.
     #
@@ -466,12 +514,22 @@ def create_swarm(
         "exact missing work."
         + context_suffix
     )
+    if worker_quorum is not None:
+        verifier_body += (
+            f"\n\nThis swarm has a quorum of {worker_quorum} out of "
+            f"{len(worker_specs)} workers -- verify and pass once at least "
+            f"{worker_quorum} worker lanes have usable results, even if one "
+            "or more other lanes never produced one. Do not wait for or "
+            "demand evidence from a lane that never completed."
+        )
     if lane_mode:
         verifier_contract = {
             "version": 1,
             "role": "verifier",
             "root_id": root,
-            "expected_lane_count": len(worker_specs),
+            "expected_lane_count": (
+                worker_quorum if worker_quorum is not None else len(worker_specs)
+            ),
         }
         verifier_body += "\n" + _completion_requirements(verifier_contract)
         verifier_body += "\n" + _contract_line(verifier_contract)
@@ -525,9 +583,60 @@ def create_swarm(
         root,
         author=created_by,
         key="topology",
-        value=created.as_dict() | {"goal": goal},
+        value=created.as_dict() | {"goal": goal, "worker_quorum": worker_quorum},
     )
     return created
+
+
+def excuse_blocked_workers_below_quorum(conn: sqlite3.Connection) -> int:
+    """Archive ``blocked`` swarm workers once enough siblings already
+    reached ``done`` to satisfy their swarm's ``worker_quorum`` -- see
+    ``create_swarm``'s ``worker_quorum`` docstring section for the full
+    rationale. No-op for swarms created without a quorum.
+
+    Meant to be called once per dispatcher tick, before
+    ``recompute_ready`` (``archive_task`` calls ``recompute_ready``
+    itself on every excuse, so the verifier can become ``ready`` in the
+    same tick it's finally unblocked). Cheap when there is nothing to
+    do: only swarm workers matching ``role=worker`` in a
+    ``[swarm:contract]`` line can ever be selected, and most boards
+    have zero of those at any given moment.
+
+    Returns the number of tasks archived this call.
+    """
+    excused = 0
+    rows = conn.execute(
+        "SELECT id, body FROM tasks WHERE status = 'blocked'"
+    ).fetchall()
+    for row in rows:
+        contract = extract_contract(row["body"])
+        if not contract or contract.get("role") != "worker":
+            continue
+        root_id = contract.get("root_id")
+        if not root_id:
+            continue
+        topology = latest_blackboard(conn, root_id).get("topology")
+        if not isinstance(topology, dict):
+            continue
+        quorum = topology.get("worker_quorum")
+        if not isinstance(quorum, int) or quorum < 1:
+            continue
+        worker_ids = [str(w) for w in topology.get("worker_ids", []) if w]
+        if row["id"] not in worker_ids:
+            continue
+        done_count = 0
+        for worker_id in worker_ids:
+            if worker_id == row["id"]:
+                continue
+            sibling = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (worker_id,)
+            ).fetchone()
+            if sibling is not None and sibling["status"] == "done":
+                done_count += 1
+        if done_count >= quorum:
+            if kb.archive_task(conn, row["id"]):
+                excused += 1
+    return excused
 
 
 def post_blackboard_update(

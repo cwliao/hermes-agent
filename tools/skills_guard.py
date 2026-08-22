@@ -23,6 +23,7 @@ Usage:
 """
 
 import re
+import shlex
 import fnmatch
 import hashlib
 import json
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 
-SCANNER_VERSION = "skills-guard-v1"
+SCANNER_VERSION = "skills-guard-v2"
 
 
 
@@ -174,10 +175,9 @@ THREAT_PATTERNS = [
      "reads secret via Ruby ENV[]"),
 
     # ── Exfiltration: DNS and staging ──
-    # Do not match flag names such as llama.cpp `--host 127.0.0.1 --port $PORT`.
-    (r'(?<![-/])\b(dig|nslookup|host)\s+[^\n]*\$',
-     "dns_exfil", "critical", "exfiltration",
-     "DNS lookup with variable interpolation (possible DNS exfiltration)"),
+    # DNS exfiltration is detected separately by
+    # ``_dns_command_uses_variable``. A plain regex cannot distinguish a
+    # command from an argument such as ``--host`` or ``echo /usr/bin/host``.
     (r'>\s*/tmp/[^\s]*\s*&&\s*(curl|wget|nc|python)',
      "tmp_staging", "critical", "exfiltration",
      "writes to /tmp then exfiltrates"),
@@ -529,6 +529,169 @@ _COMPILED_THREAT_PATTERNS = [
     for pattern, pid, severity, category, description in THREAT_PATTERNS
 ]
 
+_DNS_LOOKUP_COMMANDS = {"dig", "host", "nslookup"}
+_DNS_COMMAND_SENTINEL = "__hermes_dns_lookup_command__"
+_DNS_COMMAND_SUBSTITUTION = re.compile(
+    r"\$\(\s*(?:command\s+-v|which)\s+"
+    r"(?:[\"']?[^\s\"']*/)?(?:dig|host|nslookup)[\"']?\s*\)",
+    re.IGNORECASE,
+)
+_SHELL_COMMAND_SEPARATORS = {";", "&&", "||", "|", "&", "(", ")"}
+_SHELL_CONTROL_PREFIXES = {"!", "if", "then", "elif", "while", "until", "do", "{"}
+_SUDO_OPTIONS_WITH_VALUE = {
+    "-C", "--close-from", "-D", "--chdir", "-g", "--group", "-h",
+    "--host", "-p", "--prompt", "-R", "--chroot", "-r", "--role",
+    "-t", "--type", "-u", "--user", "-T", "--command-timeout",
+}
+_ENV_OPTIONS_WITH_VALUE = {"-C", "--chdir", "-S", "--split-string", "-u", "--unset"}
+_TIME_OPTIONS_WITH_VALUE = {"-f", "--format", "-o", "--output"}
+
+
+def _shell_tokens(line: str) -> List[str]:
+    """Return shell-like tokens with quoting and backslash escapes resolved.
+
+    This is intentionally a detector, not a shell evaluator. Resolving the
+    lexical forms is enough to make ``'/usr/bin/host'``, ``h\\ost`` and
+    ``ho\"\"st`` equivalent without executing untrusted skill content.
+    """
+    try:
+        line = _DNS_COMMAND_SUBSTITUTION.sub(_DNS_COMMAND_SENTINEL, line)
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        raw_tokens = list(lexer)
+        tokens = []
+        for token in raw_tokens:
+            if token and all(char in ";&|()" for char in token):
+                while token:
+                    if token.startswith(("&&", "||")):
+                        tokens.append(token[:2])
+                        token = token[2:]
+                    else:
+                        tokens.append(token[0])
+                        token = token[1:]
+            else:
+                tokens.append(token)
+        return tokens
+    except ValueError:
+        # An unterminated quote is not a valid executable shell command. The
+        # other regex/obfuscation detectors still inspect the original line.
+        return []
+
+
+def _command_basename(token: str) -> str:
+    return token.rstrip("/").rsplit("/", 1)[-1].lower()
+
+
+def _unwrap_shell_command(
+    tokens: List[str], index: int, end: int
+) -> Tuple[List[str], int, int]:
+    """Resolve common wrappers and return tokens plus executable bounds."""
+    while index < end:
+        token = tokens[index]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
+            index += 1
+            continue
+
+        command = _command_basename(token)
+        if command in _SHELL_CONTROL_PREFIXES:
+            index += 1
+            continue
+        if command == "sudo":
+            index += 1
+            while index < end and tokens[index].startswith("-"):
+                option_token = tokens[index]
+                option = option_token.split("=", 1)[0]
+                index += 1
+                if option in _SUDO_OPTIONS_WITH_VALUE and "=" not in option_token:
+                    index += 1
+            continue
+        if command == "env":
+            index += 1
+            while index < end:
+                env_token = tokens[index]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", env_token):
+                    index += 1
+                    continue
+                if not env_token.startswith("-"):
+                    break
+                split_string = None
+                if env_token.startswith("--split-string="):
+                    split_string = env_token.split("=", 1)[1]
+                elif env_token.startswith("-S") and env_token != "-S":
+                    split_string = env_token[2:]
+                if split_string is not None:
+                    nested = _shell_tokens(split_string)
+                    tokens = nested + tokens[index + 1:end]
+                    index = 0
+                    end = len(tokens)
+                    break
+                env_option = env_token.split("=", 1)[0]
+                index += 1
+                if env_option in _ENV_OPTIONS_WITH_VALUE and "=" not in env_token:
+                    if env_option in {"-S", "--split-string"} and index < end:
+                        nested = _shell_tokens(tokens[index])
+                        tokens = nested + tokens[index + 1:end]
+                        index = 0
+                        end = len(tokens)
+                        break
+                    index += 1
+            continue
+        if command == "time":
+            index += 1
+            while index < end and tokens[index].startswith("-"):
+                time_token = tokens[index]
+                time_option = time_token.split("=", 1)[0]
+                index += 1
+                if time_option in _TIME_OPTIONS_WITH_VALUE and "=" not in time_token:
+                    index += 1
+            continue
+        if command in {"command", "exec", "nohup"}:
+            index += 1
+            while index < end and tokens[index].startswith("-"):
+                index += 1
+            continue
+        if command == "busybox":
+            index += 1
+            continue
+        break
+    return tokens, index, end
+
+
+def _dns_command_uses_variable(line: str) -> bool:
+    """Detect a DNS lookup command whose arguments interpolate a variable.
+
+    Detection is command-position aware. It accepts absolute and quoted
+    executable paths and common wrappers, while not treating a mere mention
+    of ``host`` in another command's arguments as execution.
+    """
+    tokens = _shell_tokens(line)
+    if not tokens:
+        return False
+
+    start = 0
+    while start < len(tokens):
+        end = start
+        while end < len(tokens) and tokens[end] not in _SHELL_COMMAND_SEPARATORS:
+            end += 1
+        command_tokens, executable, command_end = _unwrap_shell_command(
+            tokens, start, end
+        )
+        if (
+            executable < command_end
+            and (
+                _command_basename(command_tokens[executable]) in _DNS_LOOKUP_COMMANDS
+                or command_tokens[executable].lower() == _DNS_COMMAND_SENTINEL
+            )
+            and any(
+                "$" in token
+                for token in command_tokens[executable + 1:command_end]
+            )
+        ):
+            return True
+        start = end + 1
+    return False
+
 # Structural limits for skill directories
 MAX_FILE_COUNT = 50       # skills shouldn't have 50+ files
 MAX_TOTAL_SIZE_KB = 1024  # 1MB total is suspicious for a skill
@@ -618,6 +781,25 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
                     match=matched_text,
                     description=description,
                 ))
+
+    for i, line in enumerate(lines, start=1):
+        if ("dns_exfil", i) not in seen and _dns_command_uses_variable(line):
+            seen.add(("dns_exfil", i))
+            matched_text = line.strip()
+            if len(matched_text) > 120:
+                matched_text = matched_text[:117] + "..."
+            findings.append(Finding(
+                pattern_id="dns_exfil",
+                severity="critical",
+                category="exfiltration",
+                file=rel_path,
+                line=i,
+                match=matched_text,
+                description=(
+                    "DNS lookup with variable interpolation "
+                    "(possible DNS exfiltration)"
+                ),
+            ))
 
     # Invisible unicode character detection
     for i, line in enumerate(lines, start=1):

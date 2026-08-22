@@ -3845,22 +3845,14 @@ class SessionStore:
 
     @staticmethod
     def _is_fts_corruption_error(exc: Exception) -> bool:
-        """True if *exc* looks like an FTS index corruption error.
+        """True only when *exc* identifies an FTS index failure.
 
-        Matches the specific SQLite error strings for malformed disk images
-        and FTS table corruption — not bare ``"fts"`` substrings which match
-        unrelated words like ``"shifts"`` or ``"gifts"``.
+        Generic ``database disk image is malformed`` and unscoped malformed
+        schema errors can originate in canonical B-trees or freelist pages.
+        They must fail closed instead of triggering online index surgery.
         """
         text = str(exc).lower()
-        return any(
-            marker in text
-            for marker in (
-                "database disk image is malformed",
-                "malformed database schema",
-                "messages_fts",
-                "no such table: messages_fts",
-            )
-        )
+        return "messages_fts" in text or ("fts5" in text and "corrupt" in text)
 
     def _rebuild_fts_once(self) -> bool:
         """Attempt FTS5 ``rebuild`` command once per store lifetime.

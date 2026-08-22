@@ -922,7 +922,7 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     if str(text).strip().startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX):
         return ""
 
-    redacted = _redact_gateway_user_facing_secrets(raw_text)
+    redacted = _redact_gateway_user_facing_secrets(str(text))
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
@@ -17108,18 +17108,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
 
-        # Pending interactive state is user/session-scoped and must only be
-        # inspected after the authorization gate above. In particular, an
-        # anonymous sender outside an allowlisted chat must not reach a session
-        # key lookup before being dropped.
-        pending_ocr_result = await self._handle_pending_image_ocr_choice(event)
-        if pending_ocr_result is not None:
-            return pending_ocr_result
-
-        pending_last30days_result = await self._handle_pending_last30days_choice(event)
-        if pending_last30days_result is not None:
-            return pending_last30days_result
-
         # Global emergency stop (`hermes pause`): give new turns a brief
         # paused notice instead of starting an agent run. Internal events
         # (background-process completions from IN-FLIGHT work) bypass the
@@ -17190,6 +17178,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         getattr(source, "chat_id", None) or "unknown",
                     )
                     return _paused_notice
+
+        # Pending interactive state is user/session-scoped and must only be
+        # inspected after both authorization and the global emergency-stop
+        # gate. These choices can start new work, so a paused gateway must not
+        # consume them before returning the upstream pause response.
+        pending_ocr_result = await self._handle_pending_image_ocr_choice(event)
+        if pending_ocr_result is not None:
+            return pending_ocr_result
+
+        pending_last30days_result = await self._handle_pending_last30days_choice(event)
+        if pending_last30days_result is not None:
+            return pending_last30days_result
 
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
@@ -25573,7 +25573,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             plan_path = self._write_last30days_plan_file(topic, engine_sources)
             args.extend(["--plan", plan_path])
         timeout_s = 480 if mode == "deep" else 180
-        env = os.environ.copy()
+        from tools.environments.local import build_subprocess_env
+
+        env = build_subprocess_env(
+            scrub_secrets=False,
+            inherit_profile_home=False,
+        )
         venv_bin = "/home/cwliao/.hermes/hermes-agent/venv/bin"
         env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
         env.setdefault("NO_COLOR", "1")
@@ -26043,9 +26048,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _image_analysis_prompt(self, *, ocr_translate: bool = False) -> str:
         if not ocr_translate:
             return (
-                "Describe everything visible in this image in thorough detail. "
-                "Include any text, code, data, objects, people, layout, colors, "
-                "and any other notable visual information."
+                "Concisely describe this image in 2-4 sentences. Focus on the "
+                "main subject, visible text, and details needed to answer the "
+                "user's request. Skip decorative details."
             )
 
         settings = self._image_ocr_translate_config()
@@ -29976,6 +29981,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # No real thread yet, but the connector will auto-thread on the
             # reply anchor; carry it so progress joins that thread.
             _progress_metadata = {"reply_to_message_id": event_message_id}
+        if (
+            source.platform == Platform.SLACK
+            and _progress_thread_id
+            and event_message_id
+        ):
+            # Match the upstream target-metadata path for Slack DM fallback:
+            # ``thread_id`` routes the progress bubble and ``message_id``
+            # identifies the real event anchor rather than a synthetic key.
+            _progress_metadata = dict(_progress_metadata or {})
+            _progress_metadata.setdefault("message_id", str(event_message_id))
         _progress_metadata = _non_conversational_metadata(_progress_metadata, platform=source.platform)
         if _native_slack_task_cards:
             # chat.startStream in channels requires the recipient team/user

@@ -1,6 +1,11 @@
 ---
 name: kanban-worker
-description: Complete a Kanban worker run with metadata-only handoff and validated token usage.
+description: Complete a validated Kanban worker run.
+version: 1.0.0
+author: Keven Liao, Hermes Agent
+license: MIT
+platforms: [linux, macos, windows]
+tags: [kanban, worker, multi-agent, handoff]
 ---
 
 # Kanban worker handoff

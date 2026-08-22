@@ -2210,9 +2210,10 @@ class ShellFileOperations(FileOperations):
             content_verified = None
 
         # A successful atomic rename is not sufficient evidence for an agent
-        # that may be writing through SSH/container backends. Re-read the
-        # target and compare the intended bytes before claiming completion.
-        verify_cmd = f"cat {self._escape_shell_arg(path)} 2>/dev/null"
+        # that may be writing through SSH/container backends. Re-read through
+        # base64 so arbitrary bytes (including surrogateescape round-trips)
+        # survive terminal transports that decode stdout with replacement.
+        verify_cmd = f"base64 < {self._escape_shell_arg(path)} 2>/dev/null"
         verify_result = self._exec(verify_cmd)
         if verify_result.exit_code != 0:
             return WriteResult(
@@ -2225,11 +2226,12 @@ class ShellFileOperations(FileOperations):
                     evidence={"reason": "read_back_failed"},
                 ),
             )
-        verify_bomless, _ = _strip_bom(verify_result.stdout)
-        expected_bomless, _ = _strip_bom(content)
-        verify_normalized = verify_bomless.replace("\r\n", "\n").replace("\r", "\n")
-        expected_normalized = expected_bomless.replace("\r\n", "\n").replace("\r", "\n")
-        if verify_normalized != expected_normalized:
+        encoded = "".join(_strip_terminal_fence_leaks(verify_result.stdout).split())
+        try:
+            verify_bytes = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            verify_bytes = None
+        if verify_bytes != content_bytes:
             return WriteResult(
                 bytes_written=bytes_written,
                 dirs_created=dirs_created,

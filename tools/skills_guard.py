@@ -8,6 +8,7 @@ agent-config files surface only the low *_ref finding — static regexes cannot 
 destination; future coverage belongs as a fourth "mechanical" tier next to agent_config_mod_shell."""
 
 import re
+import shlex
 import fnmatch
 import hashlib
 import json
@@ -162,12 +163,9 @@ THREAT_PATTERNS = [
     # Case-sensitive Ruby ENV: (?-i:) keeps Python `env[...]` dict access from matching under IGNORECASE.
     (r'(?-i:ENV)\[.*(?:KEY|TOKEN|SECRET|PASSWORD)', "ruby_env_secret", "critical", "exfiltration", "reads secret via Ruby ENV[]"),
     # ── Exfiltration: DNS and staging ──
-    # Exfil puts the data in the queried NAME: the first positional argument (after
-    # optional -flags with values, +opts, @server) carries the interpolation. Anything
-    # looser fires on the English noun in prose ("set the host value and run
-    # `${SKILL_DIR}/x`") and on flag names such as llama.cpp `--host 127.0.0.1 --port $PORT`.
-    (r'(?<![-/])\b(dig|nslookup|host)\s+(?:[-+@]\S*(?:\s+[^\s$"\'-][^\s$]*)?\s+)*["\']?[^\s"\'$]*\$',
-     "dns_exfil", "critical", "exfiltration", "DNS lookup with variable interpolation (possible DNS exfiltration)"),
+    # DNS exfiltration is detected separately by
+    # ``_dns_command_uses_variable``. A plain regex cannot distinguish a
+    # command from an argument such as ``--host`` or ``echo /usr/bin/host``.
     (r'>\s*/tmp/[^\s]*\s*&&\s*(curl|wget|nc|python)',  # no-tmp: ok — malicious-pattern regex
      "tmp_staging", "critical", "exfiltration", "writes to /tmp then exfiltrates"),  # no-tmp: ok — malicious-pattern label
     # ── Exfiltration: markdown/link based ──
@@ -452,6 +450,189 @@ def _demote_inert_path_reference(pid: str, severity: str, description: str, line
 # Structural limits: file count; total KB (5MB, informational only — large skills don't block); single-file KB.
 MAX_FILE_COUNT, MAX_TOTAL_SIZE_KB, MAX_SINGLE_FILE_KB = 50, 5120, 256
 
+_DNS_LOOKUP_COMMANDS = {"dig", "host", "nslookup"}
+_DNS_COMMAND_SENTINEL = "__hermes_dns_lookup_command__"
+_DNS_COMMAND_SUBSTITUTION = re.compile(
+    r"\$\(\s*(?:command\s+-v|which)\s+"
+    r"(?:[\"']?[^\s\"']*/)?(?:dig|host|nslookup)[\"']?\s*\)",
+    re.IGNORECASE,
+)
+_SHELL_COMMAND_SEPARATORS = {";", "&&", "||", "|", "&", "(", ")"}
+# A JS/TS template literal embedding a shell command (`dig +short A ${host}`) is not
+# itself valid shell syntax -- the surrounding `const x = ...;` would make "const" look
+# like the command head. Extract the backtick-delimited content and check it on its own.
+_BACKTICK_LITERAL = re.compile(r"`([^`]+)`")
+_SHELL_CONTROL_PREFIXES = {"!", "if", "then", "elif", "while", "until", "do", "{"}
+_SUDO_OPTIONS_WITH_VALUE = {
+    "-C", "--close-from", "-D", "--chdir", "-g", "--group", "-h",
+    "--host", "-p", "--prompt", "-R", "--chroot", "-r", "--role",
+    "-t", "--type", "-u", "--user", "-T", "--command-timeout",
+}
+_ENV_OPTIONS_WITH_VALUE = {"-C", "--chdir", "-S", "--split-string", "-u", "--unset"}
+_TIME_OPTIONS_WITH_VALUE = {"-f", "--format", "-o", "--output"}
+
+
+def _shell_tokens(line: str) -> List[str]:
+    """Return shell-like tokens with quoting and backslash escapes resolved.
+
+    This is intentionally a detector, not a shell evaluator. Resolving the
+    lexical forms is enough to make ``'/usr/bin/host'``, ``h\\ost`` and
+    ``ho\"\"st`` equivalent without executing untrusted skill content.
+    """
+    try:
+        line = _DNS_COMMAND_SUBSTITUTION.sub(_DNS_COMMAND_SENTINEL, line)
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        raw_tokens = list(lexer)
+        tokens = []
+        for token in raw_tokens:
+            if token and all(char in ";&|()" for char in token):
+                while token:
+                    if token.startswith(("&&", "||")):
+                        tokens.append(token[:2])
+                        token = token[2:]
+                    else:
+                        tokens.append(token[0])
+                        token = token[1:]
+            else:
+                # A leading/trailing backtick marks a JS/TS template-literal boundary
+                # (`dig +short A ${host}`), not part of the shell token itself --
+                # strip it so an embedded shell command tokenizes the same way it
+                # would in a real shell line.
+                tokens.append(token.strip("`"))
+        return tokens
+    except ValueError:
+        # An unterminated quote is not a valid executable shell command. The
+        # other regex/obfuscation detectors still inspect the original line.
+        return []
+
+
+def _command_basename(token: str) -> str:
+    return token.rstrip("/").rsplit("/", 1)[-1].lower()
+
+
+def _unwrap_shell_command(
+    tokens: List[str], index: int, end: int
+) -> Tuple[List[str], int, int]:
+    """Resolve common wrappers and return tokens plus executable bounds."""
+    while index < end:
+        token = tokens[index]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
+            index += 1
+            continue
+
+        command = _command_basename(token)
+        if command in _SHELL_CONTROL_PREFIXES:
+            index += 1
+            continue
+        if command == "sudo":
+            index += 1
+            while index < end and tokens[index].startswith("-"):
+                option_token = tokens[index]
+                option = option_token.split("=", 1)[0]
+                index += 1
+                if option in _SUDO_OPTIONS_WITH_VALUE and "=" not in option_token:
+                    index += 1
+            continue
+        if command == "env":
+            index += 1
+            while index < end:
+                env_token = tokens[index]
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", env_token):
+                    index += 1
+                    continue
+                if not env_token.startswith("-"):
+                    break
+                split_string = None
+                if env_token.startswith("--split-string="):
+                    split_string = env_token.split("=", 1)[1]
+                elif env_token.startswith("-S") and env_token != "-S":
+                    split_string = env_token[2:]
+                if split_string is not None:
+                    nested = _shell_tokens(split_string)
+                    tokens = nested + tokens[index + 1:end]
+                    index = 0
+                    end = len(tokens)
+                    break
+                env_option = env_token.split("=", 1)[0]
+                index += 1
+                if env_option in _ENV_OPTIONS_WITH_VALUE and "=" not in env_token:
+                    if env_option in {"-S", "--split-string"} and index < end:
+                        nested = _shell_tokens(tokens[index])
+                        tokens = nested + tokens[index + 1:end]
+                        index = 0
+                        end = len(tokens)
+                        break
+                    index += 1
+            continue
+        if command == "time":
+            index += 1
+            while index < end and tokens[index].startswith("-"):
+                time_token = tokens[index]
+                time_option = time_token.split("=", 1)[0]
+                index += 1
+                if time_option in _TIME_OPTIONS_WITH_VALUE and "=" not in time_token:
+                    index += 1
+            continue
+        if command in {"command", "exec", "nohup"}:
+            index += 1
+            while index < end and tokens[index].startswith("-"):
+                index += 1
+            continue
+        if command == "busybox":
+            index += 1
+            continue
+        break
+    return tokens, index, end
+
+
+def _dns_command_uses_variable(line: str) -> bool:
+    """Detect a DNS lookup command whose arguments interpolate a variable.
+
+    Detection is command-position aware. It accepts absolute and quoted
+    executable paths and common wrappers, while not treating a mere mention
+    of ``host`` in another command's arguments as execution. Also checks
+    inside any backtick-delimited template-literal content on the line,
+    since ``const x = `dig A ${host}`;`` is not shell syntax on its own --
+    without this, the surrounding JS/TS statement would make "const" look
+    like the command head instead of "dig".
+    """
+    if _dns_command_uses_variable_tokens(_shell_tokens(line)):
+        return True
+    return any(
+        _dns_command_uses_variable_tokens(_shell_tokens(literal))
+        for literal in _BACKTICK_LITERAL.findall(line)
+    )
+
+
+def _dns_command_uses_variable_tokens(tokens: List[str]) -> bool:
+    if not tokens:
+        return False
+
+    start = 0
+    while start < len(tokens):
+        end = start
+        while end < len(tokens) and tokens[end] not in _SHELL_COMMAND_SEPARATORS:
+            end += 1
+        command_tokens, executable, command_end = _unwrap_shell_command(
+            tokens, start, end
+        )
+        if (
+            executable < command_end
+            and (
+                _command_basename(command_tokens[executable]) in _DNS_LOOKUP_COMMANDS
+                or command_tokens[executable].lower() == _DNS_COMMAND_SENTINEL
+            )
+            and any(
+                "$" in token
+                for token in command_tokens[executable + 1:command_end]
+            )
+        ):
+            return True
+        start = end + 1
+    return False
+
 # Text extensions to scan; known binary extensions that should NOT be in a skill; script types allowed +x.
 SCANNABLE_EXTENSIONS = {
     '.md', '.txt', '.py', '.sh', '.bash', '.js', '.ts', '.rb', '.yaml', '.yml', '.json', '.toml',
@@ -567,18 +748,43 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
     except (UnicodeDecodeError, OSError):
         return []
     findings = []
+    seen = set()
     docstring_lines = _compute_docstring_lines(lines)  # so code patterns don't fire on prose
     traversal_lines = _mask_prose_link_destinations(lines) if file_path.suffix.lower() == ".md" else lines
     suffix, owners = file_path.suffix.lower(), _statement_owners(lines)  # per-file context for the demotion
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
         for i, line in enumerate(lines, start=1):
+            if i in docstring_lines or (pid, i) in seen:
+                continue
             scan_line = traversal_lines[i - 1] if pid in _PATH_TRAVERSAL_PATTERN_IDS else line
-            if i not in docstring_lines and pattern.search(scan_line):
+            if pattern.search(scan_line):
+                seen.add((pid, i))
                 text = line.strip()
                 line_severity, line_description = _demote_inert_path_reference(
                     pid, severity, description, line, lines[owners[i - 1]], suffix)
                 findings.append(Finding(pid, line_severity, category, rel_path, i,
                                         text if len(text) <= 120 else text[:117] + "...", line_description))
+
+    for i, line in enumerate(lines, start=1):
+        if ("dns_exfil", i) not in seen and _dns_command_uses_variable(line):
+            seen.add(("dns_exfil", i))
+            matched_text = line.strip()
+            if len(matched_text) > 120:
+                matched_text = matched_text[:117] + "..."
+            findings.append(Finding(
+                pattern_id="dns_exfil",
+                severity="critical",
+                category="exfiltration",
+                file=rel_path,
+                line=i,
+                match=matched_text,
+                description=(
+                    "DNS lookup with variable interpolation "
+                    "(possible DNS exfiltration)"
+                ),
+            ))
+
+    # Invisible unicode character detection
     for i, line in enumerate(lines, start=1):
         if (char := next((c for c in INVISIBLE_CHARS if c in line), None)) is not None:
             name = _unicode_char_name(char)

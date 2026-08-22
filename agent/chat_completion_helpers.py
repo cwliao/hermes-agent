@@ -1676,7 +1676,8 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         extra_body = request_overrides.get("extra_body") or {}
         chat_template_kwargs = extra_body.get("chat_template_kwargs") or {}
         if chat_template_kwargs.get("enable_thinking") is False:
-            content = reasoning_text
+            from agent.redact import redact_sensitive_text
+            content = redact_sensitive_text(reasoning_text)
             reasoning_text = None
     msg = stamp_message_timestamp({"role": "assistant",
         "content": content, "reasoning": reasoning_text,

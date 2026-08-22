@@ -961,7 +961,7 @@ class TurnRunner:
         ctx = self._ctx
         runner = self._runner
         src = ctx.source
-        return ctx.AIAgent(
+        agent = ctx.AIAgent(
             model=turn_route["model"], **turn_route["runtime"], **_checkpoint_agent_kwargs(ctx.user_config),
             max_iterations=max_iterations, quiet_mode=True, verbose_logging=False,
             enabled_toolsets=ctx.enabled_toolsets, disabled_toolsets=ctx.disabled_toolsets,
@@ -984,6 +984,14 @@ class TurnRunner:
             # Keep the persona even with minimal context: soul identity is one small file.
             load_soul_identity=True,
         )
+        # Preserve provider-owned request overrides separately from transient
+        # per-turn routing options. A reused agent must retain nested fields
+        # such as ``extra_body.chat_template_kwargs``.
+        from gateway.run import _merge_gateway_request_overrides
+        agent._gateway_provider_request_overrides = _merge_gateway_request_overrides(
+            {}, getattr(agent, "request_overrides", None)
+        )
+        return agent
 
     def _resolve_turn_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr):
         """Reuse this session's cached AIAgent (frozen system prompt + tool schemas → prompt cache
@@ -1082,13 +1090,20 @@ class TurnRunner:
         """Merge, never overwrite: init-time request overrides (e.g. a custom provider's extra_body)
         must survive every reused-agent turn. Drop only the PREVIOUS turn's routing overrides before
         layering this turn's, so stale per-turn values never linger."""
-        overrides = dict(getattr(agent, "request_overrides", {}) or {})
-        for key, value in (getattr(agent, "_gateway_turn_request_overrides", {}) or {}).items():
-            if overrides.get(key) == value:
-                overrides.pop(key, None)
+        from gateway.run import _merge_gateway_request_overrides
+        provider_overrides = getattr(agent, "_gateway_provider_request_overrides", None)
+        if provider_overrides is None:
+            # Compatibility for agents cached before this field existed.
+            current = dict(getattr(agent, "request_overrides", {}) or {})
+            for key, value in (getattr(agent, "_gateway_turn_request_overrides", {}) or {}).items():
+                if current.get(key) == value:
+                    current.pop(key, None)
+            provider_overrides = _merge_gateway_request_overrides({}, current)
+            agent._gateway_provider_request_overrides = provider_overrides
         turn_overrides = dict(turn_route.get("request_overrides") or {})
-        overrides.update(turn_overrides)
-        agent.request_overrides = overrides
+        agent.request_overrides = _merge_gateway_request_overrides(
+            provider_overrides, turn_overrides,
+        )
         agent._gateway_turn_request_overrides = turn_overrides
 
     def _wire_turn_agent_callbacks(self, agent, turn_route, reasoning_config,

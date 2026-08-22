@@ -109,7 +109,24 @@ def _gateway_session_db_inner(gateway):
     """The raw SessionDB behind ``gateway._session_db`` (unwrapping the async facade), or None."""
     session_db = getattr(gateway, "_session_db", None)
     return getattr(session_db, "_db", session_db)
+def _merge_gateway_request_overrides(base: Any, turn: Any) -> dict:
+    """Overlay turn-local request options without dropping provider config.
 
+    Custom-provider request fields are resolved when ``AIAgent`` is created.
+    Gateway turn routing adds transient options such as ``service_tier``.
+    Merge dictionaries recursively so a turn option cannot erase nested
+    provider fields such as ``extra_body.chat_template_kwargs``.
+    """
+    merged = dict(base) if isinstance(base, dict) else {}
+    if not isinstance(turn, dict):
+        return merged
+    for key, value in turn.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_gateway_request_overrides(existing, value)
+        else:
+            merged[key] = value
+    return merged
 
 def _hygiene_cooldown_for_failure(gateway, session_key: str, base_cooldown_seconds: float) -> float:
     """Bump the hygiene failure streak and return the escalated cooldown (x1/x3/x9 over base, clamped).

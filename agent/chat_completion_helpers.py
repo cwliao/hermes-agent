@@ -1127,6 +1127,22 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         from agent.redact import redact_sensitive_text
         _san_content = redact_sensitive_text(_san_content)
 
+    # vLLM reasoning-parser fallback quirk (seen on step3p5): when a call is
+    # explicitly sent with extra_body.chat_template_kwargs.enable_thinking
+    # false but the model still emits a short answer with no <think> tags,
+    # the parser misclassifies the whole output as reasoning and `content`
+    # comes back null while the real answer sits in `reasoning`. Only
+    # promote reasoning to content when we can confirm THIS call was sent
+    # non-thinking — an empty content on a genuine thinking-mode response is
+    # a real failure, not evidence the answer is hiding in reasoning.
+    if not _san_content and reasoning_text:
+        _req_overrides = getattr(agent, "request_overrides", None) or {}
+        _req_extra_body = _req_overrides.get("extra_body") or {}
+        _chat_template_kwargs = _req_extra_body.get("chat_template_kwargs") or {}
+        if _chat_template_kwargs.get("enable_thinking") is False:
+            _san_content = reasoning_text
+            reasoning_text = None
+
     msg = {
         "role": "assistant",
         "content": _san_content,

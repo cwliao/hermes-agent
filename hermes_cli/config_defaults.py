@@ -3726,8 +3726,9 @@ DEFAULT_CONFIG = {
         "region": "global",
     },
 
-    # Config schema version - bump this when adding new required fields
-    "_config_version": 41,
+    # Config schema version. Fork-only additions above are optional defaults
+    # and do not consume upstream migration version numbers.
+    "_config_version": 38,
 }
 
 # Optional environment variables that enhance functionality

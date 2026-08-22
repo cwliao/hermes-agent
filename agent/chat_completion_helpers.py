@@ -2175,6 +2175,26 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     if isinstance(_san_content, str) and _san_content:
         _san_content = agent._strip_think_blocks(_san_content).strip()
 
+    # vLLM reasoning-parser fallback quirk (seen on step3p5): when a call is
+    # explicitly sent with extra_body.chat_template_kwargs.enable_thinking
+    # false but the model still emits a short answer with no <think> tags,
+    # the parser misclassifies the whole output as reasoning and `content`
+    # comes back null while the real answer sits in `reasoning`. Only
+    # promote reasoning to content when we can confirm THIS call was sent
+    # non-thinking — an empty content on a genuine thinking-mode response is
+    # a real failure, not evidence the answer is hiding in reasoning.
+    #
+    # This must happen before content redaction below.  Once promoted, the
+    # text is ordinary assistant content and must pass through the same
+    # persistence/delivery safety boundary as a normal model answer.
+    if not _san_content and reasoning_text:
+        _req_overrides = getattr(agent, "request_overrides", None) or {}
+        _req_extra_body = _req_overrides.get("extra_body") or {}
+        _chat_template_kwargs = _req_extra_body.get("chat_template_kwargs") or {}
+        if _chat_template_kwargs.get("enable_thinking") is False:
+            _san_content = reasoning_text
+            reasoning_text = None
+
     # Defence-in-depth: redact credentials (PATs, API keys, Bearer tokens)
     # from assistant content BEFORE the message enters conversation history.
     # If the model accidentally inlines a secret in its natural-language
@@ -2196,22 +2216,6 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # broke codex commentary turns (content:'' is a designed state there), and
     # a DB-side pad can't survive ``_rows_to_conversation``'s whitespace strip
     # anyway.  Repair belongs at the send boundary, once.
-
-    # vLLM reasoning-parser fallback quirk (seen on step3p5): when a call is
-    # explicitly sent with extra_body.chat_template_kwargs.enable_thinking
-    # false but the model still emits a short answer with no <think> tags,
-    # the parser misclassifies the whole output as reasoning and `content`
-    # comes back null while the real answer sits in `reasoning`. Only
-    # promote reasoning to content when we can confirm THIS call was sent
-    # non-thinking — an empty content on a genuine thinking-mode response is
-    # a real failure, not evidence the answer is hiding in reasoning.
-    if not _san_content and reasoning_text:
-        _req_overrides = getattr(agent, "request_overrides", None) or {}
-        _req_extra_body = _req_overrides.get("extra_body") or {}
-        _chat_template_kwargs = _req_extra_body.get("chat_template_kwargs") or {}
-        if _chat_template_kwargs.get("enable_thinking") is False:
-            _san_content = reasoning_text
-            reasoning_text = None
 
     msg = stamp_message_timestamp({
         "role": "assistant",

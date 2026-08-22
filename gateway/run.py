@@ -164,6 +164,26 @@ _HYGIENE_COOLDOWN_LADDER_MULTIPLIERS = (1, 3, 9)
 _HYGIENE_COOLDOWN_MAX_SECONDS = 3600.0
 
 
+def _merge_gateway_request_overrides(base: Any, turn: Any) -> dict:
+    """Overlay turn-local request options without dropping provider config.
+
+    Custom-provider request fields are resolved when ``AIAgent`` is created.
+    Gateway turn routing adds transient options such as ``service_tier``.
+    Merge dictionaries recursively so a turn option cannot erase nested
+    provider fields such as ``extra_body.chat_template_kwargs``.
+    """
+    merged = dict(base) if isinstance(base, dict) else {}
+    if not isinstance(turn, dict):
+        return merged
+    for key, value in turn.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_gateway_request_overrides(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def _hygiene_cooldown_for_failure(
     gateway,
     session_key: str,
@@ -5986,6 +6006,15 @@ class TurnRunner:
                 # a single small file, not part of the expensive walk.
                 load_soul_identity=True,
             )
+            # ``AIAgent`` merges custom-provider ``extra_body`` into the
+            # constructor's request overrides. Preserve that provider-owned
+            # baseline separately; per-turn gateway routing is transient and
+            # must never erase it when /fast is off.
+            agent._gateway_provider_request_overrides = (
+                _merge_gateway_request_overrides(
+                    {}, getattr(agent, "request_overrides", None)
+                )
+            )
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     # Record the session_id the snapshot was taken for
@@ -6074,7 +6103,19 @@ class TurnRunner:
         agent.event_callback = ctx._event_callback_sync
         agent.reasoning_config = reasoning_config
         agent.service_tier = self._runner._service_tier
-        agent.request_overrides = turn_route.get("request_overrides") or {}
+        _provider_request_overrides = getattr(
+            agent, "_gateway_provider_request_overrides", None
+        )
+        if _provider_request_overrides is None:
+            # Compatibility for agents cached before this field existed.
+            _provider_request_overrides = _merge_gateway_request_overrides(
+                {}, getattr(agent, "request_overrides", None)
+            )
+            agent._gateway_provider_request_overrides = _provider_request_overrides
+        agent.request_overrides = _merge_gateway_request_overrides(
+            _provider_request_overrides,
+            turn_route.get("request_overrides"),
+        )
         # Must-deliver notes for THIS turn ride the current user message
         # (api_content sidecar), never the system prompt: staged by
         # _handle_message_with_agent (auto-reset note, first-contact

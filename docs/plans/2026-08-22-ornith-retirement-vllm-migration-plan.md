@@ -80,6 +80,23 @@ fallback_providers:
 5. **`ornith:35b` 保留至確認遷移完成**：本方案完全上線、觀察穩定後，才能通知可以清除 `ornith:35b`。
 6. **`OLLAMA_MAX_LOADED_MODELS` 4→2 的連動風險（新發現，來自 Ticket 56 文件）**：docagent 那邊計畫把 Ollama 的同時載入模型數上限從 4 降到 2（`~/open-webui-stack/compose.yaml`）。Ticket 56 文件明確排除「清掉 `ornith:35b`」、明確排除「處理 Hermes 遷移」，但這個上限調整仍會影響 Hermes：如果本方案上線後 Hermes 的 fallback 是 `gpt-oss:20b`（透過 Ollama），跟 DocuBot/DocHelper/klib 等其他消費者共用同一個 Ollama container 時，模型驅逐（reload）頻率會比現在更高。**這不是本方案的阻擋項，但實作前應該跟 docagent/vLLM 那邊確認這個上限調整的時程，避免兩邊改動疊加造成非預期的 cold-load 延遲。**
 
+## 阻擋項（實作後才發現，兩份交叉審查都沒抓到）
+
+**已試跑實作，發現真正的硬性阻擋，已回滾**：照上方方案把 `~/.hermes/config.yaml` 改成指向 vLLM 後，`hermes chat` 端對端測試直接失敗：
+
+```
+Failed to initialize agent: Model drafter-active has a context window of 32,768
+tokens, which is below the minimum 64,000 required by Hermes Agent.
+```
+
+`vllm-production` 目前的啟動參數是 `--max-model-len 32768`（docagent 自己為 drafting workload 調的）。Hermes 的 agent 初始化**硬性要求**模型 context window 至少 64K，低於這個門檻直接拒絕啟動，不是警告。這**不是伺服器回報錯誤數字的情況**（那種可以用 `model.context_length` 覆寫），32K 是 vLLM 真實配置的上限——覆寫成假數字會導致實際使用時截斷/出錯，不能這樣處理。
+
+**已立即回滾**：`config.yaml` 改回 `ornith:35b`，`hermes-gateway.service` 重啟，`hermes chat` 端對端測試確認恢復正常（正式環境曾有短暫時間處於「新訊息進來會初始化失敗」的風險窗口，已排除）。
+
+**這個問題兩次獨立交叉審查都沒抓到**——兩份審查都只驗證了 config schema/機制層面（provider 解析、`extra_body`、`fallback_providers`），沒有人實際跑一次完整的 agent 初始化流程去踩到這個門檻，是這次手動端對端測試才發現的。
+
+**下一步（待與 vLLM 那邊協調，非 Hermes 單方面能解決）**：詢問 vLLM 那邊 `--max-model-len` 調到至少 64000 是否可行——這會增加 vLLM 的 KV cache 記憶體用量（隨 context 長度與併發數增加），可能影響他們自己的資源預算與 docagent 的 drafting workload 調校，需要他們評估，不是 Hermes 這邊能單方面決定或調整的。
+
 ## 尚未執行的動作
 
 - 尚未修改任何 Hermes 檔案。

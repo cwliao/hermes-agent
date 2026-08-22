@@ -22,6 +22,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from agent.chat_completion_helpers import build_assistant_message
+from agent.conversation_loop import (
+    _promote_explicit_non_thinking_reasoning_response,
+)
+from agent.transports.types import NormalizedResponse
 from gateway.run import _merge_gateway_request_overrides
 
 
@@ -34,7 +38,10 @@ def _make_agent(request_overrides=None):
     agent.stream_delta_callback = None
     agent._stream_callback = None
     agent.request_overrides = request_overrides or {}
-    agent._extract_reasoning = lambda msg: getattr(msg, "reasoning_content", None)
+    agent._extract_reasoning = lambda msg: (
+        getattr(msg, "reasoning", None)
+        or getattr(msg, "reasoning_content", None)
+    )
     agent._strip_think_blocks = lambda s: s
     agent._needs_thinking_reasoning_pad = lambda: False
     return agent
@@ -110,6 +117,134 @@ def test_normal_content_untouched_when_sent_non_thinking() -> None:
     assert msg["reasoning"] is None
 
 
+def test_normalized_response_promoted_before_empty_response_handling() -> None:
+    """The live loop must see content before entering thinking-prefill."""
+    agent = _make_agent(request_overrides=_non_thinking_overrides())
+    response = NormalizedResponse(
+        content=None,
+        tool_calls=None,
+        finish_reason="stop",
+        reasoning="4.",
+    )
+
+    promoted = _promote_explicit_non_thinking_reasoning_response(agent, response)
+
+    assert promoted is True
+    assert response.content == "4."
+    assert response.reasoning is None
+
+
+def test_normalized_response_keeps_genuine_thinking_mode_empty() -> None:
+    agent = _make_agent(request_overrides={})
+    response = NormalizedResponse(
+        content=None,
+        tool_calls=None,
+        finish_reason="stop",
+        reasoning="some thinking trace",
+    )
+
+    promoted = _promote_explicit_non_thinking_reasoning_response(agent, response)
+
+    assert promoted is False
+    assert response.content is None
+    assert response.reasoning == "some thinking trace"
+
+
+def test_normalized_reasoning_content_is_promoted_and_cleared() -> None:
+    agent = _make_agent(request_overrides=_non_thinking_overrides())
+    response = NormalizedResponse(
+        content=None,
+        tool_calls=None,
+        finish_reason="stop",
+        provider_data={"reasoning_content": "answer"},
+    )
+
+    promoted = _promote_explicit_non_thinking_reasoning_response(agent, response)
+
+    assert promoted is True
+    assert response.content == "answer"
+    assert response.reasoning_content is None
+
+
+def test_normalized_promotion_passes_through_secret_redaction() -> None:
+    agent = _make_agent(request_overrides=_non_thinking_overrides())
+    response = NormalizedResponse(
+        content=None,
+        tool_calls=None,
+        finish_reason="stop",
+        reasoning="SECRET",
+    )
+
+    with patch("agent.redact.redact_sensitive_text", return_value="[REDACTED]") as redact:
+        promoted = _promote_explicit_non_thinking_reasoning_response(agent, response)
+
+    assert promoted is True
+    redact.assert_called_once_with("SECRET")
+    assert response.content == "[REDACTED]"
+    assert response.reasoning is None
+
+
+def test_real_conversation_loop_promotes_before_thinking_prefill(
+    tmp_path, monkeypatch
+) -> None:
+    """Exercise the real no-tool final-response control flow.
+
+    This is the gap the original builder-only tests missed: the loop used to
+    decide that raw content=null was thinking-only before the builder could
+    promote the answer.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+    from run_agent import AIAgent
+
+    agent = AIAgent(
+        model="drafter-active",
+        api_key="no-key-required",
+        base_url="https://example.invalid/v1",
+        provider="custom",
+        api_mode="chat_completions",
+        request_overrides=_non_thinking_overrides(),
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        skip_background_review=True,
+        platform="cli",
+    )
+    agent._disable_streaming = True
+    calls = 0
+
+    def _reasoning_only(_api_kwargs):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    reasoning="4.",
+                    reasoning_content=None,
+                    reasoning_details=None,
+                    tool_calls=None,
+                ),
+                finish_reason="stop",
+            )],
+            usage=None,
+            model="drafter-active",
+        )
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _reasoning_only)
+    try:
+        result = agent.run_conversation("2+2?")
+    finally:
+        agent.close()
+
+    assert result["final_response"] == "4."
+    assert result.get("failed", False) is False
+    assert calls == 1
+    assert agent._thinking_prefill_retries == 0
+
+
 def test_gateway_turn_overrides_preserve_custom_provider_non_thinking_flag() -> None:
     provider_overrides = _non_thinking_overrides()
     turn_overrides = {"service_tier": "priority"}
@@ -165,6 +300,10 @@ def test_gateway_turn_runner_preserves_provider_override_at_api_call() -> None:
             self.session_prompt_tokens = 0
             self.session_completion_tokens = 0
             self.seen_request_overrides = []
+            self._fallback_activated = False
+
+        def _restore_primary_runtime(self):
+            return False
 
         def run_conversation(self, _message, **_kwargs):
             self.seen_request_overrides.append(copy.deepcopy(self.request_overrides))
@@ -259,3 +398,20 @@ def test_gateway_turn_runner_preserves_provider_override_at_api_call() -> None:
             },
         },
     ]
+
+    # Simulate a cross-provider fallback that remains active on the next
+    # cached gateway turn because the primary is still in cooldown. The
+    # primary's non-thinking flag must not be overlaid onto that fallback.
+    agent._fallback_activated = True
+    agent._gateway_active_provider_request_overrides = {}
+    gateway_runner._resolve_turn_agent_config.return_value = {
+        "model": "drafter-active",
+        "runtime": {},
+        "request_overrides": {},
+    }
+    ctx.message = "fallback still cooling down"
+
+    third_result = TurnRunner(gateway_runner, ctx).run_sync()
+
+    assert third_result["final_response"] == "4."
+    assert agent.seen_request_overrides[-1] == {}

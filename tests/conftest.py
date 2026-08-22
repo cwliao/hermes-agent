@@ -22,6 +22,7 @@ test runner at ``scripts/run_tests.sh``.
 import asyncio
 import atexit
 import importlib
+import logging
 import os
 import shutil
 import sqlite3
@@ -924,7 +925,10 @@ def isolated_log_dir(tmp_path):
     # _hermetic_environment fixture; re-binding picks that up.
     hermes_logging._reset_queued_handlers()
     hermes_logging._logging_initialized = False
+    root_logger = logging.getLogger()
+    root_level = root_logger.level
     log_dir = hermes_logging.setup_logging()
+    root_logger.setLevel(root_level)
     try:
         yield Path(log_dir)
     finally:
@@ -1257,7 +1261,13 @@ def _sandbox_hermes_home_and_logging() -> None:
         # dual-write to two files.
         hermes_logging._reset_queued_handlers()
         hermes_logging._logging_initialized = False
+        root_logger = logging.getLogger()
+        root_level = root_logger.level
         hermes_logging.setup_logging()
+        # Keep sandboxed file handlers without changing pytest's capture
+        # threshold. Upstream caplog tests expect INFO emitted before an
+        # explicit ``caplog.at_level`` block to remain silent.
+        root_logger.setLevel(root_level)
     except Exception:
         # Best-effort: never let logging setup abort the whole test session.
         # The env override above is what actually prevents the leak.

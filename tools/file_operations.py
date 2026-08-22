@@ -1269,6 +1269,63 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             )
             return verify_error
 
+        # Re-read through base64 so arbitrary bytes, including
+        # surrogateescape round-trips, survive terminal transports that
+        # decode ordinary stdout with replacement characters.
+        bytes_written = len(content_bytes)
+        verify_cmd = f"base64 < {self._escape_shell_arg(path)} 2>/dev/null"
+        verify_result = self._exec(verify_cmd)
+        if verify_result.exit_code != 0:
+            return WriteResult(
+                bytes_written=bytes_written,
+                dirs_created=dirs_created,
+                error=f"Post-write verification failed: could not re-read {path}",
+                artifact_status=artifact_contract(
+                    "file_operations.write_file", "unverified",
+                    persisted=True, validated=False, read_back=False,
+                    evidence={"reason": "read_back_failed"},
+                ),
+            )
+        encoded = "".join(_strip_terminal_fence_leaks(verify_result.stdout).split())
+        if not encoded and content_bytes:
+            # Compatibility with shells/backends that expose no usable
+            # base64 output; retain the text read-back fallback for those
+            # transports and for lightweight test doubles.
+            verify_result = self._exec(f"cat {self._escape_shell_arg(path)} 2>/dev/null")
+            if verify_result.exit_code != 0:
+                return WriteResult(
+                    bytes_written=bytes_written,
+                    dirs_created=dirs_created,
+                    error=f"Post-write verification failed: could not re-read {path}",
+                    artifact_status=artifact_contract(
+                        "file_operations.write_file", "unverified",
+                        persisted=True, validated=False, read_back=False,
+                        evidence={"reason": "read_back_failed"},
+                    ),
+                )
+            verify_bytes = verify_result.stdout.encode("utf-8", "surrogateescape")
+        else:
+            verify_bytes = None
+        try:
+            if verify_bytes is None:
+                verify_bytes = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            verify_bytes = None
+        if verify_bytes != content_bytes:
+            return WriteResult(
+                bytes_written=bytes_written,
+                dirs_created=dirs_created,
+                error=(
+                    f"Post-write verification failed for {path}: on-disk content "
+                    "differs from the intended write. Re-read the file and retry."
+                ),
+                artifact_status=artifact_contract(
+                    "file_operations.write_file", "unverified",
+                    persisted=True, validated=False, read_back=False,
+                    evidence={"reason": "read_back_mismatch"},
+                ),
+            )
+
         lint_result = self._check_lint_delta(path, pre_content=pre_content, post_content=content)
         # LSP diagnostics are a separate channel, fired only when the syntax tier is
         # clean (no point asking an LSP about a file that won't parse).

@@ -752,7 +752,7 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     if str(text).strip().startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX):
         return ""
 
-    redacted = _redact_gateway_user_facing_secrets(raw_text)
+    redacted = _redact_gateway_user_facing_secrets(str(text))
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted

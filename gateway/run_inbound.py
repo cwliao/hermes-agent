@@ -1678,7 +1678,7 @@ class GatewayInboundMixin:
                     session_key=session_key,
                     image_paths=image_paths,
                 )
-                return None
+                return ""
             message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
         if audio_paths:
             message_text = await self._enrich_inbound_voice(event, source, message_text, audio_paths)

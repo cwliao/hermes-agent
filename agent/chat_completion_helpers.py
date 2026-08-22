@@ -1654,7 +1654,6 @@ def _assistant_tool_call_dict(agent, tool_call, index: int) -> dict:
         tc_dict["extra_content"] = _dump_if_model(extra)
     return tc_dict
 
-
 def build_assistant_message(agent, assistant_message, finish_reason: str) -> dict:
     """Build a normalized assistant message dict (reasoning, reasoning_details,
     optional tool_calls) shared by the tool-call and final-response paths.
@@ -1663,8 +1662,24 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     survive ``_rows_to_conversation``."""
     assistant_tool_calls = getattr(assistant_message, "tool_calls", None)
     reasoning_text = _assistant_reasoning_text(agent, assistant_message)
+    content = _assistant_content_for_storage(agent, assistant_message)
+    # vLLM reasoning-parser fallback quirk (seen on step3p5): when a call is
+    # explicitly sent with extra_body.chat_template_kwargs.enable_thinking
+    # false but the model still emits a short answer with no <think> tags,
+    # the parser misclassifies the whole output as reasoning and ``content``
+    # comes back null while the real answer sits in ``reasoning``. Only
+    # promote reasoning to content when we can confirm THIS call was sent
+    # non-thinking -- an empty content on a genuine thinking-mode response is
+    # a real failure, not evidence the answer is hiding in reasoning.
+    if not content and reasoning_text:
+        request_overrides = getattr(agent, "request_overrides", None) or {}
+        extra_body = request_overrides.get("extra_body") or {}
+        chat_template_kwargs = extra_body.get("chat_template_kwargs") or {}
+        if chat_template_kwargs.get("enable_thinking") is False:
+            content = reasoning_text
+            reasoning_text = None
     msg = stamp_message_timestamp({"role": "assistant",
-        "content": _assistant_content_for_storage(agent, assistant_message), "reasoning": reasoning_text,
+        "content": content, "reasoning": reasoning_text,
         "finish_reason": finish_reason})
 
     raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)

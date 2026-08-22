@@ -97,12 +97,102 @@ tokens, which is below the minimum 64,000 required by Hermes Agent.
 
 **下一步（待與 vLLM 那邊協調，非 Hermes 單方面能解決）**：詢問 vLLM 那邊 `--max-model-len` 調到至少 64000 是否可行——這會增加 vLLM 的 KV cache 記憶體用量（隨 context 長度與併發數增加），可能影響他們自己的資源預算與 docagent 的 drafting workload 調校，需要他們評估，不是 Hermes 這邊能單方面決定或調整的。
 
-## 尚未執行的動作
+## 第二次試跑（2026-08-22 傍晚，使用者 cwliao 直接授權，Claude Code session 執行）— 已再次回滾
 
-- 尚未修改任何 Hermes 檔案。
-- 已完成：兩個獨立 agent 交叉審查（機制本身判定可行，但各自抓到需要修正的具體缺陷，已全部整合進上方「交叉審查修正」章節）。
-- **實作前仍需要你決定/確認的兩件事**（不是我能自己拍板的）：
-  1. `fallback_providers` 要不要保留現有的 `groq` entry（見「交叉審查修正」第 2 點）。
-  2. 是否接受「這次改動會讓 Hermes 預設模型從 `codex_responses` 換到 `chat_completions` 協定」這件事，先小流量觀察再全面上線（見「交叉審查修正」第 3 點）。
-- 實作前建議先查清楚 Hermes 自己遇到 Ollama admission-busy 時的實際行為（見「交叉審查修正」第 4 點），確認不會重現 docagent 那邊「靜默回傳假成功」的缺陷。
-- 你確認上述兩點後，我會實作 config 變更、跑測試、並比照先前 rebase 部署的方式（新 release snapshot + 重啟 + `hermes doctor` 驗證）完成部署。
+**背景**：vLLM 那邊已把 `vllm-production` 重新以 `--max-model-len 65536` 啟動（解除本文件上一節記錄的 32K 阻擋項）。cwliao 直接指示 Claude Code session 重新盤點現況、找 `codex` CLI 做第二輪獨立複核、再實作。
+
+**環境盤點與 codex 複核發現的落差**（與本文件原始版本不符之處）：
+- `--max-model-len` 已是 `65536`（不是本文件原記錄的 `32768`）。
+- `OLLAMA_MAX_LOADED_MODELS` **已經是 2**，不是本文件「風險點 6」描述的「docagent 未來才要做的改動」——這個限縮已經在 live 環境生效。
+- 其餘 config schema（`request_timeout_seconds`、`extra_body` 巢狀 passthrough、`fallback_providers` 順序）經 codex 獨立複核確認語法與語意正確。
+
+**隔離環境煙霧測試**：用 `HERMES_HOME` 指向暫時目錄（未觸碰 production `.env`/`config.yaml`），以小提示詞（~6.4K tokens）測試 `providers.vllm-local`（`enable_thinking: false`）+ `drafter-active`，tool-calling 成功、無 context 錯誤。**這個測試的提示詞太小，沒有覆蓋到真實生產流量的情境，是這次誤判「可以上線」的直接原因。**
+
+**正式套用＋真實 cron job 端對端測試（失敗，已立即回滾）**：
+1. 已將 `config.yaml` 改為正式版本：新增 `providers.vllm-local`（`base_url: http://127.0.0.1:18000/v1`、`request_timeout_seconds: 600`、`extra_body.chat_template_kwargs.enable_thinking: false`），`model.default: drafter-active`、`model.provider: vllm-local`，`fallback_providers` 改為 `[openai-api/gpt-oss:20b, groq/llama-3.3-70b-versatile]`。`config check` 與 YAML parse 均通過，未動 `.env`。
+2. 重啟 `hermes-gateway.service`，Telegram/Feishu 均確認重新連上，`hermes status` 確認 `Model: drafter-active` / `Provider: vllm-local` 生效。
+3. 用 `hermes cron run 0b4b2e91f940` 手動觸發既有 cron job（真實系統提示詞，實測 input ≈ 18,813~20,447 tokens，遠大於煙霧測試的 6.4K），**任務執行失敗**：
+   ```
+   HTTP 400: This model's maximum context length is 65536 tokens. However, you requested
+   65536 output tokens and your prompt contains 81544 characters...
+   RuntimeError: Context length exceeded: max compression attempts (3) reached.
+   Job 'w' failed
+   ```
+   - Hermes 預設會把 `max_tokens` 設成等於整個 context window（65536）當輸出上限；真實請求光輸入就吃掉 ~18-20K tokens，`輸出上限(65536) + 輸入(~20K)` 遠超總 context 65536，被 vLLM 直接拒絕。
+   - 過程中還觀察到「Thinking-only response（只有 reasoning、無可見內容）」重複出現，代表 `extra_body.chat_template_kwargs.enable_thinking: false` **這個設定實際生效與否需要進一步查證**——vLLM 啟動參數裡有 `--reasoning-parser step3p5`，不確定 per-request 的 `chat_template_kwargs` 是否真的能關掉它。
+   - Context-compression 自救機制（`agent.conversation_compression`）嘗試了 3 次都「no progress」，最終整個 job 判定失敗。
+4. **已立即回滾**：`config.yaml` 改回 `ornith:35b` / `openai-api` / 原本只有 `groq` 的 fallback，重啟 `hermes-gateway.service`，確認 Telegram/Feishu 恢復連線、`hermes status` 確認回到 `ornith:35b`。失敗當下的 config 已存檔為 `~/.hermes/config.yaml.bak-vllm-attempt-failed-cwliao-2026-08-22_1821`，供後續診斷。
+
+**這次失敗兩輪交叉審查（含 codex 複核）都沒抓到**，因為都只驗證了 schema/機制層面，且煙霧測試用的提示詞太小、沒有觸發「真實系統提示詞大小 + 預設 max_tokens=context上限」這個組合。**這是繼「32K context 硬性阻擋」之後，第二個只有實際端對端測試（且要用真實大小的提示詞）才會發現的問題。**
+
+**新的待解問題（需要 vLLM 那邊協助評估，非 Hermes 單方面能解決）**：
+1. `65536` 對 Hermes 真實生產流量（系統提示詞 + 工具定義 ≈ 18-20K tokens 起跳，加上多輪對話會更大）可能仍然不夠，尤其當 Hermes 預設用「context 上限」當 `max_tokens` 請求時。可能需要更大的 `--max-model-len`（例如 96K 或更高），或者 Hermes 這邊需要調整 `max_tokens` 的預留邏輯（不要無腦要求整個 context 當輸出上限）——後者是 Hermes 自己的問題，不需要 vLLM 動作，但需要先查清楚是哪一邊該修。**（截至本次更新：vLLM 那邊正在用一個 throwaway container 實測 `--max-model-len 131072` 是否可行，因為這台主機這個模型的 KV-cache 配置在不同啟動之間變動很大，正在等結果，不是用猜的。）**
+2. `enable_thinking: false` 透過 `extra_body.chat_template_kwargs` 传送到這個特定 vLLM 啟動設定（`--reasoning-parser step3p5`）是否真的能關閉 thinking/reasoning 輸出，需要獨立驗證。**（已由 vLLM 那邊直接對 vllm-production 做過 A/B 比對測試，已解答，見下方新段落。）**
+
+### Q1 解答（2026-08-22，vLLM 那邊用 throwaway container 實測，非猜測）
+
+**初步結論：把 `--max-model-len` 加倍到 `131072` 看起來可行，但信心程度有明確保留。**
+
+實測方式：**沒有動 vllm-production**，另外開一個 throwaway 測試 container，`--max-model-len 131072`。因為這台主機目前可用記憶體會浮動（第一次用 `--gpu-memory-utilization 0.30` 直接失敗，因為檢查時到實際啟動之間，可用記憶體從 ~44GB 掉到 ~29.78GB），retry 降到 `0.20` 才成功啟動：
+- `Available KV cache memory`：3.07 GiB
+- 換算 tokens：935,708
+- 在每筆請求都是滿的 131072 tokens 情況下，並發量：7.14x
+
+用這個 `0.20` 的數字，外推到 production 實際會用的 `0.45` utilization：約 34.16 GiB KV 預算、~10.4M tokens、~79.4x 並發——對 Hermes 真實流量（少數幾個並發、每筆 ~20K input）來說空間相當充裕。
+
+**但這個外推有一個真實存在的保留**：vLLM 那邊自己的專案文件（Ticket 59）已經記錄過，**同一種「低 utilization 外推到 production utilization」的算法，在這台主機上曾經誤差達 4 倍**——這個模型的 KV cache 配置在不同次啟動之間並非決定性的，很可能對即時記憶體碎片化敏感。所以 79.4x 這個數字的定位是「大概率夠用，不是保證」。
+
+**下一步**：等 Hermes/使用者確認要 commit 到某個具體目標值（例如 131072，或依 Hermes 真實 input+output 需求換算出的更小數字）之後，vLLM 那邊才會真的把 `vllm-production` 用那個目標值重新啟動，並比照他們自己 Ticket 59/61 的做法做正式的 production-scale 驗證（不只是相信這次外推），驗證完才算數。
+
+**vLLM 也順帶指出一個 Hermes 這邊該修的問題（跟 context 開多大無關）**：Hermes 不應該把 `max_tokens` 無腦設成等於整個 context window——不管 `--max-model-len` 開多大，只要維持這個預設邏輯，遲早還是會在更高的門檻上撞到同樣的「輸出上限+輸入 > 總 context」問題，只是問題出現得比較晚而已。
+
+### Q2 解答（2026-08-22，vLLM 那邊直接對 vllm-production 做 A/B 比對驗證）
+
+**`enable_thinking: false` 這個旗標本身確實有在 server 端生效**——同樣問「What is 2+2?」：
+- 不帶 `enable_thinking:false`：`content` 有正常答案，`reasoning` 是一段簡短的思考過程。正常。
+- 帶 `enable_thinking:false`：`completion_tokens` 降到只有 3（代表 thinking 真的被壓下去了，旗標有作用），但 **`content` 欄位是 `null`，真正的答案「4.」跑到 `reasoning` 欄位裡去了。**
+
+**這不是 Hermes 這邊 config 設錯**，而是這個特定 vLLM `step3p5` reasoning-parser 的已知行為：vLLM 那邊今天稍早在 DocHelper 那個案子也診斷並修過同一個 bug——原始碼在 `vllm/reasoning/basic_parsers.py`：`if end_token not in model_output: return model_output, None`。當模型在 non-thinking 模式下給出一個完全沒有 `<think>`/`</think>` 標籤的短答案時，parser 的 fallback 邏輯會把「整段輸出」都歸類成 reasoning，`content` 因此回傳 `null`。這是決定性、可重現的行為，不是隨機的。
+
+**需要 Hermes 這邊補的修正**：解析 vLLM chat completion 回應的地方，需要加上跟 DocHelper 那邊現在一樣的邏輯——**當 `content` 是 null/空、而且這次請求明確帶了 `enable_thinking:false` 時，把 `message["reasoning"]` 當成真正的答案使用，而不是直接丟棄。** 特別注意：這個判斷要以「請求時是否真的送了 non-thinking」為依據，**不能只看回應的形狀就推論**——一個真正的 thinking-mode 回應如果 content 剛好是空的，那是真正的失敗，不代表答案藏在 reasoning 裡；兩種情況不能用同一套啟發式規則混在一起判斷。
+
+**這代表原本第二次試跑觀察到的「Thinking-only response（無可見內容）」現象，根因已經找到，且是 Hermes 端（回應解析邏輯）需要補的程式改動，不是 config 能解決的**——即使 context window 問題（第 1 點）之後解決了，只要這個解析邏輯沒補，Hermes 每次呼叫 `enable_thinking:false` 都會拿到空的 `content`。
+
+## 第三輪隔離測試（2026-08-22 晚間，僅隔離環境，未碰 production）— 定位出真正瓶頸是 Q2
+
+**目的**：驗證「不帶 `enable_thinking:false`（繞開 Q2）、只加輸出上限」在現有 65536 context 下夠不夠用，用真實大小提示詞（實測 input ≈16.8-17K tokens）。
+
+**結果（關鍵）**：
+- 第一次嘗試把 `max_output_tokens: 8192` 放在 `providers.vllm-local` 底下——**錯誤位置**，log 直接警告 `unknown config keys ignored: max_output_tokens`，完全沒生效。
+- 查證 `hermes_cli/config.py` 的 `_KNOWN_KEYS`（1382 行）確認 `providers.<name>` entry 根本不認得 `max_output_tokens`/`max_tokens` 這兩個鍵。正確位置是 `model_overrides.<provider>.<model>.max_output_tokens`（`config_defaults.py` 2852 行附近、`agent/models_dev.py` 消費）。
+- 改到正確位置（`model_overrides.vllm-local.drafter-active.max_output_tokens: 8192`）重測，**但第一次請求仍然要求了 `max_tokens=65536`**——這個 config 顯然沒有影響到初次請求的 `max_tokens` 計算方式，作用範圍待查（可能只影響顯示/估算，不是請求時的硬上限）。
+- **不論有沒有設定這個 config，兩次測試最終都成功了**：Hermes 內建的「輸出上限太大 → 自動縮小 max_tokens 重試」機制（`agent.conversation_loop` 的 ephemeral max_output_tokens 邏輯）在 1-2 次重試內自行復原，乾淨完成（無 context 錯誤殘留、無空 content）。
+
+**結論：`65536` context 本身，配合 Hermes 既有的自動重試機制，在「沒有觸發 Q2」的情況下已經足夠應付真實大小的提示詞。** 這代表：
+- **Q1（更大 context）目前看起來不是必要的**——不需要為了這件事去麻煩 vLLM 做那個昂貴的 131072 正式規模驗證。
+- **正式服務那次失敗的真正主因，高度懷疑就是 Q2**：`enable_thinking:false` 觸發的「content 為 null、答案藏在 reasoning」這個 vLLM parser bug，很可能干擾/毒化了 Hermes 的自動重試/壓縮迴圈（transcript 裡混入空 content 訊息），導致原本能自行復原的機制連續 3 次都「no progress」，最終整個失敗。這一輪測試因為沒帶 `enable_thinking:false`，繞開了 Q2，所以能乾淨過關。
+- `max_output_tokens` 這個 config 到底該怎麼設才會真正影響初次請求的 `max_tokens`，還沒查清楚，但鑑於自動重試機制本身已經夠用，**這不再是阻擋項，只是優化項**（避免每次都要靠重試才成功，多一次不必要的 round-trip）。
+
+**在正式重新嘗試遷移之前，唯一真正需要解決的阻擋項是 Q2**（Hermes 端的 reasoning/content 解析邏輯，需要程式碼修正，不是 config 能解決——見上方 Q2 段落）。解決／繞過 Q2 之前，不建議在正式環境設 `enable_thinking:false`。
+
+## Q2 修正（2026-08-22 晚間，使用者 cwliao 直接授權，程式碼變更）
+
+**這是 Hermes 自己的 repo（`git@github.com:cwliao/hermes-agent.git`，`origin` 可推送），不是不能碰的第三方 vendor tree**——先前段落判斷「不會自己 patch」是在還沒查清楚 remote 歸屬前的保守判斷，查證後確認這是 cwliao 自己的 fork，本地已領先 upstream 9164 個 commit，長期由這裡的 agent 們維護。cwliao 直接授權後，才動手改程式碼。
+
+**改動位置**：`agent/chat_completion_helpers.py` 的 `build_assistant_message()`，在 `_san_content`（assistant 回覆的 content）確定為空、且 `reasoning_text` 有內容時，檢查 `agent.request_overrides.extra_body.chat_template_kwargs.enable_thinking` 是否為 `False`——**只有在能確認這次請求真的送出 `enable_thinking:false` 時**，才把 `reasoning_text` 提升成正式的 `content`；沒有這個確認時維持原行為（content 就是空的，如實反映真正的失敗），避免誤判一個真正的 thinking-mode 空回覆。
+
+**驗證**：
+1. 新增回歸測試 `tests/run_agent/test_vllm_step3p5_reasoning_content_fallback.py`（3 個案例：非思考模式下 null content 被正確提升、思考模式下空 content 不被誤改寫、已有正常 content 時不受影響），全部通過。
+2. 既有測試套件（`tests/run_agent/` + `tests/agent/`，共 6857 個測試）跑過：185 個失敗，但用 `git stash` 暫存這次改動後在**未修改的原始碼**上重跑同一批失敗案例，結果完全一樣失敗——確認這 185 個是這個 repo 既有、與本次改動無關的失敗（`test_unsupported_temperature_retry`、`test_verification_evidence`、`test_codex_transport` 等，都不在 `chat_completion_helpers.py` / reasoning 解析範圍內），不是這次改動造成的迴歸。
+3. 用隔離環境（`HERMES_HOME` 指向暫時目錄，未觸碰 production）對 vllm-production 實測：帶 `enable_thinking:false`、真實大小提示詞，**修正前**會出現「Thinking-only response（無可見內容）」，**修正後**乾淨完成、拿到真正的回覆內容，兩次 API call 皆成功，未再出現空 content。
+
+**結論**：Q2 已經修正並驗證通過。加上先前確認「context 大小本身不是阻擋項」（見上方第三輪隔離測試段落），這代表**技術上已經沒有已知的阻擋項**了。下一步建議：用完整正式流程（正式 config + 重啟 `hermes-gateway.service` + 真實 cron job 端對端測試）再做一次第三次嘗試，這次應該預期會乾淨通過。
+
+## 尚未執行的動作（更新：截至第二次回滾後）
+
+- 目前 Hermes 仍在使用 `ornith:35b`，維持不能清除。
+- 已完成：兩個獨立 agent 交叉審查、隔離環境煙霧測試（通過但範圍不足）、正式環境端對端測試（失敗、已回滾）。
+- **下一步建議**：
+  1. 用真實大小的系統提示詞（不是玩具提示詞）重做煙霧測試，先確認 `max_tokens` 預留邏輯與 `enable_thinking` 是否真的能一起解決這個問題，再決定是否需要跟 vLLM 那邊要求更大的 `--max-model-len`。
+  2. 獨立驗證 `enable_thinking: false` 對這個 vLLM 啟動設定是否真的有效。
+  3. 上述兩點都確認後，才能排時間第三次嘗試正式上線。

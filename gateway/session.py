@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Any
 from .config import Platform, GatewayConfig, HomeChannel
 from .whatsapp_identity import canonical_whatsapp_identifier
 from gateway.session_identity import transport_profile_of
+from agent.turn_context import extract_api_content_sidecar
 from gateway.session_persistence import SessionPersistenceMixin, _DB_UNPINNED
 from gateway.session_recovery import SessionRecoveryMixin
 from gateway.session_lifecycle import SessionLifecycleMixin, _iso, _new_session_id, _now, _parse_iso

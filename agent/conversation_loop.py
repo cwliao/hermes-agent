@@ -107,6 +107,48 @@ logger = logging.getLogger(__name__)
 _INTERRUPT_SCAFFOLD_MARKER = "[This response was interrupted by a user correction.]"
 
 
+def _promote_explicit_non_thinking_reasoning_response(agent: Any, message: Any) -> bool:
+    """Normalize the vLLM step3p5 null-content quirk before empty handling.
+
+    ``build_assistant_message`` has the same persistence-boundary fallback,
+    but the conversation loop decides whether a response is empty before that
+    builder runs. Promote at the normalized-response boundary as well so a
+    non-thinking request's real answer cannot enter thinking-prefill retries.
+
+    Returns ``True`` only when a promotion was performed. Structured
+    reasoning fields are cleared after promotion because, for this explicitly
+    non-thinking request, they contain the visible answer rather than a
+    reasoning trace.
+    """
+    reasoning_text = agent._extract_reasoning(message)
+    from agent.chat_completion_helpers import (
+        non_thinking_reasoning_content_fallback,
+    )
+
+    promoted = non_thinking_reasoning_content_fallback(
+        agent,
+        getattr(message, "content", None),
+        reasoning_text,
+    )
+    if promoted is None:
+        return False
+
+    from agent.redact import redact_sensitive_text
+
+    promoted = redact_sensitive_text(promoted)
+    if not promoted:
+        return False
+
+    message.content = promoted
+    if hasattr(message, "reasoning"):
+        message.reasoning = None
+    provider_data = getattr(message, "provider_data", None)
+    if isinstance(provider_data, dict):
+        provider_data.pop("reasoning_content", None)
+        provider_data.pop("reasoning_details", None)
+    return True
+
+
 # One-time wrap-up notice appended when a wall-clock run budget crosses its
 # 80% threshold (agent.run_budget_seconds / --run-budget). Mirrors the Codex
 # CLI budget wrap-up template: stop new work, deliver from current state.
@@ -6665,6 +6707,15 @@ def run_conversation(
                     assistant_message.content = "\n".join(parts)
                 else:
                     assistant_message.content = str(raw)
+
+            # vLLM's step3p5 parser can put a short non-thinking answer in a
+            # structured reasoning field while returning content=null. This
+            # must run before the no-tool/empty-response branch below; waiting
+            # until _build_assistant_message is too late because that branch
+            # has already started thinking-prefill retries by then.
+            _promote_explicit_non_thinking_reasoning_response(
+                agent, assistant_message
+            )
 
             try:
                 from hermes_cli.lifecycle import (

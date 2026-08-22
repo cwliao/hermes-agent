@@ -58,6 +58,38 @@ _PROVIDER_STREAM_ERROR_FINISH_REASONS = {"error", "error_finish"}
 _PROVIDER_STREAM_SSE_FIELDS = {"event", "data", "id", "retry"}
 _PROVIDER_STREAM_ERROR_TEXT_LIMIT = 4096
 
+
+def non_thinking_reasoning_content_fallback(
+    agent: Any,
+    content: Any,
+    reasoning_text: Any,
+) -> Optional[str]:
+    """Return reasoning as content only for an explicit non-thinking call.
+
+    This predicate is shared by the normalized-response boundary and the
+    assistant-message persistence boundary. Keeping it in one place prevents
+    the live loop and stored transcript from disagreeing about whether a
+    vLLM step3p5 null-content response contains a visible answer.
+    """
+    visible_content = flatten_message_text(content)
+    if visible_content.strip() or not reasoning_text:
+        return None
+
+    overrides = getattr(agent, "request_overrides", None) or {}
+    if not isinstance(overrides, dict):
+        return None
+    extra_body = overrides.get("extra_body") or {}
+    if not isinstance(extra_body, dict):
+        return None
+    chat_template_kwargs = extra_body.get("chat_template_kwargs") or {}
+    if not isinstance(chat_template_kwargs, dict):
+        return None
+    if chat_template_kwargs.get("enable_thinking") is not False:
+        return None
+
+    promoted = _sanitize_surrogates(str(reasoning_text)).strip()
+    return promoted or None
+
 # When the fallback chain is fully exhausted on a non-rate-limit failure
 # (e.g. every provider returns a non-retryable client error like HTTP 400),
 # arm a short cooldown so the NEXT turn's restore_primary_runtime stays gated
@@ -2187,13 +2219,12 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # This must happen before content redaction below.  Once promoted, the
     # text is ordinary assistant content and must pass through the same
     # persistence/delivery safety boundary as a normal model answer.
-    if not _san_content and reasoning_text:
-        _req_overrides = getattr(agent, "request_overrides", None) or {}
-        _req_extra_body = _req_overrides.get("extra_body") or {}
-        _chat_template_kwargs = _req_extra_body.get("chat_template_kwargs") or {}
-        if _chat_template_kwargs.get("enable_thinking") is False:
-            _san_content = reasoning_text
-            reasoning_text = None
+    _promoted_content = non_thinking_reasoning_content_fallback(
+        agent, _san_content, reasoning_text
+    )
+    if _promoted_content is not None:
+        _san_content = _promoted_content
+        reasoning_text = None
 
     # Defence-in-depth: redact credentials (PATs, API keys, Bearer tokens)
     # from assistant content BEFORE the message enters conversation history.
@@ -2676,6 +2707,29 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         agent.requested_provider = fb_provider
         agent.base_url = fb_base_url
         agent.api_mode = fb_api_mode
+        # Request overrides are runtime-specific. In particular, carrying a
+        # primary custom vLLM provider's enable_thinking=false into a genuine
+        # thinking fallback would make its reasoning look like visible answer
+        # content. Re-resolve only the active fallback provider's custom
+        # extra_body and clear the primary override when there is no match.
+        try:
+            from agent.agent_init import _custom_provider_extra_body_for_agent
+
+            _fb_extra_body = _custom_provider_extra_body_for_agent(
+                provider=fb_provider,
+                model=fb_model,
+                base_url=fb_base_url,
+                custom_providers=getattr(agent, "_custom_providers", None) or [],
+            )
+        except Exception:
+            _fb_extra_body = None
+        agent.request_overrides = (
+            {"extra_body": _fb_extra_body} if _fb_extra_body else {}
+        )
+        if hasattr(agent, "_gateway_active_provider_request_overrides"):
+            agent._gateway_active_provider_request_overrides = dict(
+                agent.request_overrides
+            )
         # Per-provider reasoning_content echo opt-in (see _reasoning_echo_opt_in).
         # Read from the fallback entry so the flag travels with the active
         # provider; restore_primary_runtime will revert it from the snapshot.

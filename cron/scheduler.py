@@ -6041,6 +6041,12 @@ def run_job(
             acp_args=runtime.get("args"),
             max_iterations=max_iterations,
             reasoning_config=reasoning_config,
+            # Preserve custom-provider request shape resolved above (for
+            # example vLLM chat_template_kwargs.enable_thinking=false).
+            # Dropping this at the cron-only constructor boundary makes the
+            # wire request and response normalization disagree about whether
+            # thinking was explicitly disabled.
+            request_overrides=runtime.get("request_overrides"),
             prefill_messages=prefill_messages,
             fallback_model=fallback_model,
             credential_pool=credential_pool,

@@ -1581,6 +1581,13 @@ def restore_primary_runtime(agent) -> bool:
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
         agent._reasoning_echo_flag = rt.get("reasoning_echo_flag", False)
+        agent.request_overrides = copy.deepcopy(
+            rt.get("request_overrides") or {}
+        )
+        if hasattr(agent, "_gateway_active_provider_request_overrides"):
+            agent._gateway_active_provider_request_overrides = copy.deepcopy(
+                agent.request_overrides
+            )
         agent._client_kwargs = dict(rt["client_kwargs"])
         agent._use_prompt_caching = rt["use_prompt_caching"]
         # Default to native layout when the restored snapshot predates the

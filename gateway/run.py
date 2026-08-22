@@ -6019,6 +6019,11 @@ class TurnRunner:
                     {}, getattr(agent, "request_overrides", None)
                 )
             )
+            agent._gateway_active_provider_request_overrides = (
+                _merge_gateway_request_overrides(
+                    {}, agent._gateway_provider_request_overrides
+                )
+            )
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     # Record the session_id the snapshot was taken for
@@ -6107,15 +6112,42 @@ class TurnRunner:
         agent.event_callback = ctx._event_callback_sync
         agent.reasoning_config = reasoning_config
         agent.service_tier = self._runner._service_tier
+        # Decide primary-vs-fallback before applying this turn's transient
+        # route overlay. run_conversation also calls restore, but doing it
+        # here is required for cached gateway agents: a cooldown may keep the
+        # fallback active, in which case applying the primary non-thinking
+        # baseline would misclassify genuine fallback reasoning.
+        try:
+            agent._restore_primary_runtime()
+        except Exception:
+            logger.debug(
+                "Gateway pre-route primary restore failed; keeping active runtime",
+                exc_info=True,
+            )
+
         _provider_request_overrides = getattr(
-            agent, "_gateway_provider_request_overrides", None
+            agent, "_gateway_active_provider_request_overrides", None
         )
         if _provider_request_overrides is None:
             # Compatibility for agents cached before this field existed.
-            _provider_request_overrides = _merge_gateway_request_overrides(
-                {}, getattr(agent, "request_overrides", None)
+            if getattr(agent, "_fallback_activated", False):
+                _provider_request_overrides = _merge_gateway_request_overrides(
+                    {}, getattr(agent, "request_overrides", None)
+                )
+            else:
+                _provider_request_overrides = getattr(
+                    agent, "_gateway_provider_request_overrides", None
+                )
+                if _provider_request_overrides is None:
+                    _provider_request_overrides = _merge_gateway_request_overrides(
+                        {}, getattr(agent, "request_overrides", None)
+                    )
+                    agent._gateway_provider_request_overrides = (
+                        _provider_request_overrides
+                    )
+            agent._gateway_active_provider_request_overrides = (
+                _provider_request_overrides
             )
-            agent._gateway_provider_request_overrides = _provider_request_overrides
         agent.request_overrides = _merge_gateway_request_overrides(
             _provider_request_overrides,
             turn_route.get("request_overrides"),

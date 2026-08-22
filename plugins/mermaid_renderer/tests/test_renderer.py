@@ -39,8 +39,8 @@ def test_html_has_strict_csp_and_security_level(monkeypatch, tmp_path):
     def fake_run(command, **kwargs):
         captured["command"] = command
         html_path = Path(command[-1].removeprefix("file://"))
-        captured["html"] = html_path.read_text()
-        captured["bootstrap"] = html_path.with_name("bootstrap.js").read_text()
+        captured["html"] = html_path.read_text(encoding="utf-8")
+        captured["bootstrap"] = html_path.with_name("bootstrap.js").read_text(encoding="utf-8")
         return Proc()
 
     monkeypatch.setattr(renderer.subprocess, "run", fake_run)
@@ -69,8 +69,8 @@ def test_bootstrap_fits_rendered_svg_to_the_png_canvas(monkeypatch, tmp_path):
 
     def fake_run(command, **kwargs):
         html_path = Path(command[-1].removeprefix("file://"))
-        captured["html"] = html_path.read_text()
-        captured["bootstrap"] = html_path.with_name("bootstrap.js").read_text()
+        captured["html"] = html_path.read_text(encoding="utf-8")
+        captured["bootstrap"] = html_path.with_name("bootstrap.js").read_text(encoding="utf-8")
         return Proc()
 
     monkeypatch.setattr(renderer.subprocess, "run", fake_run)

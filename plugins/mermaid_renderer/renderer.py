@@ -313,9 +313,16 @@ def render_mermaid_to_png(
                 f"--screenshot={staged_output}", html.as_uri(),
             ]
             try:
-                completed = subprocess.run(command, capture_output=True, text=True,
-                                           stdin=subprocess.DEVNULL,
-                                           timeout=timeout_seconds, check=False)
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdin=subprocess.DEVNULL,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
             except subprocess.TimeoutExpired:
                 return RenderResult(False, output_path, error_code="chromium_timeout")
             except OSError:

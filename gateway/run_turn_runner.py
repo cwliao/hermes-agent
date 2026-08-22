@@ -993,6 +993,9 @@ class TurnRunner:
         agent._gateway_provider_request_overrides = _merge_gateway_request_overrides(
             {}, getattr(agent, "request_overrides", None)
         )
+        agent._gateway_active_provider_request_overrides = _merge_gateway_request_overrides(
+            {}, agent._gateway_provider_request_overrides
+        )
         return agent
 
     def _resolve_turn_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr):
@@ -1093,15 +1096,34 @@ class TurnRunner:
         must survive every reused-agent turn. Drop only the PREVIOUS turn's routing overrides before
         layering this turn's, so stale per-turn values never linger."""
         from gateway.run import _merge_gateway_request_overrides
-        provider_overrides = getattr(agent, "_gateway_provider_request_overrides", None)
+        # A cached agent can still be on a fallback provider. Restore the
+        # primary snapshot first so the active-provider baseline is selected
+        # before transient gateway options are layered.
+        try:
+            agent._restore_primary_runtime()
+        except Exception:
+            logger.debug("Gateway pre-route primary restore failed", exc_info=True)
+        provider_overrides = getattr(
+            agent, "_gateway_active_provider_request_overrides", None
+        )
         if provider_overrides is None:
             # Compatibility for agents cached before this field existed.
-            current = dict(getattr(agent, "request_overrides", {}) or {})
-            for key, value in (getattr(agent, "_gateway_turn_request_overrides", {}) or {}).items():
-                if current.get(key) == value:
-                    current.pop(key, None)
-            provider_overrides = _merge_gateway_request_overrides({}, current)
-            agent._gateway_provider_request_overrides = provider_overrides
+            if getattr(agent, "_fallback_activated", False):
+                provider_overrides = _merge_gateway_request_overrides(
+                    {}, getattr(agent, "request_overrides", None)
+                )
+            else:
+                provider_overrides = getattr(
+                    agent, "_gateway_provider_request_overrides", None
+                )
+                if provider_overrides is None:
+                    current = dict(getattr(agent, "request_overrides", {}) or {})
+                    for key, value in (getattr(agent, "_gateway_turn_request_overrides", {}) or {}).items():
+                        if current.get(key) == value:
+                            current.pop(key, None)
+                    provider_overrides = _merge_gateway_request_overrides({}, current)
+                    agent._gateway_provider_request_overrides = provider_overrides
+            agent._gateway_active_provider_request_overrides = provider_overrides
         turn_overrides = dict(turn_route.get("request_overrides") or {})
         agent.request_overrides = _merge_gateway_request_overrides(
             provider_overrides, turn_overrides,

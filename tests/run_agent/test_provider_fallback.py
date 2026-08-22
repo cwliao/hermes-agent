@@ -131,6 +131,39 @@ class TestFallbackChainAdvancement:
         assert agent._pending_fallback_notice == [expected]
         assert agent._retry_status_buffer[-1] == ("status", expected)
 
+    def test_fallback_clears_primary_non_thinking_override_and_restore_rebinds_it(self):
+        """Provider-specific request contracts must follow the active runtime."""
+        primary_overrides = {
+            "extra_body": {
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        }
+        agent = _make_agent(
+            fallback_model=[{"provider": "openai", "model": "gpt-4o"}]
+        )
+        agent.request_overrides = primary_overrides
+        agent._primary_runtime["request_overrides"] = primary_overrides
+
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(_mock_client(), "gpt-4o"),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.request_overrides == {}
+
+        from agent.chat_completion_helpers import (
+            non_thinking_reasoning_content_fallback,
+        )
+
+        assert non_thinking_reasoning_content_fallback(
+            agent, None, "genuine fallback reasoning"
+        ) is None
+
+        assert agent._restore_primary_runtime() is True
+        assert agent.request_overrides == primary_overrides
+
+
     def test_records_sequential_switches_in_order(self):
         agent = _make_agent(
             fallback_model=[

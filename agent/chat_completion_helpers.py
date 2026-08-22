@@ -57,6 +57,47 @@ _PROVIDER_STREAM_ERROR_TEXT_LIMIT = 4096
 # resetting _fallback_index=0 and re-marshaling the whole context across every
 # provider again (memory/swap exhaustion on constrained hosts). Rate-limit /
 # billing reasons keep their own longer cooldown.
+
+def non_thinking_reasoning_content_fallback(
+    agent: Any,
+    content: Any,
+    reasoning_text: Any,
+) -> Optional[str]:
+    """Return reasoning as content only for an explicit non-thinking call.
+
+    This predicate is shared by the normalized-response boundary and the
+    assistant-message persistence boundary. Keeping it in one place prevents
+    the live loop and stored transcript from disagreeing about whether a
+    vLLM step3p5 null-content response contains a visible answer.
+    """
+    visible_content = flatten_message_text(content)
+    if visible_content.strip() or not reasoning_text:
+        return None
+
+    overrides = getattr(agent, "request_overrides", None) or {}
+    if not isinstance(overrides, dict):
+        return None
+    extra_body = overrides.get("extra_body") or {}
+    if not isinstance(extra_body, dict):
+        return None
+    chat_template_kwargs = extra_body.get("chat_template_kwargs") or {}
+    if not isinstance(chat_template_kwargs, dict):
+        return None
+    if chat_template_kwargs.get("enable_thinking") is not False:
+        return None
+
+    promoted = _sanitize_surrogates(str(reasoning_text)).strip()
+    return promoted or None
+
+# When the fallback chain is fully exhausted on a non-rate-limit failure
+# (e.g. every provider returns a non-retryable client error like HTTP 400),
+# arm a short cooldown so the NEXT turn's restore_primary_runtime stays gated
+# and does not reset _fallback_index=0 to replay the entire chain again.
+# Without this, a client/gateway that re-submits immediately would re-marshal
+# the full (potentially 80k-token) context once per provider every turn and
+# can drive a constrained host into memory/swap exhaustion.  Rate-limit /
+# billing reasons keep their own 60s cooldown (set above); this is the
+# narrower non-rate-limit case.  See issue #24996.
 _FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
 
 
@@ -1671,14 +1712,13 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # promote reasoning to content when we can confirm THIS call was sent
     # non-thinking -- an empty content on a genuine thinking-mode response is
     # a real failure, not evidence the answer is hiding in reasoning.
-    if not content and reasoning_text:
-        request_overrides = getattr(agent, "request_overrides", None) or {}
-        extra_body = request_overrides.get("extra_body") or {}
-        chat_template_kwargs = extra_body.get("chat_template_kwargs") or {}
-        if chat_template_kwargs.get("enable_thinking") is False:
-            from agent.redact import redact_sensitive_text
-            content = redact_sensitive_text(reasoning_text)
-            reasoning_text = None
+    _promoted_content = non_thinking_reasoning_content_fallback(
+        agent, content, reasoning_text
+    )
+    if _promoted_content is not None:
+        from agent.redact import redact_sensitive_text
+        content = redact_sensitive_text(_promoted_content)
+        reasoning_text = None
     msg = stamp_message_timestamp({"role": "assistant",
         "content": content, "reasoning": reasoning_text,
         "finish_reason": finish_reason})
@@ -2018,7 +2058,27 @@ def _rescope_fallback_extra_body(agent, old_model: str, old_provider: str, old_b
             else:
                 overrides.pop("extra_body", None)
             agent.request_overrides = overrides
+        elif isinstance(existing_eb, dict) and not old_provider_eb:
+            # A manually supplied nested vLLM thinking flag has no provider
+            # snapshot to key-scope against. It is the one contract that must
+            # not leak into a genuine fallback; preserve unrelated caller
+            # keys (including top-level ``enable_thinking`` overrides).
+            chat_kwargs = existing_eb.get("chat_template_kwargs")
+            if isinstance(chat_kwargs, dict) and chat_kwargs.get("enable_thinking") is False:
+                scrubbed = dict(chat_kwargs)
+                scrubbed.pop("enable_thinking", None)
+                if scrubbed:
+                    existing_eb = dict(existing_eb)
+                    existing_eb["chat_template_kwargs"] = scrubbed
+                    overrides["extra_body"] = existing_eb
+                else:
+                    overrides.pop("extra_body", None)
+                agent.request_overrides = overrides
         _merge_custom_provider_extra_body(agent, custom_providers)
+        if hasattr(agent, "_gateway_active_provider_request_overrides"):
+            agent._gateway_active_provider_request_overrides = dict(
+                getattr(agent, "request_overrides", {}) or {}
+            )
         logger.info("Fallback %s: extra_body resolved: %s", agent.model, (getattr(agent, "request_overrides", {}) or {}).get("extra_body"))
     except Exception as _eb_err:
         logger.debug("Failed to resolve extra_body for fallback %s; keeping current: %s", agent.model, _eb_err)

@@ -131,6 +131,11 @@ def normalize_model_response(
     if assistant_message.content is not None and not isinstance(assistant_message.content, str):
         assistant_message.content = _coerce_content_text(assistant_message.content)
 
+    # Normalize the vLLM step3p5 non-thinking null-content quirk before the
+    # empty/incomplete-response branches can schedule a needless retry.
+    from agent.conversation_loop import _promote_explicit_non_thinking_reasoning_response
+    _promote_explicit_non_thinking_reasoning_response(agent, assistant_message)
+
     # Agent-as-provider projection: splice the provider-agent's own tool work in as
     # call/result rows before this turn's assistant message; no-op for ordinary providers.
     splice_provider_projection(agent, response, messages)

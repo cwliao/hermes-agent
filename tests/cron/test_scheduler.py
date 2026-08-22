@@ -561,6 +561,13 @@ class TestRunJobSessionPersistence:
                      "base_url": "https://example.invalid/v1",
                      "provider": "openrouter",
                      "api_mode": "chat_completions",
+                     "request_overrides": {
+                         "extra_body": {
+                             "chat_template_kwargs": {
+                                 "enable_thinking": False,
+                             },
+                         },
+                     },
                  },
              ), \
              patch("run_agent.AIAgent") as mock_agent_cls:
@@ -579,6 +586,11 @@ class TestRunJobSessionPersistence:
         assert kwargs["session_db"] is fake_db
         assert kwargs["platform"] == "cron"
         assert kwargs["session_id"].startswith("cron_test-job_")
+        assert kwargs["request_overrides"] == {
+            "extra_body": {
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        }
         original_session_id = kwargs["session_id"]
         fake_db.get_compression_tip.assert_called_once_with(original_session_id)
         fake_db.end_session.assert_called_once()

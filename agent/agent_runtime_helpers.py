@@ -1146,6 +1146,10 @@ def restore_primary_runtime(agent) -> bool:
     try:
         _apply_primary_runtime_fields(agent, rt)
         _restore_runtime_capabilities(agent, rt)
+        if hasattr(agent, "_gateway_active_provider_request_overrides"):
+            agent._gateway_active_provider_request_overrides = copy.deepcopy(
+                agent.request_overrides
+            )
         agent._use_prompt_caching = rt["use_prompt_caching"]
         # Default to native layout for snapshots predating the native-vs-proxy split.
         agent._use_native_cache_layout = rt.get(

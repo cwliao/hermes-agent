@@ -7,6 +7,7 @@ is the inverse that ``restore_primary_runtime`` runs once its gates pass.
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any, Dict, Optional, Tuple
 
@@ -104,6 +105,10 @@ def reinstall_runtime_snapshot(agent: Any, rt: Dict[str, Any]) -> None:
     from agent.turn_recovery import reset_codex_reasoning_replay
     reset_codex_reasoning_replay(agent)
     _restore_runtime_capabilities(agent, rt)
+    if hasattr(agent, "_gateway_active_provider_request_overrides"):
+        agent._gateway_active_provider_request_overrides = copy.deepcopy(
+            agent.request_overrides
+        )
     agent._use_prompt_caching = rt["use_prompt_caching"]
     # Default to native layout for snapshots predating the native-vs-proxy split.
     agent._use_native_cache_layout = rt.get(

@@ -5981,7 +5981,11 @@ class TurnRunner:
                 prefill_messages=self._runner._prefill_messages or None,
                 reasoning_config=reasoning_config,
                 service_tier=self._runner._service_tier,
-                request_overrides=turn_route.get("request_overrides"),
+                # Let AIAgent resolve only the provider-owned baseline here.
+                # Transient gateway options (/fast, service tier) are overlaid
+                # below for this turn, otherwise a fast first turn would be
+                # frozen into the cached agent's provider baseline.
+                request_overrides=None,
                 providers_allowed=pr.get("only"),
                 providers_ignored=pr.get("ignore"),
                 providers_order=pr.get("order"),

@@ -16,6 +16,8 @@ that's a real failure, not evidence the answer is in reasoning.
 
 from __future__ import annotations
 
+import copy
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -151,9 +153,10 @@ def test_gateway_turn_runner_preserves_provider_override_at_api_call() -> None:
             self.model = kwargs["model"]
             self.session_id = kwargs["session_id"]
             self.tools = []
+            self.constructor_request_overrides = kwargs.get("request_overrides")
             self.request_overrides = _merge_gateway_request_overrides(
                 _non_thinking_overrides(),
-                kwargs.get("request_overrides"),
+                self.constructor_request_overrides,
             )
             self.context_compressor = SimpleNamespace(
                 last_prompt_tokens=0,
@@ -161,10 +164,10 @@ def test_gateway_turn_runner_preserves_provider_override_at_api_call() -> None:
             )
             self.session_prompt_tokens = 0
             self.session_completion_tokens = 0
-            self.seen_request_overrides = None
+            self.seen_request_overrides = []
 
         def run_conversation(self, _message, **_kwargs):
-            self.seen_request_overrides = self.request_overrides
+            self.seen_request_overrides.append(copy.deepcopy(self.request_overrides))
             return {
                 "final_response": "4.",
                 "failed": False,
@@ -174,7 +177,7 @@ def test_gateway_turn_runner_preserves_provider_override_at_api_call() -> None:
     gateway_runner = MagicMock()
     gateway_runner.config = SimpleNamespace(streaming=None)
     gateway_runner._provider_routing = {}
-    gateway_runner._agent_cache_lock = None
+    gateway_runner._agent_cache_lock = threading.Lock()
     gateway_runner._agent_cache = {}
     gateway_runner._session_db = None
     gateway_runner._prefill_messages = None
@@ -222,9 +225,37 @@ def test_gateway_turn_runner_preserves_provider_override_at_api_call() -> None:
     result = TurnRunner(gateway_runner, ctx).run_sync()
 
     assert result["final_response"] == "4."
-    assert _CapturingAgent.last_instance.seen_request_overrides == {
+    agent = _CapturingAgent.last_instance
+    assert agent.constructor_request_overrides is None
+    assert agent.seen_request_overrides == [{
         "extra_body": {
             "chat_template_kwargs": {"enable_thinking": False},
         },
         "service_tier": "priority",
+    }]
+
+    # Reuse the same cached agent on a normal turn.  The transient fast-mode
+    # option must disappear while the provider's non-thinking flag remains.
+    gateway_runner._resolve_turn_agent_config.return_value = {
+        "model": "drafter-active",
+        "runtime": {},
+        "request_overrides": {},
     }
+    ctx.message = "and again"
+    second_result = TurnRunner(gateway_runner, ctx).run_sync()
+
+    assert second_result["final_response"] == "4."
+    assert _CapturingAgent.last_instance is agent
+    assert agent.seen_request_overrides == [
+        {
+            "extra_body": {
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            "service_tier": "priority",
+        },
+        {
+            "extra_body": {
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        },
+    ]

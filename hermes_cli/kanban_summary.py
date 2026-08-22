@@ -211,7 +211,15 @@ def load_recent_run_metadata(board: str, *, now: int | None = None) -> tuple[lis
 
 def _run_hermes_json(kind: str, board: str) -> Any:
     command = [sys.executable, "-m", "hermes_cli.main", "kanban", "--board", board, kind, "--json"]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False, timeout=60)
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=60,
+    )
     if completed.returncode != 0:
         raise SummaryError(f"{kind}_failed")
     try:
@@ -380,7 +388,15 @@ def _instance_lock(path: Path) -> Iterator[bool]:
 
 def _send(target: str, message: str) -> bool:
     command = [sys.executable, "-m", "hermes_cli.main", "send", "--to", target, message, "--quiet", "--json"]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False, timeout=120)
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=120,
+    )
     return completed.returncode == 0
 
 

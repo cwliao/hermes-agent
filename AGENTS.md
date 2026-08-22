@@ -7,6 +7,33 @@ past that); see the **routing table** at the end and read the area file before e
 
 **Never give up on the right solution.**
 
+## DGX Spark Directory Boundary (Local Fork)
+
+On host `55-0940189-03`, do not confuse the mutable development checkout
+with the deployed runtime:
+
+- **Development repo:** `/home/cwliao/.hermes/hermes-agent`
+- **Immutable release snapshots:** `/home/cwliao/.hermes/releases/<release-id>`
+- **Release-pinned gateway venvs:** `/home/cwliao/.hermes/venvs/gateway-<sha>`
+- **Live config and state root:** `/home/cwliao/.hermes`
+- **Development worktrees:** `/home/cwliao/.hermes/worktrees`
+
+Changing, fetching, merging, or fast-forwarding the development repo does
+**not** deploy that code. The production gateway loads code from the effective
+systemd `WorkingDirectory` and interpreter from `ExecStart`; verify both
+before making any runtime claim. Never edit an active release or its venv in
+place. Build a new release + matching venv, update the systemd drop-in, and use
+the approved drain/restart/rollback procedure.
+
+The files `.bytecode-fingerprint` and `.web_ui_build.lock` in the
+development repo are ignored build/update coordination artifacts. They do not
+make the checkout a runtime directory and must not be deleted merely to make
+`git status` look clean.
+
+Read `docs/operations/dgx-spark-hermes-directory-boundaries.md` before any
+deployment, update, cleanup, systemd, release, venv, or state operation.
+Known boundary debt is tracked in Kanban ticket `t_44c44870`.
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a messaging

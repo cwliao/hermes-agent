@@ -1557,6 +1557,9 @@ class TestGatewaySessionDbRecovery:
             sqlite3.DatabaseError("database disk image is malformed")
         )
         # FTS-scoped errors remain eligible for the one-shot rebuild.
+        assert not SessionStore._is_fts_corruption_error(
+            RuntimeError("malformed database schema")
+        )
         assert SessionStore._is_fts_corruption_error(
             RuntimeError("no such table: messages_fts")
         )
@@ -1657,5 +1660,3 @@ class TestGatewayRoutingTable:
         recovered = restarted.get_or_create_session(self._source())
         assert recovered.session_id == entry.session_id
         restarted._db.close()
-
-

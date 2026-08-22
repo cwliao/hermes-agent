@@ -174,6 +174,7 @@ class GatewayTurnMixin:
         route = {
             "model": model,
             "runtime": runtime,
+            "provider_request_overrides": base_request_overrides,
             "signature": (
                 model, runtime["provider"], runtime["requested_provider"], runtime["base_url"],
                 runtime["api_mode"], runtime["command"], tuple(runtime["args"]),

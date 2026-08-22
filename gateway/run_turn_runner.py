@@ -968,7 +968,9 @@ class TurnRunner:
             ephemeral_system_prompt=combined_ephemeral or None,
             prefill_messages=runner._prefill_messages or None,
             reasoning_config=reasoning_config, service_tier=runner._service_tier,
-            request_overrides=turn_route.get("request_overrides"),
+            # Initialise only with provider-owned options. Gateway /fast and
+            # service-tier overrides are layered transiently below.
+            request_overrides=turn_route.get("provider_request_overrides"),
             providers_allowed=pr.get("only"), providers_ignored=pr.get("ignore"), providers_order=pr.get("order"),
             provider_sort=pr.get("sort"), provider_require_parameters=pr.get("require_parameters", False),
             provider_data_collection=pr.get("data_collection"),

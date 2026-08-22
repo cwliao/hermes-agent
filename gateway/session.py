@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Any
 
 from .config import Platform, GatewayConfig, HomeChannel
 from .whatsapp_identity import canonical_whatsapp_identifier
+from agent.turn_context import extract_api_content_sidecar
 from gateway.session_persistence import SessionPersistenceMixin, _DB_UNPINNED
 from gateway.session_recovery import SessionRecoveryMixin
 from gateway.session_lifecycle import SessionLifecycleMixin, _iso, _new_session_id, _now, _parse_iso
@@ -1171,6 +1172,481 @@ class SessionStore(
         with self._lock:
             entry = self._entry_locked(session_key)
             return entry.session_id if entry else None
+
+    def append_to_transcript(self, session_id: str, message: Dict[str, Any], skip_db: bool = False) -> None:
+        """Serialize transcript draining across queue migration boundaries."""
+        if not self._db or skip_db:
+            return
+        drain_lock = getattr(self, "_transcript_drain_lock", None)
+        if drain_lock is None:
+            # Compatibility for old in-memory/test instances created via
+            # object.__new__ before this field existed.
+            drain_lock = threading.RLock()
+            self._transcript_drain_lock = drain_lock
+        with drain_lock:
+            reroutes = getattr(self, "_transcript_reroutes", None)
+            if reroutes is None:
+                reroutes = {}
+                self._transcript_reroutes = reroutes
+            seen = set()
+            while session_id in reroutes and session_id not in seen:
+                seen.add(session_id)
+                session_id = reroutes[session_id]
+            self._append_to_transcript_serialized(session_id, message)
+
+    def _append_to_transcript_serialized(
+        self, session_id: str, message: Dict[str, Any]
+    ) -> None:
+        """Append a message to a session's transcript (SQLite).
+
+        Args:
+            skip_db: When True, skip the SQLite write. Used when the agent
+                     already persisted messages to SQLite via its own
+                     _flush_messages_to_session_db(), preventing the
+                     duplicate-write bug (#860).
+        """
+        with self._transcript_retry_lock:
+            pending = self._dirty_transcripts.setdefault(session_id, [])
+            pending.append(dict(message))
+            # Cap pending messages per session to avoid unbounded memory
+            # growth when the DB is persistently broken. Spool the evicted
+            # oldest message to the on-disk pending spool (same machinery
+            # flush_pending_to_file uses at shutdown) so a runtime cap
+            # rotation does not silently discard it (#78182); it is
+            # replayed on the next successful transcript flush.
+            if len(pending) > self._MAX_PENDING_PER_SESSION:
+                dropped = pending.pop(0)
+                spool_path = None
+                try:
+                    from gateway.shutdown_flush import (
+                        spool_dropped_transcript_message,
+                    )
+                    spool_path = spool_dropped_transcript_message(
+                        session_id, dropped
+                    )
+                except Exception:
+                    spool_path = None
+                if spool_path is not None:
+                    spooled_sessions = getattr(
+                        self, "_spooled_drop_sessions", None
+                    )
+                    if spooled_sessions is None:
+                        spooled_sessions = set()
+                        self._spooled_drop_sessions = spooled_sessions
+                    spooled_sessions.add(session_id)
+                    logger.warning(
+                        "Session DB transcript pending queue full for %s "
+                        "(cap=%d); spooled oldest message to %s for replay "
+                        "after DB recovery",
+                        session_id, self._MAX_PENDING_PER_SESSION, spool_path,
+                    )
+                else:
+                    logger.warning(
+                        "Session DB transcript pending queue full for %s "
+                        "(cap=%d); dropping oldest message to make room "
+                        "(on-disk spool unavailable)",
+                        session_id, self._MAX_PENDING_PER_SESSION,
+                    )
+            # Snapshot the first pending message, then release the lock
+            # before the DB write so other sessions are not blocked.
+            msg = pending[0]
+        queue_session_id = session_id
+        # DB write outside the retry lock — other sessions can append
+        # concurrently. We re-acquire the lock only to update the queue.
+        while True:
+            try:
+                self._append_transcript_message(session_id, msg)
+            except Exception as exc:
+                from hermes_state import CompressionSessionClosedError
+
+                if isinstance(exc, CompressionSessionClosedError):
+                    # Resolve the full continuation chain via the canonical
+                    # transitive API — a depth-1 live-child lookup misses
+                    # lineages with >=2 compression hops (root -> mid -> tip).
+                    # ``get_compression_tip`` returns the input id when no
+                    # continuation exists; adopt only a different, still-live
+                    # tip, otherwise fail closed as before.
+                    child_id = ""
+                    tip = self._db.get_compression_tip(session_id)
+                    if tip and tip != session_id:
+                        tip_row = self._db.get_session(tip)
+                        if tip_row is not None and tip_row.get("ended_at") is None:
+                            child_id = str(tip)
+                    if child_id:
+                        try:
+                            self._append_transcript_message(child_id, msg)
+                        except Exception as reroute_exc:
+                            exc = reroute_exc
+                        else:
+                            with self._transcript_retry_lock:
+                                if pending and pending[0] is msg:
+                                    pending.pop(0)
+                                existing_child_pending = self._dirty_transcripts.get(
+                                    child_id, []
+                                )
+                                if pending:
+                                    # Older parent backlog must precede messages
+                                    # already queued directly on the child.
+                                    pending.extend(existing_child_pending)
+                                    self._dirty_transcripts[child_id] = pending
+                                elif existing_child_pending:
+                                    pending = existing_child_pending
+                                self._dirty_transcripts.pop(queue_session_id, None)
+                                previous_failures = self._transcript_append_failures.pop(
+                                    queue_session_id, 0
+                                )
+                                if previous_failures:
+                                    self._transcript_append_failures[child_id] = max(
+                                        previous_failures,
+                                        self._transcript_append_failures.get(child_id, 0),
+                                    )
+                                self._transcript_reroutes[session_id] = child_id
+                                queue_session_id = child_id
+                            # Publish routing only after the retry queue has moved,
+                            # so new child writes cannot bypass older parent backlog.
+                            with self._lock:
+                                for entry in self._entries.values():
+                                    if entry.session_id == session_id:
+                                        entry.session_id = child_id
+                                self._save()
+                            if not pending:
+                                return
+                            msg = pending[0]
+                            session_id = child_id
+                            continue
+                    else:
+                        # This is a permanent routing invariant failure, not a
+                        # transient DB outage. Drop it from the retry queue so it
+                        # cannot poison later transcript writes indefinitely.
+                        with self._transcript_retry_lock:
+                            if pending and pending[0] is msg:
+                                pending.pop(0)
+                            if not pending:
+                                self._dirty_transcripts.pop(queue_session_id, None)
+                                self._transcript_append_failures.pop(session_id, None)
+                        logger.error(
+                            "Session DB transcript append rejected for compression-ended "
+                            "%s with no unique live child; not retrying",
+                            session_id,
+                        )
+                        return
+                if self._is_fts_corruption_error(exc) and self._rebuild_fts_once():
+                    try:
+                        self._append_transcript_message(session_id, msg)
+                    except Exception as retry_exc:
+                        exc = retry_exc
+                    else:
+                        with self._transcript_retry_lock:
+                            if pending and pending[0] is msg:
+                                pending.pop(0)
+                            if not pending:
+                                self._dirty_transcripts.pop(queue_session_id, None)
+                                self._transcript_append_failures.pop(session_id, None)
+                        continue
+                with self._transcript_retry_lock:
+                    failures = self._transcript_append_failures.get(session_id, 0) + 1
+                    self._transcript_append_failures[session_id] = failures
+                logger.warning(
+                    "Session DB transcript append failed for %s "
+                    "(failure_count=%d, pending=%d); will retry: %s",
+                    session_id, failures, len(pending), exc,
+                )
+                return
+            else:
+                with self._transcript_retry_lock:
+                    if pending and pending[0] is msg:
+                        pending.pop(0)
+                    if not pending:
+                        self._dirty_transcripts.pop(queue_session_id, None)
+                        self._transcript_append_failures.pop(session_id, None)
+                        queue_empty = True
+                    else:
+                        queue_empty = False
+                        msg = pending[0]
+                if queue_empty:
+                    # DB write just succeeded and the in-memory backlog is
+                    # clear: replay any cap-dropped messages spooled to disk
+                    # for this session (#78182).
+                    self._drain_spooled_drops(session_id)
+                    return
+                continue
+
+    def _drain_spooled_drops(self, session_id: str) -> None:
+        """Replay cap-dropped spooled transcript messages after DB recovery.
+
+        Best-effort: replay failures keep the spool files for the next
+        successful flush; nothing here may raise into the caller.
+        """
+        spooled_sessions = getattr(self, "_spooled_drop_sessions", None)
+        if not spooled_sessions or session_id not in spooled_sessions:
+            return
+        try:
+            from gateway.shutdown_flush import drain_transcript_spool
+
+            _replayed, remaining = drain_transcript_spool(
+                session_id,
+                lambda message: self._append_transcript_message(
+                    session_id, message
+                ),
+            )
+            if not remaining:
+                spooled_sessions.discard(session_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to drain transcript spool for %s: %s", session_id, exc
+            )
+
+    def _append_transcript_message(self, session_id: str, message: Dict[str, Any]) -> None:
+        """Write one transcript row. Caller handles retry queuing."""
+        self._db.append_message(
+            session_id=session_id,
+            role=message.get("role", "unknown"),
+            content=message.get("content"),
+            tool_name=message.get("tool_name"),
+            tool_calls=message.get("tool_calls"),
+            tool_call_id=message.get("tool_call_id"),
+            reasoning=message.get("reasoning") if message.get("role") == "assistant" else None,
+            reasoning_content=message.get("reasoning_content") if message.get("role") == "assistant" else None,
+            reasoning_details=message.get("reasoning_details") if message.get("role") == "assistant" else None,
+            codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
+            codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
+            platform_message_id=(message.get("platform_message_id") or message.get("message_id")),
+            observed=bool(message.get("observed")),
+            timestamp=message.get("timestamp"),
+            # api_content sidecar: the exact bytes sent to the API for
+            # this message (prompt-cache-stable replay). Must survive
+            # any gateway-side persistence path or the next turn's
+            # replay diverges at this row.
+            api_content=extract_api_content_sidecar(message),
+            # Presentation typing (e.g. "internal_notification" for
+            # self-injected async-delegation/background notification turns,
+            # #82888). DB-only; stripped from provider-bound payloads.
+            display_kind=message.get("display_kind"),
+            display_metadata=message.get("display_metadata"),
+        )
+
+    # Maximum in-memory pending messages per session before dropping the
+    # oldest. Prevents unbounded growth when the DB is persistently broken.
+    _MAX_PENDING_PER_SESSION = 200
+
+    @staticmethod
+    def _is_fts_corruption_error(exc: Exception) -> bool:
+        """True only when *exc* identifies an FTS index failure.
+
+        Generic ``database disk image is malformed`` and unscoped malformed
+        schema errors can originate in canonical B-trees or freelist pages.
+        They must fail closed instead of triggering online index surgery.
+        """
+        text = str(exc).lower()
+        return "messages_fts" in text or ("fts5" in text and "corrupt" in text)
+
+    def _rebuild_fts_once(self) -> bool:
+        """Attempt FTS5 ``rebuild`` command once per store lifetime.
+
+        Delegates to ``SessionDB.rebuild_fts()`` which handles locking and
+        table-existence checks internally. Returns ``True`` when at least
+        one index was rebuilt.
+        """
+        if self._fts_rebuild_attempted:
+            return False
+        self._fts_rebuild_attempted = True
+        db = self._db
+        if db is None or not hasattr(db, "rebuild_fts"):
+            return False
+        # Guard against the same WAL split-brain risk as the automatic
+        # rebuild paths: skip when a foreign process holds state.db or
+        # its WAL sidecars open.
+        if hasattr(db, "_foreign_state_db_holders"):
+            foreign_holders = db._foreign_state_db_holders()
+            if foreign_holders:
+                logger.warning(
+                    "Skipping Session DB FTS rebuild while foreign processes "
+                    "hold the database or WAL sidecars (%s); canonical "
+                    "transcript writes remain available.",
+                    foreign_holders,
+                )
+                return False
+        try:
+            rebuilt = db.rebuild_fts()
+        except Exception as exc:
+            logger.warning("Session DB FTS rebuild failed: %s", exc)
+            return False
+        if rebuilt:
+            logger.warning(
+                "Rebuilt %d Session DB FTS index(es) after append corruption",
+                rebuilt,
+            )
+        return rebuilt > 0
+
+    def _clear_dirty_transcript(self, session_id: str) -> None:
+        """Drop queued pending messages for a session.
+
+        Called by ``rewrite_transcript`` and ``rewind_session`` so that
+        /retry, /undo, /compress — which replace or truncate the transcript —
+        don't leave stale messages that would be re-inserted on the next
+        append.
+        """
+        with self._transcript_retry_lock:
+            self._dirty_transcripts.pop(session_id, None)
+            self._transcript_append_failures.pop(session_id, None)
+
+    def has_platform_message_id(
+        self, session_id: str, platform_message_id: str
+    ) -> bool:
+        """Check if a message with the given platform_message_id is persisted.
+
+        Thin wrapper over SessionDB.has_platform_message_id(). Returns False
+        when no DB is available (in-memory sessions). Used by the gateway's
+        transient-failure dedupe guard (#47237).
+        """
+        if not self._db:
+            return False
+        try:
+            return self._db.has_platform_message_id(
+                session_id, platform_message_id
+            )
+        except Exception:
+            logger.debug("has_platform_message_id lookup failed", exc_info=True)
+            return False
+
+    def rewrite_transcript(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        active_only: bool = False,
+    ) -> bool:
+        """Replace the entire transcript for a session with new messages.
+
+        Used by /retry and /compress to persist modified conversation
+        history. state.db is the canonical store. (/undo is not a caller:
+        it soft-archives rows via rewind_session / rewind_to_message.)
+
+        DESTRUCTIVE by default: ``replace_messages(active_only=False)``
+        DELETEs every row for the session, including the soft-archived
+        compaction history that archive_and_compact() keeps on disk
+        (#38763). Callers rewriting the live transcript of a session that
+        may carry archived rows must pass ``active_only=True`` so only the
+        live rows are replaced.
+
+        Returns ``True`` when the write lands (or there is no DB to write to)
+        and ``False`` when the canonical write fails. Most callers can ignore
+        the result, but callers that would otherwise commit a destructive state
+        change on top of a failed write — e.g. /compress repointing the live
+        session onto a fresh session_id — must check it so they can surface an
+        error instead of silently dropping the conversation.
+        """
+        if not self._db:
+            return True
+        self._clear_dirty_transcript(session_id)
+        try:
+            self._db.replace_messages(session_id, messages, active_only=active_only)
+            return True
+        except Exception as e:
+            logger.debug("Failed to rewrite transcript in DB: %s", e)
+            return False
+
+    def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
+        """Load all messages from a session's transcript.
+
+        state.db is the canonical store. The legacy JSONL fallback was removed
+        in spec 002 — pre-DB sessions on existing disks have already been
+        migrated (their DB row holds the full message history).
+
+        Reads follow the same routing writes use (#82616): the in-memory
+        reroute map installed after a compression rotation, then the durable
+        compression tip in state.db. Before this, writes followed the reroute
+        chain while reads queried the stale id directly — the transcript
+        "vanished" (disk=0) even though every message sat healthy under the
+        child session.
+        """
+        if not self._db:
+            return []
+        # Follow the write-side reroute chain (cycle-guarded, same shape as
+        # append_to_transcript).
+        reroutes = getattr(self, "_transcript_reroutes", None) or {}
+        seen = set()
+        while session_id in reroutes and session_id not in seen:
+            seen.add(session_id)
+            session_id = reroutes[session_id]
+        try:
+            # Durable successor: a compression child published to state.db
+            # survives restart even though the in-memory reroute map doesn't.
+            tip = self._db.get_compression_tip(session_id)
+            if tip:
+                session_id = tip
+        except Exception:
+            pass
+        try:
+            # repair_alternation: this load feeds LIVE REPLAY. A durable
+            # user;user wedge (e.g. a turn that persisted no assistant row)
+            # would otherwise re-trigger the pre-request repair on every
+            # request forever — heal it once at the restore boundary.
+            return self._db.get_messages_as_conversation(
+                session_id, repair_alternation=True
+            )
+        except Exception as e:
+            # A failed read must be distinguishable from an empty transcript:
+            # downstream guards treat [] as "nothing persisted" and may make
+            # routing decisions on it (#82616). WARNING, not DEBUG.
+            logger.warning(
+                "Transcript read failed for session %s (returning empty; "
+                "downstream must not treat this as data loss): %s",
+                session_id, e,
+            )
+            return []
+
+    def rewind_session(self, session_id: str, n: int = 1) -> Optional[Dict[str, Any]]:
+        """Back up ``n`` user turns via soft-delete, keeping rows for audit.
+
+        Unlike :meth:`rewrite_transcript` (a hard replace used by /retry),
+        this flips the truncated rows to ``active=0`` in state.db so they
+        survive for audit and stay hidden from re-prompts and search. Mirrors
+        the CLI/TUI ``/undo [N]`` behavior via ``SessionDB.rewind_to_message``.
+
+        Returns a dict ``{"rewound_count", "turns_undone", "target_text"}`` on
+        success, or ``None`` if there's no DB or no user message to back up to.
+        ``n`` clamps to the oldest user turn when it exceeds the turn count.
+        """
+        if not self._db:
+            return None
+        self._clear_dirty_transcript(session_id)
+        if n < 1:
+            n = 1
+        try:
+            recents = self._db.list_recent_user_messages(session_id, limit=max(n, 10))
+        except Exception as e:
+            logger.debug("rewind_session: failed to list user messages: %s", e)
+            return None
+        if not recents:
+            return None
+        target_idx = min(n - 1, len(recents) - 1)
+        target_id = recents[target_idx]["id"]
+        try:
+            result = self._db.rewind_to_message(session_id, target_id)
+        except ValueError as e:
+            logger.debug("rewind_session: %s", e)
+            return None
+        except Exception as e:
+            logger.debug("rewind_session: rewind_to_message failed: %s", e)
+            return None
+        target_msg = result.get("target_message") or {}
+        content = target_msg.get("content") or ""
+        if isinstance(content, list):
+            parts = [
+                p.get("text", "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            target_text = "\n".join(t for t in parts if t)
+        elif isinstance(content, str):
+            target_text = content
+        else:
+            target_text = ""
+        return {
+            "rewound_count": result.get("rewound_count", 0),
+            "turns_undone": target_idx + 1,
+            "target_text": target_text,
+        }
 
 
 def build_session_context(

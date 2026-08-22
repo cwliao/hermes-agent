@@ -1084,6 +1084,19 @@ class SessionDB(
         time.sleep(min(jitter, max(deadline - now, 0.001)))
         return True
 
+    @staticmethod
+    def _is_fts_write_corruption_error(exc: sqlite3.DatabaseError) -> bool:
+        """True for the error class a corrupt FTS index raises on writes.
+
+        Only an FTS5-specific error is safe to recover online. SQLite's
+        generic ``database disk image is malformed`` does not identify the
+        damaged object and may represent canonical B-tree or freelist damage;
+        treating it as FTS-only corruption could continue writing to a
+        structurally damaged database.
+        """
+        msg = str(exc).lower()
+        return "fts5" in msg and "corrupt" in msg
+
     def _foreign_state_db_holders(self) -> List[Tuple[int, str]]:
         """Foreign processes holding this DB or its WAL sidecars (see hermes_state_holders)."""
         return _foreign_state_db_holders(self.db_path)

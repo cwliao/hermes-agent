@@ -324,7 +324,12 @@ def check_once(
 def _restart_user_service(service_name: str, *, timeout: float = 90) -> None:
     # The unit file controls the restarted service environment. This pop only
     # prevents the systemctl client from inheriting gateway-local markers.
-    env = os.environ.copy()
+    from tools.environments.local import build_subprocess_env
+
+    env = build_subprocess_env(
+        scrub_secrets=False,
+        inherit_profile_home=False,
+    )
     env.pop("_HERMES_GATEWAY", None)
     env.pop("HERMES_GATEWAY_SESSION", None)
     subprocess.run(

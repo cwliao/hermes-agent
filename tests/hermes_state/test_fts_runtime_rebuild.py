@@ -359,6 +359,36 @@ class TestRuntimeFtsRebuild:
         assert _meta_value(tmp_path / "state.db", FTS_STALE_KEY) is None
         assert _base_fts_triggers(tmp_path / "state.db") == set(_FTS_TRIGGERS)
 
+    def test_generic_malformed_write_fails_closed(self, db, monkeypatch):
+        db.create_session("s1", source="test")
+        monkeypatch.setattr(
+            db, "rebuild_fts", lambda: pytest.fail("must not rebuild FTS")
+        )
+
+        def _structural_corruption(_conn):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        with pytest.raises(sqlite3.DatabaseError, match="disk image is malformed"):
+            db._execute_write(_structural_corruption)
+
+        assert db._db_corrupt is True
+        assert db._fts_enabled is True
+
+    def test_append_self_heals_after_fts_corruption(self, db, tmp_path):
+        if not db._fts_enabled:
+            pytest.skip("FTS5 unavailable in this build")
+        db.create_session("s1", source="test")
+        db.append_message("s1", "user", "hello world")
+
+        _corrupt_fts(tmp_path / "state.db")
+
+        msg_id = db.append_message("s1", "user", "healed append")
+        assert msg_id is not None
+        assert _message_contents(tmp_path / "state.db") == [
+            "hello world",
+            "healed append",
+        ]
+
     def test_fts_looking_constraint_error_does_not_mutate_fts(
         self, db, tmp_path, monkeypatch
     ):

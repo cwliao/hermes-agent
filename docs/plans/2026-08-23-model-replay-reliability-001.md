@@ -438,3 +438,26 @@ compression/session regression set (35 tests) pass locally. Production deploy
 and a new real Telegram Webboard acceptance test remain pending; the ticket
 must not be closed until logs show the baseline-less nudge or blocked decision
 and the final response is demonstrably fresh.
+
+## Production acceptance after `a780bd4772`
+
+The immutable release `v2026.8.23-model-replay-a780bd4772` was activated with
+gateway PID `1595835` and full release SHA
+`a780bd4772d36ba1971907d9407efb0e785d3abf`. A real Telegram Webboard message
+was accepted at `2026-08-23 20:18:37 CST` in the same chat. The resulting clean
+turn used session `20260823_195406_62658f`, executed the exact read-only command
+`bash ~/.hermes/scripts/hermes_webboard_report.sh`, and received a tool result
+timestamped `2026-08-23 20:18:47 CST`.
+
+The final 422-character Telegram response was delivered successfully and did
+not contain the stale `08:03:29` timestamp or `AGENTS.md` content. Runtime
+reported `tool_turns=1`. The guard emitted `decision=invoked` followed by
+`decision=pass reason=no_exact_tool_backed_candidate`; this pass is correct for
+this turn because a real tool receipt was already present, so the guard did not
+need to nudge. The state.db transcript contains the user message, terminal
+call, terminal result, and fresh assistant answer with no old replay rows.
+
+This completes the requested real Telegram acceptance for the deployed fix.
+The guard remains intentionally fail-closed for a future baseline-less exact
+Webboard turn: if the model returns no tool call, the new freshness candidate
+path must nudge or block instead of accepting the answer.

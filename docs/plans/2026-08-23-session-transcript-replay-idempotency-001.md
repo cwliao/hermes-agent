@@ -139,3 +139,37 @@ Implementation commit: `dc4179fdf9e7f8c45fd65f6d2f94af4d19efae28`, pushed to
 matching pinned gateway venv and systemd drop-in 69. Post-deploy verification
 found `hermes-gateway.service` active/running with `NRestarts=0` and
 `HERMES_RELEASE_SHA` matching the commit.
+
+## Appendix: Independent verification result
+
+獨立驗證 session 依照本票 acceptance criteria 執行了 10 項檢查，包含：
+commit 是否在 `main` 祖先鏈上、部署的 release 是否含此修正、4 個核心檔案的
+`_row_id` 邏輯是否存在、新增的回歸測試是否全過、既有 Telegram/replay 測試
+是否全過、完整 gateway 測試套件是否有新增失敗、`state.db` 自修正上線後是否
+仍有重複列，以及一次真實 Telegram Webboard 端對端重測。
+
+前 9 項全部通過：`_row_id` 身分識別機制確認存在且運作正常；19 個
+dedup/compaction 測試與 57 個 Telegram/replay 測試全過；完整 gateway 套件為
+6,289 passed、6 個既有失敗。這 6 個失敗皆與本次修正檔案無關，分別涉及
+Discord 影片傳送、圖片轉址、session store 預設路徑，以及 Telegram polling
+health 靜默判斷。`state.db` 從修正上線約 11:20 起至本次驗證時，非空
+assistant 訊息列完全沒有重複。
+
+第 10 項（真實端對端重測）失敗：在同一個受影響的 session
+`20260821_163406_895ea0` 再次送出相同的 Webboard 觸發詞後，模型回傳內容與
+修正前完全相同的舊回覆，連內嵌時間戳 `08:03:29` 都完全一致。這表示模型
+沒有重新執行對應的工具呼叫，而是將上一輪回答原樣複製貼上。
+
+因此，本票修正已確認解決「資料庫層級的重複列」問題：`_row_id` 能正確識別
+重複的 SQL row，避免已載入的 transcript 再次追加。但原票引用的症狀
+「Prevent Hermes from … produce answers that look hallucinated」背後有兩個
+獨立成因，本票只解決其中之一：
+
+1. 資料庫重複列讓模型混淆：**已修好**。
+2. 模型本身選擇原樣複製前一輪回答而不重新執行任務，即使上下文乾淨、沒有
+   任何重複列：**未解決**。這是模型本身能力／可靠性問題，資料庫層修正
+   無法觸及，屬於已知限制與後續處理項目。
+
+本票不得標記為完全解決原始症狀。第 2 點與 vLLM 目前追蹤的
+`drafter-active` 模型可靠性問題屬於同一類，應另行透過更換模型或其他模型
+層／推理策略處理，不在 SESSION-TRANSCRIPT-REPLAY-001 的範圍內。

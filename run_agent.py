@@ -252,6 +252,9 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
     # drive the bounded retry. Persisting them would replay the internal
     # retry instruction as user-authored context on resume.
     "_dropped_toolcall_nudge",
+    # model stale-answer replay guard: assistant/user recovery pair is
+    # provider-visible only and must never enter the durable transcript.
+    "_model_replay_guard_synthetic",
 )
 
 

@@ -852,6 +852,18 @@ def _run_references_parallel(
 
     total = len(reference_models)
     completed = 0
+
+    def _report_progress(idx: int) -> None:
+        """Account for one terminal reference slot and notify the display."""
+        nonlocal completed
+        completed += 1
+        if progress_callback is not None:
+            try:
+                label = _slot_label(reference_models[idx])
+                progress_callback(completed, total, label)
+            except Exception as exc:  # pragma: no cover - display must never break
+                logger.debug("MoA progress_callback failed: %s", exc)
+
     executor = ThreadPoolExecutor(max_workers=workers)
     interrupted = False
     # Per-fan-out context-length cache shared by every reference worker, so
@@ -874,6 +886,11 @@ def _run_references_parallel(
                     "[skipped: MoA presets cannot recursively reference MoA]",
                     _RefAccounting(CanonicalUsage()),
                 )
+                # A recursion-guard slot is a terminal reference outcome even
+                # though it never enters the executor. Count it exactly once
+                # so refs_done/ref_total reaches M/M and does not leave the UI
+                # displaying a permanently incomplete fan-out.
+                _report_progress(idx)
                 continue
             futures[
                 executor.submit(
@@ -899,13 +916,7 @@ def _run_references_parallel(
             for future in done:
                 idx = futures[future]
                 results[idx] = future.result()
-                completed += 1
-                if progress_callback is not None:
-                    try:
-                        label = _slot_label(reference_models[idx])
-                        progress_callback(completed, total, label)
-                    except Exception as exc:  # pragma: no cover - display must never break
-                        logger.debug("MoA progress_callback failed: %s", exc)
+                _report_progress(idx)
             if not pending:
                 break
             if agent is not None and getattr(agent, "_interrupt_requested", False):

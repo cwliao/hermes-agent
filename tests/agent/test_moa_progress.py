@@ -127,3 +127,81 @@ def test_moa_progress_callback_none_safe(moa_config, monkeypatch):
     # Turn still resolved cleanly; aggregator slot populated as usual.
     assert facade.last_aggregator_slot is not None
     assert facade.last_aggregator_slot["model"] == "anthropic/claude-opus-4.8"
+
+
+def test_moa_progress_counts_skipped_recursion_guard(moa_config, monkeypatch):
+    """Skipped nested-MoA slots still advance terminal N/M progress."""
+    from agent import moa_loop
+
+    def fake_call_llm(**kwargs):
+        return _response("advice")
+
+    monkeypatch.setattr(moa_loop, "call_llm", fake_call_llm)
+
+    refs = [
+        {"provider": "openrouter", "model": "model-a"},
+        {"provider": "moa", "model": "nested"},
+        {"provider": "openrouter", "model": "model-b"},
+    ]
+    progress = []
+
+    output = moa_loop._run_references_parallel(
+        refs,
+        [{"role": "user", "content": "synthetic"}],
+        progress_callback=lambda done, total, label: progress.append(
+            (done, total, label)
+        ),
+    )
+
+    assert len(output) == 3
+    assert [done for done, _total, _label in progress] == [1, 2, 3]
+    assert all(total == 3 for _done, total, _label in progress)
+    assert {label for _done, _total, label in progress} == {
+        "openrouter:model-a",
+        "moa:nested",
+        "openrouter:model-b",
+    }
+
+
+def test_moa_progress_four_references_survives_one_failure(moa_config, monkeypatch):
+    """Four references keep 3 usable outputs and complete N/M after one failure."""
+    from agent import moa_loop
+
+    def fake_call_llm(**kwargs):
+        if kwargs.get("model") == "failing-model":
+            raise RuntimeError("synthetic provider failure")
+        return _response(f"advice-{kwargs.get('model')}")
+
+    monkeypatch.setattr(moa_loop, "call_llm", fake_call_llm)
+    monkeypatch.setattr(moa_loop, "get_transport", lambda *_args, **_kwargs: None)
+
+    refs = [
+        {"provider": "openrouter", "model": "model-a"},
+        {"provider": "openrouter", "model": "model-b"},
+        {"provider": "openrouter", "model": "model-c"},
+        {"provider": "openrouter", "model": "failing-model"},
+    ]
+    progress = []
+
+    output = moa_loop._run_references_parallel(
+        refs,
+        [{"role": "user", "content": "synthetic four-agent quorum"}],
+        progress_callback=lambda done, total, label: progress.append(
+            (done, total, label)
+        ),
+    )
+
+    successful = [text for _label, text, _acct in output if not text.startswith("[failed:")]
+    failed = [text for _label, text, _acct in output if text.startswith("[failed:")]
+    assert len(output) == 4
+    assert len(successful) == 3
+    assert len(failed) == 1
+    assert [done for done, _total, _label in progress] == [1, 2, 3, 4]
+    assert all(total == 4 for _done, total, _label in progress)
+    assert progress[-1][0:2] == (4, 4)
+    assert [label for label, _text, _acct in output] == [
+        "openrouter:model-a",
+        "openrouter:model-b",
+        "openrouter:model-c",
+        "openrouter:failing-model",
+    ]

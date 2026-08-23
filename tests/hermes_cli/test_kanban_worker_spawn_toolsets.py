@@ -61,6 +61,7 @@ agent:
 
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_dispatch as kbd
+    from hermes_cli import kanban_db_dispatch as kbd
 
     monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["hermes"])
 
@@ -86,8 +87,66 @@ agent:
     assert captured["env"]["HERMES_KANBAN_TASK"] == "t_spawn_tools"
     assert "--toolsets" in captured["cmd"]
     pinned = captured["cmd"][captured["cmd"].index("--toolsets") + 1].split(",")
-    for required in ("terminal", "web", "file", "skills", "code_execution", "delegation"):
+    assert set(pinned) <= {"file", "kanban", "skills", "terminal", "web"}
+    for required in ("terminal", "web", "file", "skills"):
         assert required in pinned
+
+
+def test_worker_toolsets_explicit_profile_override_is_preserved(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "elias"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - file
+    - kanban
+    - terminal
+    - web
+    - code_execution
+kanban:
+  worker_toolsets:
+    - file
+    - kanban
+    - terminal
+    - code_execution
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    resolved = kbd._resolve_worker_cli_toolsets(str(profile))
+    assert resolved == ["file", "kanban", "terminal", "code_execution"]
+
+
+def test_task_scoped_worker_toolsets_override_profile_defaults(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "elias"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - file
+    - kanban
+    - terminal
+    - web
+    - browser
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    resolved = kbd._resolve_worker_cli_toolsets(
+        str(profile),
+        task_body='[kanban:worker_toolsets] ["file", "kanban", "browser"]',
+    )
+    assert resolved == ["file", "kanban", "browser"]
 
 
 def test_default_spawn_model_override_survives_real_cli_parse(monkeypatch, tmp_path):
@@ -103,6 +162,7 @@ def test_default_spawn_model_override_survives_real_cli_parse(monkeypatch, tmp_p
     monkeypatch.setenv("HERMES_HOME", str(root))
 
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
     from hermes_cli import kanban_db_dispatch as kbd
     from hermes_cli._parser import build_top_level_parser
 
@@ -154,6 +214,7 @@ def test_default_spawn_resolves_env_passthrough_under_multiplex(monkeypatch, tmp
     from agent.secret_scope import set_multiplex_active
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_dispatch as kbd
+    from hermes_cli import kanban_db_dispatch as kbd
 
     monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["hermes"])
 
@@ -201,6 +262,7 @@ toolsets:
     monkeypatch.setenv("HERMES_HOME", str(root))
 
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
     from hermes_cli import kanban_db_dispatch as kbd
 
     resolved = kbd._resolve_worker_cli_toolsets(str(profile))

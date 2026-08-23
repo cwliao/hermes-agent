@@ -119,6 +119,22 @@ _GATEWAY_PROXY_SSE_BUFFER_MAX_CHARS = 16 * 1024 * 1024
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 _GATEWAY_HYGIENE_PLATFORM = "gateway_hygiene"
 
+
+def _is_kanban_transactional_turn(message: Any) -> bool:
+    """Return whether final assistant text must wait for Kanban proof.
+
+    Keep this classifier deliberately narrow and side-effect free. It runs
+    before the agent/stream consumer is constructed; the execution guard
+    remains the authority that validates the eventual tool receipt.
+    """
+    try:
+        from agent.kanban_execution_guard import (
+            request_requires_transactional_delivery,
+        )
+        return bool(request_requires_transactional_delivery(getattr(message, "text", message)))
+    except Exception:
+        return False
+
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"("  # transient/auxiliary status that should stay in logs, not gateway chats
     r"auxiliary\s+.+\s+failed"
@@ -5674,8 +5690,26 @@ class TurnRunner:
             if _plat_streaming is None
             else bool(_plat_streaming)
         )
+        # KANBAN-TRANSACTIONAL-RESPONSE-GUARD-001: the finalization guard can
+        # replace a failed mutation's final_msg, but it cannot retract prose
+        # that a Telegram stream consumer already edited into a message. The
+        # narrow four-lane request classifier is available before the agent
+        # starts, so hold back both text streaming and interim assistant
+        # commentary for this mutation-shaped turn. The ordinary final send
+        # happens only after the receipt guard has passed or produced its
+        # blocked response.
+        _kanban_transactional_turn = _is_kanban_transactional_turn(ctx.message)
+        if _kanban_transactional_turn:
+            logger.info(
+                "Kanban transactional response mode: buffering final text "
+                "until mutation receipt finalization (session=%s)",
+                ctx.session_key or "?",
+            )
+            _streaming_enabled = False
+            _want_interim_messages = False
+        else:
+            _want_interim_messages = ctx.interim_assistant_messages_enabled
         _want_stream_deltas = _streaming_enabled
-        _want_interim_messages = ctx.interim_assistant_messages_enabled
         _want_interim_consumer = _want_interim_messages
         if _want_stream_deltas or _want_interim_consumer:
             try:

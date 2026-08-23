@@ -1510,28 +1510,6 @@ def _handle_create(args: dict, **kw) -> str:
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
-    # A swarm lane is a skill/routing identity, not automatically a Hermes
-    # profile.  Accepting e.g. ``assignee='grok'`` here creates a ready card
-    # that the dispatcher must (correctly) skip when no profile named grok is
-    # installed.  Fail at creation time instead, so a model cannot turn a
-    # lane typo into a permanently invisible queue item.  Real profiles with
-    # one of these names remain valid if the operator actually created them.
-    try:
-        from hermes_cli.profiles import profile_exists as _profile_exists
-        if (
-            str(assignee).strip() in _KS.MULTI_AGENT_LANE_IDS
-            and not _profile_exists(str(assignee).strip())
-        ):
-            return tool_error(
-                f"assignee={str(assignee).strip()!r} is a swarm lane ID, not an "
-                "installed Hermes profile. Use kanban_swarm with this value as "
-                "workers[].lane_id and omit workers[].profile, or specify an "
-                "installed profile such as 'default'."
-            )
-    except Exception:
-        # Profile discovery is advisory here; an unusual test/embedded runtime
-        # without the profile module should retain the historical path.
-        pass
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
@@ -1597,6 +1575,23 @@ def _handle_create(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            # KANBAN-ASSIGNEE-AVAILABILITY-FAIL-CLOSED-001: a model must not
+            # create a ready card that the dispatcher or an external terminal
+            # can never claim.  Profile existence is not inferred from a
+            # process name; non-profile lanes need a fresh watcher lease.
+            _assignee_name = str(assignee).strip()
+            if (
+                _assignee_name in _KS.MULTI_AGENT_LANE_IDS
+                and kb.assignee_availability(conn, _assignee_name) is None
+            ):
+                return tool_error(
+                    f"assignee={_assignee_name!r} is a swarm lane ID, not an "
+                    "installed Hermes profile. Use kanban_swarm with this value "
+                    "as workers[].lane_id and omit workers[].profile, or specify "
+                    "an installed profile such as 'default'. No task was created."
+                )
+            if kb.assignee_availability(conn, _assignee_name) is None:
+                return tool_error(kb.assignee_unavailable_message(conn, str(assignee)))
             # Inherit the spawning worker's own task workspace when the
             # caller didn't specify one (see resolution note above).
             _self_task = None
@@ -2000,6 +1995,14 @@ def _handle_swarm(args: dict, **kw) -> str:
             max_runtime_seconds=max_runtime,
         ))
 
+    # Preserve the swarm topology validation error before routing preflight:
+    # a mixed lane-bound/unbound graph is malformed independently of whether
+    # its default profile happens to be available.
+    if any(spec.lane_id for spec in specs) and any(not spec.lane_id for spec in specs):
+        return tool_error(
+            "kanban_swarm: lane-bound swarms require a lane_id for every worker"
+        )
+
     verifier_assignee = args.get("verifier_assignee") or default_profile
     synthesizer_assignee = args.get("synthesizer_assignee") or default_profile
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
@@ -2020,6 +2023,24 @@ def _handle_swarm(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            # Validate the complete routing set before create_swarm writes its
+            # root.  This covers the verifier/synthesizer fields as well as
+            # worker profiles; checking only lane IDs leaves invented names
+            # such as ``verifier-default`` permanently ready and unclaimed.
+            routing = [
+                (f"workers[{i}].profile", spec.profile)
+                for i, spec in enumerate(specs, start=1)
+            ]
+            routing.extend([
+                ("verifier_assignee", str(verifier_assignee)),
+                ("synthesizer_assignee", str(synthesizer_assignee)),
+            ])
+            for field_name, assignee_name in routing:
+                if kb.assignee_availability(conn, assignee_name) is None:
+                    return tool_error(
+                        f"kanban_swarm: {field_name}={assignee_name!r} is "
+                        f"unavailable. {kb.assignee_unavailable_message(conn, assignee_name)}"
+                    )
             # WORKER-SUBPROCESS-SESSION-ENV-001: stamp the root task with
             # this turn's notification-delivery origin so every descendant
             # (workers, verifier, synthesizer) inherits it via create_task,

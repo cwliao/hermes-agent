@@ -210,6 +210,9 @@ def _fresh_compaction_message_copy(msg: Dict[str, Any]) -> Dict[str, Any]:
     """
     fresh = msg.copy()
     fresh.pop(_DB_PERSISTED_MARKER, None)
+    # Compaction output is written into a child/rotated session. Source
+    # session row ids are not identities in that new session.
+    fresh.pop("_row_id", None)
     return fresh
 
 
@@ -259,6 +262,9 @@ def _strip_persistence_markers(messages: List[Dict[str, Any]]) -> None:
     for msg in messages:
         if isinstance(msg, dict):
             msg.pop(_DB_PERSISTED_MARKER, None)
+            # Compaction output is a new durable transcript projection; do not
+            # carry source-session identities into its append flush.
+            msg.pop("_row_id", None)
 
 
 def _prune_stale_reasoning_replay(messages: List[Dict[str, Any]]) -> int:
@@ -6585,6 +6591,8 @@ This compaction should PRIORITISE preserving all information related to the focu
                 # Content changed after a possible flush — clear the persisted
                 # stamp so the DB sync/flush rewrites the row.
                 entry.pop(_DB_PERSISTED_MARKER, None)
+                # This is an intentional content rewrite of the live row.
+                entry.pop("_row_id", None)
                 # Sibling of the finalize_turn pop site (#75170): this pop
                 # also strips the marker from a LIVE dict in place, so the
                 # bounded flush-scan cursor would identity-skip the rewritten

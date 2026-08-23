@@ -1522,6 +1522,12 @@ def _build_replay_entry(
     providers.
     """
     entry: Dict[str, Any] = {"role": role, "content": content}
+    # Keep durable identity through gateway history reconstruction so a copied
+    # cold-resume list remains append-idempotent. The provider-bound serializer
+    # removes this bookkeeping key before every API request.
+    row_id = msg.get("_row_id")
+    if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id > 0:
+        entry["_row_id"] = row_id
     # api_content sidecar (persist-what-you-send, prompt-cache stability):
     # forward the exact bytes previously sent to the API for this message so
     # the agent's api_messages build can substitute them and keep the request
@@ -19776,7 +19782,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         await self._mark_durable_active_turn(event, session_entry.session_key)
 
         # Load conversation history from transcript
-        history = await self.async_session_store.load_transcript(session_entry.session_id)
+        history = await self.async_session_store.load_transcript(
+            session_entry.session_id, include_row_ids=True
+        )
         
         # -----------------------------------------------------------------
         # Session hygiene: auto-compress pathologically large transcripts
@@ -21435,7 +21443,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if 'message_text' in locals() and message_text is not None and session_entry is not None:
                     _already_persisted = False
                     try:
-                        _recent_transcript = await self.async_session_store.load_transcript(session_entry.session_id)
+                        _recent_transcript = await self.async_session_store.load_transcript(
+                            session_entry.session_id, include_row_ids=True
+                        )
                     except Exception:
                         _recent_transcript = []
                     for _msg in reversed(_recent_transcript[-10:]):

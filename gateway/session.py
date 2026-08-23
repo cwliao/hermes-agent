@@ -3959,7 +3959,9 @@ class SessionStore:
             logger.debug("Failed to rewrite transcript in DB: %s", e)
             return False
 
-    def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
+    def load_transcript(
+        self, session_id: str, *, include_row_ids: bool = False
+    ) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript.
 
         state.db is the canonical store. The legacy JSONL fallback was removed
@@ -3972,6 +3974,10 @@ class SessionStore:
         chain while reads queried the stale id directly — the transcript
         "vanished" (disk=0) even though every message sat healthy under the
         child session.
+
+        ``include_row_ids`` is opt-in bookkeeping for agent replay paths that
+        must survive copied-history persistence. It is not needed by display,
+        media, or administrative consumers and remains off by default.
         """
         if not self._db:
             return []
@@ -3996,7 +4002,9 @@ class SessionStore:
             # would otherwise re-trigger the pre-request repair on every
             # request forever — heal it once at the restore boundary.
             return self._db.get_messages_as_conversation(
-                session_id, repair_alternation=True
+                session_id,
+                repair_alternation=True,
+                include_row_ids=include_row_ids,
             )
         except Exception as e:
             # A failed read must be distinguishable from an empty transcript:

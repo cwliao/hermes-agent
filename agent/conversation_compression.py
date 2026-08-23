@@ -2812,6 +2812,11 @@ def compress_context(
 
     _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
     messages_before_compression = None
+    # ``archive_and_compact`` stamps SQLite row ids on the compacted dicts
+    # before its transaction commits.  Keep an explicit commit boundary so an
+    # exception can distinguish speculative ids (transaction rolled back)
+    # from durable ids (archive committed, a later prompt update failed).
+    _in_place_archive_committed = False
     try:
         if _lock_holder is not None:
             _candidate_refresher = _CompressionLockLeaseRefresher(
@@ -3513,6 +3518,7 @@ def compress_context(
                         watermark=_commit_watermark,
                         lock_holder=_lock_holder,
                     )
+                    _in_place_archive_committed = True
                     split_status = "in_place_committed"
                     # Reset the flush identity set so the next turn's appends are
                     # diffed against the COMPACTED transcript: the compacted dicts
@@ -3787,6 +3793,24 @@ def compress_context(
                                 "_proactive_prune_rearm_tokens"
                             ]
                         )
+                elif in_place:
+                    if not _in_place_archive_committed:
+                        # ``_insert_message_rows`` stamps each compacted dict
+                        # before the archive transaction commits.  If that
+                        # transaction rolls back, the durable transcript is
+                        # still the pre-compression one.  Restore that exact
+                        # snapshot instead of clearing ids and later appending
+                        # retained old rows as duplicates.
+                        if messages_before_compression is not None:
+                            messages[:] = copy.deepcopy(messages_before_compression)
+                            compressed = messages
+                        agent._db_flush_scan_prefix = None
+                        agent._flushed_db_message_ids = set()
+                        agent._flushed_db_message_session_id = agent.session_id
+                        agent._last_flushed_db_idx = 0
+                    # If the archive committed and a later bookkeeping write
+                    # failed, the compacted row ids are durable and must stay
+                    # attached so recovery flushes do not duplicate them.
                 split_status = (
                     "aborted"
                     if locals().get("old_session_id") is None and not in_place

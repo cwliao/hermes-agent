@@ -717,6 +717,11 @@ class TelegramAdapter(BasePlatformAdapter):
     # Cap on inbound events held across a disconnect/reconnect window.
     # Bounds memory during extended outages; oldest events are dropped first.
     HELD_INBOUND_MAX = 64
+    # Telegram message ids are unique within a chat. Keep a bounded ingress
+    # set so polling retries or duplicate handler delivery cannot enqueue the
+    # same user message twice. This is deliberately not text dedupe: two
+    # different ids may be chunks of one long message and must still batch.
+    INBOUND_DEDUPE_MAX = 2048
     _GENERAL_TOPIC_THREAD_ID = "1"
 
     # Telegram's edit_message applies MarkdownV2 formatting only on the
@@ -856,6 +861,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # redispatch on reconnect instead (see _hold_inbound_event).
         self._held_inbound_events: List[MessageEvent] = []
         self._held_inbound_redispatch_task: Optional[asyncio.Task] = None
+        self._seen_inbound_message_keys: Dict[str, None] = {}
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
         self._polling_conflict_recovery_generation: Optional[int] = None
@@ -9948,6 +9954,33 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         return getattr(update, "effective_message", None) or getattr(update, "message", None)
 
+    def _claim_inbound_message(self, message: Message) -> bool:
+        """Claim one native Telegram message id for normal-path processing.
+
+        Message ids are scoped to a chat, so ``(chat_id, message_id)`` is the
+        stable identity. Missing identity is allowed through for compatibility
+        with synthetic/test payloads. This process-local map is not a durable
+        delivery ledger; transcript idempotency is handled by SessionDB row
+        identity.
+        """
+        chat = getattr(getattr(message, "chat", None), "id", None)
+        message_id = getattr(message, "message_id", None)
+        if chat is None or message_id is None:
+            return True
+        key = f"{chat}:{message_id}"
+        seen = getattr(self, "_seen_inbound_message_keys", None)
+        if not isinstance(seen, dict):
+            seen = {}
+            self._seen_inbound_message_keys = seen
+        if key in seen:
+            logger.info("[Telegram] Suppressing duplicate inbound message %s", key)
+            return False
+        seen[key] = None
+        limit = max(1, int(getattr(self, "INBOUND_DEDUPE_MAX", 2048)))
+        while len(seen) > limit:
+            seen.pop(next(iter(seen)))
+        return True
+
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.
 
@@ -9973,6 +10006,8 @@ class TelegramAdapter(BasePlatformAdapter):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
+        if not self._claim_inbound_message(msg):
+            return
         await self._ensure_forum_commands(update.message)
 
         event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
@@ -9997,6 +10032,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 getattr(getattr(msg, "from_user", None), "id", None),
                 getattr(getattr(msg, "chat", None), "id", None),
             )
+            return
+        if not self._claim_inbound_message(msg):
             return
         await self._ensure_forum_commands(msg)
 
@@ -10085,6 +10122,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._should_process_message(msg):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.LOCATION, update_id=update.update_id)
+            return
+        if not self._claim_inbound_message(msg):
             return
 
         venue = getattr(msg, "venue", None)
@@ -10316,6 +10355,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._observe_unmentioned_group_message(
                     _m, _event.message_type, update_id=update.update_id, event=_event
                 )
+            return
+
+        if not self._claim_inbound_message(update.message):
             return
 
         msg = update.message

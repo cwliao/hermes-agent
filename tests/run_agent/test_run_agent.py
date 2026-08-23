@@ -2753,7 +2753,7 @@ class TestHandleMaxIterations:
         agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
         agent._cached_system_prompt = "You are helpful."
         messages = [
-            {"role": "user", "content": "do stuff"},
+            {"role": "user", "content": "do stuff", "_row_id": 17},
             {
                 "role": "assistant",
                 "tool_calls": [{"id": "call_1", "function": {"name": "execute_code", "arguments": "{}"}}],

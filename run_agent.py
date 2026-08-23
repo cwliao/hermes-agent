@@ -2133,9 +2133,10 @@ class AIAgent:
         (translated to markers, then cleared each flush), not a persisted set.
 
         Note: the marker is stamped on the live/shared conversation dict, which
-        correctly makes re-persistence idempotent across turns. No code path
-        edits a persisted message's content/role in place expecting a re-write
-        (in-place compaction resets the seed and re-diffs by identity).
+        correctly makes re-persistence idempotent across turns. The two
+        intentional live rewrite paths clear both the marker and ``_row_id``
+        before appending the replacement; compaction copies clear source-row
+        identities before they are written to a child session.
         """
         # Persistence-isolated agents (e.g. the background skill/memory review
         # fork) must NEVER write into the canonical session store. The fork
@@ -2205,11 +2206,12 @@ class AIAgent:
             # list snapshot taken at the end of the previous successful flush.
             # Every message in that snapshot was already given its final
             # disposition (written+stamped, stamped as durable history, or
-            # skipped as ephemeral scaffolding / non-dict), and no code path
-            # pops _DB_PERSISTED_MARKER from a live dict in place (compression
-            # strips markers on fresh copies, which breaks identity here and
-            # forces a full re-scan). Identity match ⇒ identical skip decision,
-            # so starting after the matched prefix is behavior-preserving.
+            # skipped as ephemeral scaffolding / non-dict). The known live
+            # rewrite paths invalidate this prefix explicitly after clearing
+            # their marker and row identity; compression copies are handled by
+            # their own source-row stripping. Identity match therefore implies
+            # the same skip decision, so starting after the matched prefix is
+            # behavior-preserving.
             _scan_start = 0
             _prev_prefix = getattr(self, "_db_flush_scan_prefix", None)
             if isinstance(_prev_prefix, list):
@@ -2240,6 +2242,19 @@ class AIAgent:
                 if _is_ephemeral_scaffolding(msg):
                     continue
                 if msg.get(_DB_PERSISTED_MARKER):
+                    continue
+                # Histories loaded from SessionDB carry a durable row id. The
+                # gateway may pass a copied history, so Python object identity
+                # is not enough to recognize it as already persisted. This is
+                # a per-message append guard, not a high-water mark; explicit
+                # rewrite paths remove _row_id before changing a live row.
+                _row_id = msg.get("_row_id")
+                if (
+                    isinstance(_row_id, int)
+                    and not isinstance(_row_id, bool)
+                    and _row_id > 0
+                ):
+                    msg[_DB_PERSISTED_MARKER] = True
                     continue
                 # Already-durable messages: either carried over from the loaded
                 # history copy, or seeded by a caller. Stamp them so future

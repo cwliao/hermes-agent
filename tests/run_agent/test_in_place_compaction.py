@@ -375,6 +375,47 @@ class TestInPlaceAntiGrowthGuard:
                 "recent reply",
             ]
 
+    def test_in_place_rollback_clears_speculative_row_ids_for_recovery_flush(self):
+        """A failed archive must not make the compacted memory look durable."""
+        from hermes_state import SessionDB
+        from agent.conversation_compression import compress_context
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SessionDB(db_path=Path(tmp) / "t.db")
+            sid = "20260619_rollback_row_ids"
+            _seed(db, sid, "rollback")
+            agent = _make_agent(db, sid, in_place=True)
+            # Model the gateway's cold-resume path: durable row ids are carried
+            # into the in-memory history so rollback can restore idempotently.
+            messages = db.get_messages_as_conversation(sid, include_row_ids=True)
+
+            real_insert = db._insert_message_rows
+
+            def insert_then_fail(conn, session_id, rows):
+                real_insert(conn, session_id, rows)
+                raise RuntimeError("simulated commit failure")
+
+            with patch.object(db, "_insert_message_rows", side_effect=insert_then_fail):
+                compressed, _ = compress_context(
+                    agent, messages, approx_tokens=100_000, system_message="sys"
+                )
+
+            # The archive transaction rolled back, so the in-memory transcript
+            # must return to the durable pre-compaction snapshot.  In
+            # particular, retained old rows keep their original ids and are
+            # not appended a second time by the recovery flush.
+            assert [message["content"] for message in compressed] == [
+                f"msg {i}" for i in range(8)
+            ]
+            assert [message.get("_row_id") for message in compressed] == list(
+                range(1, 9)
+            )
+            agent._flush_messages_to_session_db(compressed, None)
+            live = db.get_messages_as_conversation(sid)
+            assert [message["content"] for message in live] == [
+                f"msg {i}" for i in range(8)
+            ]
+
 
 class TestCompactedTurnsStaySearchable:
     """Teknium's review hinges on the pre-compaction transcript staying

@@ -113,6 +113,70 @@ class TestFlushDeduplication:
             finally:
                 db.close()
 
+    def test_cold_copied_sqlite_history_is_not_appended_again(self):
+        """Durable row ids survive history copies without duplicates."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.append_messages_batch(
+                    session_id=agent.session_id,
+                    messages=[
+                        {"role": "user", "content": "old question"},
+                        {"role": "assistant", "content": "old answer"},
+                    ],
+                )
+                loaded = db.get_messages_as_conversation(
+                    agent.session_id, include_row_ids=True
+                )
+                copied_history = [{**message} for message in loaded]
+                copied_messages = copied_history + [
+                    {"role": "user", "content": "new question"},
+                    {"role": "assistant", "content": "new answer"},
+                ]
+
+                # Model a cold/resume path: object identity and in-memory
+                # markers are unavailable, but durable ids remain.
+                agent._db_flush_scan_prefix = None
+                agent._last_flushed_db_idx = 0
+                agent._flush_messages_to_session_db(copied_messages, [])
+
+                rows = db.get_messages(agent.session_id)
+                assert [row["content"] for row in rows] == [
+                    "old question", "old answer", "new question", "new answer"
+                ]
+            finally:
+                db.close()
+
+    def test_rewrite_clears_row_id_and_remains_durable(self):
+        """An explicit rewrite path can append the replacement row."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.append_messages_batch(
+                    session_id=agent.session_id,
+                    messages=[{"role": "assistant", "content": "empty"}],
+                )
+                loaded = db.get_messages_as_conversation(
+                    agent.session_id, include_row_ids=True
+                )
+                rewritten = dict(loaded[0])
+                rewritten["content"] = "filled final answer"
+                rewritten.pop("_row_id", None)
+                rewritten.pop("_db_persisted", None)
+
+                agent._flush_messages_to_session_db([rewritten], [])
+
+                rows = db.get_messages(agent.session_id)
+                assert rows[-1]["content"] == "filled final answer"
+            finally:
+                db.close()
+
 
 # ---------------------------------------------------------------------------
 # Test: append_to_transcript skip_db parameter
@@ -168,4 +232,3 @@ class TestFlushIdxInit:
                 skip_memory=True,
             )
         assert agent._last_flushed_db_idx == 0
-

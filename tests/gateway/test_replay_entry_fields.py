@@ -29,6 +29,12 @@ class TestBuildReplayEntry:
         )
         assert entry == {"role": "user", "content": "hello"}
 
+    def test_user_message_preserves_durable_row_id(self):
+        entry = _build_replay_entry(
+            "user", "hello", {"role": "user", "content": "hello", "_row_id": 17}
+        )
+        assert entry == {"role": "user", "content": "hello", "_row_id": 17}
+
     def test_tool_message_has_only_role_and_content(self):
         # Tool messages aren't routed through this helper in production
         # (they take the rich-passthrough branch), but the helper itself
@@ -142,4 +148,3 @@ class TestGatewayHistoryBuildForwardsSidecar:
         ]
         agent_history, _obs = _build_gateway_agent_history(history)
         assert agent_history[0]["api_content"] == "hi\n\nCTX"
-

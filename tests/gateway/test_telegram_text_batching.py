@@ -7,7 +7,7 @@ from the same session and aggregate them before dispatching.
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -50,6 +50,7 @@ def _make_adapter():
     # Hold-queue state (preserve inbound across reconnect)
     adapter._held_inbound_events = []
     adapter._held_inbound_redispatch_task = None
+    adapter._seen_inbound_message_keys = {}
     adapter.HELD_INBOUND_MAX = 64
     return adapter
 
@@ -163,6 +164,64 @@ class TestTextBatching:
         assert adapter._media_group_events == {}
         assert adapter._media_group_tasks == {}
         assert adapter._polling_error_task is None
+
+
+class TestInboundDeduplication:
+    @pytest.mark.asyncio
+    async def test_duplicate_native_text_message_is_not_enqueued_twice(self):
+        adapter = _make_adapter()
+        msg = SimpleNamespace(
+            text="hello",
+            message_id=42,
+            chat=SimpleNamespace(id="12345", type="private"),
+            from_user=SimpleNamespace(id=7),
+        )
+        update = SimpleNamespace(message=msg, effective_message=msg, update_id=100)
+        adapter._is_user_authorized_from_message = Mock(return_value=True)
+        adapter._should_process_message = Mock(return_value=True)
+        adapter._ensure_forum_commands = AsyncMock()
+        adapter._build_message_event = Mock(
+            side_effect=lambda *_args, **_kwargs: _make_event("hello")
+        )
+        adapter._clean_bot_trigger_text = lambda value: value
+        adapter._cache_replied_media = AsyncMock()
+        adapter._apply_telegram_group_observe_attribution = lambda event: event
+        adapter._log_inbound_accepted = Mock()
+        adapter._enqueue_text_event = Mock()
+
+        await adapter._handle_text_message(update, None)
+        await adapter._handle_text_message(update, None)
+
+        adapter._enqueue_text_event.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_different_native_message_ids_remain_independent(self):
+        adapter = _make_adapter()
+        adapter._is_user_authorized_from_message = Mock(return_value=True)
+        adapter._should_process_message = Mock(return_value=True)
+        adapter._ensure_forum_commands = AsyncMock()
+        adapter._build_message_event = Mock(
+            side_effect=lambda *_args, **_kwargs: _make_event("hello")
+        )
+        adapter._clean_bot_trigger_text = lambda value: value
+        adapter._cache_replied_media = AsyncMock()
+        adapter._apply_telegram_group_observe_attribution = lambda event: event
+        adapter._log_inbound_accepted = Mock()
+        adapter._enqueue_text_event = Mock()
+
+        for message_id in (42, 43):
+            msg = SimpleNamespace(
+                text="hello",
+                message_id=message_id,
+                chat=SimpleNamespace(id="12345", type="private"),
+                from_user=SimpleNamespace(id=7),
+            )
+            update = SimpleNamespace(
+                message=msg, effective_message=msg, update_id=message_id
+            )
+            await adapter._handle_text_message(update, None)
+
+        assert adapter._enqueue_text_event.call_count == 2
 
 
 class TestHoldInboundAcrossReconnect:

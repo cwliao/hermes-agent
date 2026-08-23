@@ -379,6 +379,10 @@ def finalize_turn(
                 # otherwise ``/resume`` reloads ``content=""`` and the bug
                 # resurfaces cross-session.
                 _tail.pop("_db_persisted", None)
+                # This is an intentional replacement of the old empty row;
+                # let the flush append the filled answer instead of treating
+                # the source row identity as already durable.
+                _tail.pop("_row_id", None)
                 # The bounded flush-scan cursor (run_agent.py) skips the
                 # identity-matched prefix of its previous snapshot on the
                 # assumption that no live dict loses the marker in place —

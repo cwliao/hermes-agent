@@ -77,7 +77,7 @@ def _replay_guard_blocked_message(agent: Any) -> str:
     model = str(getattr(agent, "model", "") or "unknown")
     provider = str(getattr(agent, "provider", "") or "unknown")
     logger.error(
-        "model replay guard blocked unverifiable recovery model=%s provider=%s",
+        "model_replay_guard decision=blocked reason=unverifiable_recovery model=%s provider=%s",
         model,
         provider,
     )
@@ -85,6 +85,35 @@ def _replay_guard_blocked_message(agent: Any) -> str:
         "I could not verify a fresh execution for this request. "
         "The previous result was not reused as a completed answer; please retry "
         "or switch to a more reliable model."
+    )
+
+
+def _replay_guard_audit(
+    agent: Any,
+    *,
+    decision: str,
+    reason: str,
+    turn_id: str = "",
+    current_user_idx: int = -1,
+    message_count: int = 0,
+) -> None:
+    """Emit a low-cardinality runtime audit for every guard decision.
+
+    The guard is deliberately conservative, but a silent ``pass`` made a
+    production miss indistinguishable from an unexecuted code path.  Keep the
+    audit free of prompt/answer content while recording the session and
+    logical-turn bindings needed to diagnose compression rotation.
+    """
+    logger.info(
+        "model_replay_guard decision=%s reason=%s session=%s turn=%s "
+        "current_user_idx=%s messages=%s phase=%s",
+        decision,
+        reason,
+        str(getattr(agent, "session_id", "") or ""),
+        str(turn_id or ""),
+        current_user_idx,
+        message_count,
+        str(getattr(agent, "_model_replay_guard_phase", "") or ""),
     )
 
 
@@ -101,9 +130,25 @@ def _replay_guard_try_finalization(
     The helper is intentionally conservative. Any ledger inconsistency,
     missing DB, missing registry, or prior claim becomes a blocked result.
     """
+    _replay_guard_audit(
+        agent,
+        decision="invoked",
+        reason="finalization",
+        turn_id=turn_id,
+        current_user_idx=current_user_idx,
+        message_count=len(messages),
+    )
     db = getattr(agent, "_session_db", None)
     session_id = str(getattr(agent, "session_id", "") or "")
     if db is None or not session_id or not turn_id:
+        _replay_guard_audit(
+            agent,
+            decision="pass",
+            reason="missing_db_session_or_turn_binding",
+            turn_id=turn_id,
+            current_user_idx=current_user_idx,
+            message_count=len(messages),
+        )
         return "pass"
     idempotent, mutating = _replay_guard_tool_sets(agent)
     registry_digest = tool_registry_digest(idempotent, mutating)
@@ -126,6 +171,14 @@ def _replay_guard_try_finalization(
                 )
                 agent._model_replay_guard_phase = "blocked"
                 final_msg["content"] = _replay_guard_blocked_message(agent)
+                _replay_guard_audit(
+                    agent,
+                    decision="blocked",
+                    reason="nudge_answer_changed_without_receipt",
+                    turn_id=turn_id,
+                    current_user_idx=current_user_idx,
+                    message_count=len(messages),
+                )
                 return "blocked"
             db.transition_model_replay_attempt(
                 logical_turn_key=turn_id,
@@ -167,6 +220,14 @@ def _replay_guard_try_finalization(
                 })
                 agent._session_messages = messages
                 agent._emit_status("↻ Switching model to verify a fresh tool execution")
+                _replay_guard_audit(
+                    agent,
+                    decision="fallback",
+                    reason="nudge_terminal_without_receipt",
+                    turn_id=turn_id,
+                    current_user_idx=current_user_idx,
+                    message_count=len(messages),
+                )
                 return "fallback"
             if fallback:
                 db.transition_model_replay_attempt(
@@ -177,6 +238,14 @@ def _replay_guard_try_finalization(
                 )
             agent._model_replay_guard_phase = "blocked"
             final_msg["content"] = _replay_guard_blocked_message(agent)
+            _replay_guard_audit(
+                agent,
+                decision="blocked",
+                reason="fallback_claim_or_activation_failed",
+                turn_id=turn_id,
+                current_user_idx=current_user_idx,
+                message_count=len(messages),
+            )
             return "blocked"
         # A fallback response that completed without a fresh receipt is terminal.
         db.transition_model_replay_attempt(
@@ -187,9 +256,25 @@ def _replay_guard_try_finalization(
         )
         agent._model_replay_guard_phase = "blocked"
         final_msg["content"] = _replay_guard_blocked_message(agent)
+        _replay_guard_audit(
+            agent,
+            decision="blocked",
+            reason="fallback_completed_without_receipt",
+            turn_id=turn_id,
+            current_user_idx=current_user_idx,
+            message_count=len(messages),
+        )
         return "blocked"
 
     if phase:
+        _replay_guard_audit(
+            agent,
+            decision="pass",
+            reason="phase_already_set",
+            turn_id=turn_id,
+            current_user_idx=current_user_idx,
+            message_count=len(messages),
+        )
         return "pass"
     evidence = ReplayEvidence(
         version=TOOL_EXECUTION_VERSION,
@@ -219,7 +304,27 @@ def _replay_guard_try_finalization(
         mutating_tools=mutating,
     )
     if candidate is None:
+        _replay_guard_audit(
+            agent,
+            decision="pass",
+            reason="no_exact_tool_backed_candidate",
+            turn_id=turn_id,
+            current_user_idx=current_user_idx,
+            message_count=len(messages),
+        )
         return "pass"
+    if not candidate.recovery_safe:
+        final_msg["content"] = _replay_guard_blocked_message(agent)
+        agent._model_replay_guard_phase = "blocked"
+        _replay_guard_audit(
+            agent,
+            decision="blocked",
+            reason=candidate.unsafe_reason or "previous_tool_not_replay_safe",
+            turn_id=turn_id,
+            current_user_idx=current_user_idx,
+            message_count=len(messages),
+        )
+        return "blocked"
     claim_token = uuid.uuid4().hex
     invocation_id = uuid.uuid4().hex
     claimed = db.claim_model_replay_attempt(
@@ -239,6 +344,14 @@ def _replay_guard_try_finalization(
         # A prior durable claim means dispatch may have happened. Never replay.
         final_msg["content"] = _replay_guard_blocked_message(agent)
         agent._model_replay_guard_phase = "blocked"
+        _replay_guard_audit(
+            agent,
+            decision="blocked",
+            reason="durable_nudge_claim_already_exists",
+            turn_id=turn_id,
+            current_user_idx=current_user_idx,
+            message_count=len(messages),
+        )
         return "blocked"
     _nudge_dispatched = db.transition_model_replay_attempt(
         logical_turn_key=turn_id,
@@ -249,6 +362,14 @@ def _replay_guard_try_finalization(
     if not _nudge_dispatched:
         final_msg["content"] = _replay_guard_blocked_message(agent)
         agent._model_replay_guard_phase = "blocked"
+        _replay_guard_audit(
+            agent,
+            decision="blocked",
+            reason="nudge_dispatch_cas_failed",
+            turn_id=turn_id,
+            current_user_idx=current_user_idx,
+            message_count=len(messages),
+        )
         return "blocked"
     agent._model_replay_guard_phase = "nudge_dispatched"
     agent._model_replay_guard_claim = claimed
@@ -262,6 +383,14 @@ def _replay_guard_try_finalization(
     })
     agent._session_messages = messages
     agent._emit_status("↻ Verifying a fresh tool execution instead of reusing the previous answer")
+    _replay_guard_audit(
+        agent,
+        decision="nudge",
+        reason="exact_tool_backed_replay_candidate",
+        turn_id=turn_id,
+        current_user_idx=current_user_idx,
+        message_count=len(messages),
+    )
     return "nudge"
 
 

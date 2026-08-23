@@ -87,6 +87,52 @@ def run_tool_round(
         agent._cap_delegate_task_calls(assistant_message.tool_calls)
     )
 
+    # A replay-recovery nudge is authorized only by a fresh, fully identified
+    # idempotent tool receipt.  Validate this before the normal dispatcher can
+    # perform any side effect.
+    _replay_phase = getattr(agent, "_model_replay_guard_phase", "")
+    _replay_claim = getattr(agent, "_model_replay_guard_claim", None)
+    if _replay_phase in {"nudge_dispatched", "fallback_dispatched"} and isinstance(_replay_claim, dict):
+        from agent.conversation_loop import (
+            _replay_guard_blocked_message,
+            _replay_guard_tool_sets,
+        )
+        _idempotent, _mutating = _replay_guard_tool_sets(agent)
+        _names = [str(getattr(tc.function, "name", "") or "") for tc in assistant_message.tool_calls]
+        _ids = [str(getattr(tc, "id", "") or "") for tc in assistant_message.tool_calls]
+        _registry = __import__("agent.conversation_loop", fromlist=["tool_registry_digest"])
+        _registry_digest = _registry.tool_registry_digest(_idempotent, _mutating)
+        _receipt_valid = bool(_names) and all(_names) and all(
+            name in _idempotent and name not in _mutating for name in _names
+        ) and all(_ids) and len(set(_ids)) == len(_ids)
+        if _receipt_valid:
+            _receipt_valid = bool(agent._session_db.record_model_replay_receipt(
+                logical_turn_key=str(getattr(agent, "_current_turn_id", "") or ""),
+                session_id=str(getattr(agent, "session_id", "") or ""),
+                branch_id=str(getattr(agent, "session_id", "") or ""),
+                expected_state=_replay_phase,
+                claim_token=str(_replay_claim.get("claim_token") or ""),
+                invocation_id=str(_replay_claim.get("invocation_id") or ""),
+                registry_digest=_registry_digest,
+                tool_call_ids=_ids,
+            ))
+        if _receipt_valid:
+            agent._model_replay_guard_phase = "recovered"
+        else:
+            agent._session_db.transition_model_replay_attempt(
+                logical_turn_key=str(getattr(agent, "_current_turn_id", "") or ""),
+                expected_state=_replay_phase,
+                new_state="unverified",
+                claim_token=str(_replay_claim.get("claim_token") or ""),
+            )
+            agent._model_replay_guard_phase = "blocked"
+            _blocked = _replay_guard_blocked_message(agent)
+            assistant_message.tool_calls = []
+            final_response = _blocked
+            _turn_exit_reason = "model_replay_guard_blocked"
+            append_message(messages, {"role": "assistant", "content": _blocked})
+            return _verdict("break")
+
     # Mixed batch: the assistant message keeps EVERY emitted call (each tool_call needs a
     # matching result) while only valid ones dispatch.
     _invalid_batch_calls = [

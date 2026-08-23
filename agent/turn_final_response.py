@@ -20,7 +20,7 @@ logger = logging.getLogger("agent.conversation_loop")
 # Ephemeral retry scaffolding rows popped before the final answer becomes durable.
 _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_thinking_prefill", "_empty_recovery_synthetic", "_empty_terminal_sentinel",
-    "_dropped_toolcall_nudge",
+    "_dropped_toolcall_nudge", "_model_replay_guard_synthetic",
 )
 
 
@@ -50,6 +50,7 @@ def finish_text_response(
     _preflight_compression_blocked: Any, codex_ack_continuations: Any,
     truncated_response_parts: Any, length_continue_retries: Any,
     _pending_verification_response: Any, _pending_verification_response_previewed: Any,
+    current_turn_user_idx: Any, turn_id: Any,
 ) -> FinalResponseVerdict:
     """Finish (or defer) a text-only assistant response in the original guard order. Every
     continuation path sets ``final_response = None`` so an acknowledgment never suppresses
@@ -201,6 +202,15 @@ def finish_text_response(
 
     # Genuine turn end (no dropped-tool-call mismatch): clear stall budget.
     agent._dropped_toolcall_retries = 0
+
+    # Narrow stale-answer replay guard, after the normal response gates.
+    from agent.conversation_loop import _replay_guard_try_finalization
+    _replay_outcome = _replay_guard_try_finalization(
+        agent, messages, current_turn_user_idx, turn_id, final_response, final_msg
+    )
+    if _replay_outcome in {"nudge", "fallback"}:
+        final_response = None
+        return _verdict("continue")
 
     # Pop prefill / empty-retry scaffolding before the final response or
     # verification follow-up; it must not become durable transcript.

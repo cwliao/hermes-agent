@@ -1757,7 +1757,15 @@ class GatewayKanbanWatchersMixin:
         logger.info(
             "kanban dispatcher: embedded in gateway (interval=%.1fs)", interval
         )
+        tick_number = 0
         while self._running:
+            tick_number += 1
+            tick_started = time.monotonic()
+            tick_spawned = 0
+            tick_reclaimed = 0
+            tick_skipped_nonspawnable = 0
+            tick_ready_spawnable = False
+            tick_paused = False
             try:
                 # Reap zombie children before per-board work so a board DB
                 # failure cannot block cleanup of unrelated workers.
@@ -1778,6 +1786,7 @@ class GatewayKanbanWatchersMixin:
                 if not _kanban_dispatch_allowed():
                     ready_pending = False
                     bad_ticks = 0
+                    tick_paused = True
                 else:
                     # Re-read the auto-decompose toggle live each tick so a user
                     # flipping kanban.auto_decompose=false to STOP runaway fan-out
@@ -1788,6 +1797,12 @@ class GatewayKanbanWatchersMixin:
                     results = await _to_thread_process_service(_tick_once)
                     any_spawned = False
                     for slug, res in (results or []):
+                        if res is not None:
+                            tick_spawned += len(getattr(res, "spawned", ()) or ())
+                            tick_reclaimed += int(getattr(res, "reclaimed", 0) or 0)
+                            tick_skipped_nonspawnable += len(
+                                getattr(res, "skipped_nonspawnable", ()) or ()
+                            )
                         if res is not None and getattr(res, "spawned", None):
                             any_spawned = True
                             # Quiet by default — only log when something actually
@@ -1805,6 +1820,7 @@ class GatewayKanbanWatchersMixin:
                             )
                     # Health telemetry (aggregate across boards)
                     ready_pending = await _to_thread_process_service(_ready_nonempty)
+                    tick_ready_spawnable = bool(ready_pending)
                     if ready_pending and not any_spawned:
                         bad_ticks += 1
                     else:
@@ -1826,6 +1842,24 @@ class GatewayKanbanWatchersMixin:
                 raise
             except Exception:
                 logger.exception("kanban dispatcher: unexpected watcher error")
+
+            # Keep a bounded, once-per-tick heartbeat.  Previously this loop
+            # only logged when it spawned/reaped something, so an entirely
+            # non-spawnable ready queue looked exactly like a dead dispatcher.
+            # The supervisor still handles task death; this line makes a live
+            # but intentionally idle/filtered dispatcher observable.
+            logger.info(
+                "kanban dispatcher heartbeat: tick=%d elapsed=%.2fs paused=%s "
+                "ready_spawnable=%s spawned=%d reclaimed=%d "
+                "skipped_nonspawnable=%d",
+                tick_number,
+                time.monotonic() - tick_started,
+                tick_paused,
+                tick_ready_spawnable,
+                tick_spawned,
+                tick_reclaimed,
+                tick_skipped_nonspawnable,
+            )
 
             # Sleep in 1s slices so shutdown is snappy — otherwise a stop()
             # waits up to `interval` seconds for the current sleep to finish.

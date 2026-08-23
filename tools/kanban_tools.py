@@ -1510,6 +1510,28 @@ def _handle_create(args: dict, **kw) -> str:
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
+    # A swarm lane is a skill/routing identity, not automatically a Hermes
+    # profile.  Accepting e.g. ``assignee='grok'`` here creates a ready card
+    # that the dispatcher must (correctly) skip when no profile named grok is
+    # installed.  Fail at creation time instead, so a model cannot turn a
+    # lane typo into a permanently invisible queue item.  Real profiles with
+    # one of these names remain valid if the operator actually created them.
+    try:
+        from hermes_cli.profiles import profile_exists as _profile_exists
+        if (
+            str(assignee).strip() in _KS.MULTI_AGENT_LANE_IDS
+            and not _profile_exists(str(assignee).strip())
+        ):
+            return tool_error(
+                f"assignee={str(assignee).strip()!r} is a swarm lane ID, not an "
+                "installed Hermes profile. Use kanban_swarm with this value as "
+                "workers[].lane_id and omit workers[].profile, or specify an "
+                "installed profile such as 'default'."
+            )
+    except Exception:
+        # Profile discovery is advisory here; an unusual test/embedded runtime
+        # without the profile module should retain the historical path.
+        pass
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
@@ -1922,7 +1944,23 @@ def _handle_swarm(args: dict, **kw) -> str:
             return tool_error(f"workers[{i}].title is required")
         lane_id = w.get("lane_id") or None
         body = w.get("body") or str(title)
-        profile = w.get("profile") or default_profile
+        raw_profile = w.get("profile")
+        profile = raw_profile or default_profile
+        if raw_profile:
+            try:
+                from hermes_cli.profiles import profile_exists as _profile_exists
+                if (
+                    str(raw_profile).strip() in ks.MULTI_AGENT_LANE_IDS
+                    and not _profile_exists(str(raw_profile).strip())
+                ):
+                    return tool_error(
+                        f"workers[{i}].profile={str(raw_profile).strip()!r} is a "
+                        "swarm lane ID, not an installed Hermes profile. Put "
+                        "that value in workers[].lane_id and omit profile, or "
+                        "use an installed profile."
+                    )
+            except Exception:
+                pass
         skills = w.get("skills")
         if isinstance(skills, str):
             skills = [skills]

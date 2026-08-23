@@ -140,6 +140,23 @@ from agent.tool_guardrails import ToolGuardrailDecision, append_toolguard_guidan
 from utils import base_url_host_matches, base_url_hostname, env_float, model_forces_max_completion_tokens
 
 
+# Internal recovery rows are provider-visible but never durable transcript context.
+_EPHEMERAL_SCAFFOLDING_FLAGS = (
+    "_empty_recovery_synthetic",
+    "_empty_terminal_sentinel",
+    "_thinking_prefill",
+    "_verification_stop_synthetic",
+    "_pre_verify_synthetic",
+    "_kanban_stop_synthetic",
+    "_dropped_toolcall_nudge",
+    "_model_replay_guard_synthetic",
+)
+
+
+def _is_ephemeral_scaffolding(msg: Any) -> bool:
+    return isinstance(msg, dict) and any(msg.get(flag) for flag in _EPHEMERAL_SCAFFOLDING_FLAGS)
+
+
 _MAX_TOOL_WORKERS = 8
 
 

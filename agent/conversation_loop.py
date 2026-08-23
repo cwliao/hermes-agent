@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
@@ -36,6 +37,14 @@ from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, per
 from agent.turn_api_error import handle_api_error
 from agent.turn_api_request import build_api_request
 from agent.turn_final_response import finish_text_response
+from agent.model_replay_guard import (
+    REPLAY_NUDGE,
+    ReplayEvidence,
+    TOOL_EXECUTION_VERSION,
+    find_candidate,
+    normalize_replay_text,
+    tool_registry_digest,
+)
 from agent.turn_finalizer import finalize_turn
 from agent.turn_iteration_prep import (
     announce_api_call,
@@ -54,6 +63,217 @@ from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches
 
 logger = logging.getLogger(__name__)
+
+def _replay_guard_tool_sets(agent: Any) -> tuple[frozenset[str], frozenset[str]]:
+    config = getattr(getattr(agent, "_tool_guardrails", None), "config", None)
+    idempotent = getattr(config, "idempotent_tools", None)
+    mutating = getattr(config, "mutating_tools", None)
+    if not isinstance(idempotent, (set, frozenset)) or not isinstance(mutating, (set, frozenset)):
+        return frozenset(), frozenset({"__unknown_registry__"})
+    return frozenset(idempotent), frozenset(mutating)
+
+
+def _replay_guard_blocked_message(agent: Any) -> str:
+    model = str(getattr(agent, "model", "") or "unknown")
+    provider = str(getattr(agent, "provider", "") or "unknown")
+    logger.error(
+        "model replay guard blocked unverifiable recovery model=%s provider=%s",
+        model,
+        provider,
+    )
+    return (
+        "I could not verify a fresh execution for this request. "
+        "The previous result was not reused as a completed answer; please retry "
+        "or switch to a more reliable model."
+    )
+
+
+def _replay_guard_try_finalization(
+    agent: Any,
+    messages: list[dict[str, Any]],
+    current_user_idx: int,
+    turn_id: str,
+    final_response: str,
+    final_msg: dict[str, Any],
+) -> str:
+    """Return ``nudge``/``fallback``/``blocked``/``pass`` for finalization.
+
+    The helper is intentionally conservative. Any ledger inconsistency,
+    missing DB, missing registry, or prior claim becomes a blocked result.
+    """
+    db = getattr(agent, "_session_db", None)
+    session_id = str(getattr(agent, "session_id", "") or "")
+    if db is None or not session_id or not turn_id:
+        return "pass"
+    idempotent, mutating = _replay_guard_tool_sets(agent)
+    registry_digest = tool_registry_digest(idempotent, mutating)
+    phase = str(getattr(agent, "_model_replay_guard_phase", "") or "")
+    claim = getattr(agent, "_model_replay_guard_claim", None)
+    if phase in {"nudge_dispatched", "fallback_dispatched"} and isinstance(claim, dict):
+        expected = phase
+        if phase == "nudge_dispatched":
+            previous_answer = str(
+                getattr(agent, "_model_replay_guard_previous_answer", "") or ""
+            )
+            # A different answer is not proof of a fresh execution either.
+            # Close the nudge as unverified and do not spend a fallback on it.
+            if normalize_replay_text(final_response) != previous_answer:
+                db.transition_model_replay_attempt(
+                    logical_turn_key=turn_id,
+                    expected_state="nudge_dispatched",
+                    new_state="unverified",
+                    claim_token=str(claim.get("claim_token") or ""),
+                )
+                agent._model_replay_guard_phase = "blocked"
+                final_msg["content"] = _replay_guard_blocked_message(agent)
+                return "blocked"
+            db.transition_model_replay_attempt(
+                logical_turn_key=turn_id,
+                expected_state="nudge_dispatched",
+                new_state="nudge_terminal_no_receipt",
+                claim_token=str(claim.get("claim_token") or ""),
+            )
+            fallback_token = uuid.uuid4().hex
+            fallback_invocation = uuid.uuid4().hex
+            fallback = db.claim_model_replay_attempt(
+                logical_turn_key=turn_id,
+                session_id=session_id,
+                branch_id=session_id,
+                action_identity=str(claim.get("action_identity") or ""),
+                attempt="fallback",
+                claim_token=fallback_token,
+                invocation_id=fallback_invocation,
+                registry_digest=registry_digest,
+            )
+            if fallback and agent._try_activate_fallback():
+                agent._model_replay_guard_phase = "fallback_dispatched"
+                agent._model_replay_guard_claim = fallback
+                _fallback_dispatched = db.transition_model_replay_attempt(
+                    logical_turn_key=turn_id,
+                    expected_state="fallback_claimed",
+                    new_state="fallback_dispatched",
+                    claim_token=fallback_token,
+                )
+                if not _fallback_dispatched:
+                    agent._model_replay_guard_phase = "blocked"
+                    final_msg["content"] = _replay_guard_blocked_message(agent)
+                    return "blocked"
+                final_msg["_model_replay_guard_synthetic"] = True
+                append_message(messages, final_msg)
+                append_message(messages, {
+                    "role": "user",
+                    "content": REPLAY_NUDGE,
+                    "_model_replay_guard_synthetic": True,
+                })
+                agent._session_messages = messages
+                agent._emit_status("↻ Switching model to verify a fresh tool execution")
+                return "fallback"
+            if fallback:
+                db.transition_model_replay_attempt(
+                    logical_turn_key=turn_id,
+                    expected_state="fallback_claimed",
+                    new_state="blocked",
+                    claim_token=fallback_token,
+                )
+            agent._model_replay_guard_phase = "blocked"
+            final_msg["content"] = _replay_guard_blocked_message(agent)
+            return "blocked"
+        # A fallback response that completed without a fresh receipt is terminal.
+        db.transition_model_replay_attempt(
+            logical_turn_key=turn_id,
+            expected_state=expected,
+            new_state="unverified",
+            claim_token=str(claim.get("claim_token") or ""),
+        )
+        agent._model_replay_guard_phase = "blocked"
+        final_msg["content"] = _replay_guard_blocked_message(agent)
+        return "blocked"
+
+    if phase:
+        return "pass"
+    evidence = ReplayEvidence(
+        version=TOOL_EXECUTION_VERSION,
+        logical_turn_key=turn_id,
+        session_id=session_id,
+        branch_id=session_id,
+        generation=0,
+        complete=True,
+        zero_calls_proven=not any(
+            isinstance(message, dict)
+            and (
+                message.get("role") == "tool"
+                or message.get("tool_calls")
+            )
+            for message in messages[current_user_idx + 1 :]
+        ),
+        closure_version="closure_v1",
+        cutoff_sequence=int(getattr(agent, "_api_call_count", 0) or 0) + 1,
+    )
+    candidate = find_candidate(
+        messages,
+        current_user_idx,
+        final_response,
+        agent,
+        evidence,
+        idempotent_tools=idempotent,
+        mutating_tools=mutating,
+    )
+    if candidate is None:
+        return "pass"
+    claim_token = uuid.uuid4().hex
+    invocation_id = uuid.uuid4().hex
+    claimed = db.claim_model_replay_attempt(
+        logical_turn_key=candidate.logical_turn_key,
+        session_id=session_id,
+        branch_id=candidate.branch_id,
+        action_identity=candidate.action_identity,
+        attempt="nudge",
+        claim_token=claim_token,
+        invocation_id=invocation_id,
+        registry_digest=registry_digest,
+        closure_version="closure_v1",
+        cutoff_sequence=int(getattr(agent, "_api_call_count", 0) or 0) + 1,
+        zero_calls_proven=True,
+    )
+    if not claimed:
+        # A prior durable claim means dispatch may have happened. Never replay.
+        final_msg["content"] = _replay_guard_blocked_message(agent)
+        agent._model_replay_guard_phase = "blocked"
+        return "blocked"
+    _nudge_dispatched = db.transition_model_replay_attempt(
+        logical_turn_key=turn_id,
+        expected_state="nudge_claimed",
+        new_state="nudge_dispatched",
+        claim_token=claim_token,
+    )
+    if not _nudge_dispatched:
+        final_msg["content"] = _replay_guard_blocked_message(agent)
+        agent._model_replay_guard_phase = "blocked"
+        return "blocked"
+    agent._model_replay_guard_phase = "nudge_dispatched"
+    agent._model_replay_guard_claim = claimed
+    agent._model_replay_guard_previous_answer = candidate.previous_answer
+    final_msg["_model_replay_guard_synthetic"] = True
+    append_message(messages, final_msg)
+    append_message(messages, {
+        "role": "user",
+        "content": REPLAY_NUDGE,
+        "_model_replay_guard_synthetic": True,
+    })
+    agent._session_messages = messages
+    agent._emit_status("↻ Verifying a fresh tool execution instead of reusing the previous answer")
+    return "nudge"
+
+
+# One-time wrap-up notice appended when a wall-clock run budget crosses its
+# 80% threshold (agent.run_budget_seconds / --run-budget). Mirrors the Codex
+# CLI budget wrap-up template: stop new work, deliver from current state.
+RUN_BUDGET_WRAPUP_NOTICE = (
+    "[SYSTEM NOTICE — run time budget nearly exhausted] "
+    "Run time budget nearly exhausted. Stop new discovery/verification work "
+    "now. Produce the required final deliverable (answer/JSON/summary) from "
+    "the state you already have, completing only mandatory writes."
+)
 
 # Must mirror _STALE_TOOL_CALL_MARKER_RE in hermes_state.py; kept local so importing
 # hermes_state (module-level DEFAULT_DB_PATH) is not forced at load time.
@@ -1491,6 +1711,12 @@ def run_conversation(
         )
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
         return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
+
+    # Durable replay-guard state is scoped to this logical turn; the SessionDB
+    # ledger remains the cross-process source of truth.
+    agent._model_replay_guard_phase = ""
+    agent._model_replay_guard_claim = None
+    agent._model_replay_guard_previous_answer = ""
 
     # Per-turn agent state (the gateway caches agents across turns, so none of this may
     # leak into the next message): interim-commentary dedup spans the whole turn but not

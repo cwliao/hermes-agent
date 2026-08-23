@@ -466,6 +466,30 @@ CREATE TABLE IF NOT EXISTS session_turn_leases (
     expires_at REAL NOT NULL
 );
 
+-- Durable, non-transcript ledger for the bounded model stale-answer guard.
+-- It intentionally stores digests and fences only; never user/assistant text.
+CREATE TABLE IF NOT EXISTS model_replay_attempts (
+    logical_turn_key TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    branch_id TEXT NOT NULL,
+    action_identity TEXT NOT NULL,
+    registry_version TEXT NOT NULL DEFAULT 'hermes-tool-registry-v1',
+    registry_digest TEXT NOT NULL DEFAULT '',
+    closure_version TEXT NOT NULL DEFAULT 'closure_v1',
+    cutoff_sequence INTEGER NOT NULL DEFAULT 0,
+    zero_calls_proven INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL,
+    claim_token TEXT,
+    invocation_id TEXT,
+    receipt_ids TEXT NOT NULL DEFAULT '[]',
+    generation INTEGER NOT NULL DEFAULT 0,
+    lineage TEXT NOT NULL DEFAULT 'model-replay-v1',
+    nudge_count INTEGER NOT NULL DEFAULT 0,
+    fallback_count INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS async_delegations (
     delegation_id TEXT PRIMARY KEY,
     origin_session TEXT NOT NULL,
@@ -503,6 +527,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_assistant_calls_by_session
     WHERE role = 'assistant' AND tool_calls IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
 CREATE INDEX IF NOT EXISTS idx_session_turn_leases_expires ON session_turn_leases(expires_at);
+CREATE INDEX IF NOT EXISTS idx_model_replay_attempts_session
+    ON model_replay_attempts(session_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_session ON session_model_usage(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_model_usage_model ON session_model_usage(model);
 CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery

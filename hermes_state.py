@@ -1238,6 +1238,205 @@ class SessionDB(
         "_compressed_summary, timestamp, active, api_content, display_kind, display_metadata"
     )
 
+    # ── Model stale-answer replay ledger ────────────────────────────────
+
+    def claim_model_replay_attempt(
+        self,
+        *,
+        logical_turn_key: str,
+        session_id: str,
+        branch_id: str,
+        action_identity: str,
+        attempt: str,
+        claim_token: str,
+        invocation_id: str,
+        registry_version: str = "hermes-tool-registry-v1",
+        registry_digest: str = "",
+        closure_version: str = "closure_v1",
+        cutoff_sequence: int = 0,
+        zero_calls_proven: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically claim the one nudge or one fallback for a turn.
+
+        This is deliberately a compare-and-set ledger, not a transcript row.
+        A pre-existing claim is never reopened after a process crash: callers
+        must treat it as ``unknown_dispatch`` and block rather than retry.
+        """
+        if attempt not in {"nudge", "fallback"} or not all(
+            isinstance(value, str) and value
+            for value in (logical_turn_key, session_id, branch_id, action_identity, claim_token, invocation_id, registry_version, closure_version)
+        ):
+            return None
+        now = time.time()
+        wanted = "nudge_claimed" if attempt == "nudge" else "fallback_claimed"
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT * FROM model_replay_attempts WHERE logical_turn_key = ?",
+                (logical_turn_key,),
+            ).fetchone()
+            if row is None:
+                if attempt != "nudge":
+                    return None
+                conn.execute(
+                    "INSERT INTO model_replay_attempts "
+                    "(logical_turn_key, session_id, branch_id, action_identity, registry_version, registry_digest, "
+                    "closure_version, cutoff_sequence, zero_calls_proven, state, "
+                    "claim_token, invocation_id, generation, nudge_count, fallback_count, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 0, ?, ?)",
+                    (
+                        logical_turn_key,
+                        session_id,
+                        branch_id,
+                        action_identity,
+                        registry_version,
+                        registry_digest,
+                        closure_version,
+                        int(cutoff_sequence),
+                        int(bool(zero_calls_proven)),
+                        wanted,
+                        claim_token,
+                        invocation_id,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                current = dict(row)
+                if (
+                    current["session_id"] != session_id
+                    or current["branch_id"] != branch_id
+                    or current["action_identity"] != action_identity
+                    or current["registry_version"] != registry_version
+                    or current["registry_digest"] != registry_digest
+                ):
+                    return None
+                if attempt == "nudge":
+                    return None
+                if current["state"] != "nudge_terminal_no_receipt" or current["fallback_count"]:
+                    return None
+                conn.execute(
+                    "UPDATE model_replay_attempts SET state = ?, claim_token = ?, "
+                    "invocation_id = ?, generation = generation + 1, fallback_count = 1, "
+                    "updated_at = ? WHERE logical_turn_key = ? AND state = ? "
+                    "AND fallback_count = 0",
+                    (wanted, claim_token, invocation_id, now, logical_turn_key, current["state"]),
+                )
+            claimed = conn.execute(
+                "SELECT * FROM model_replay_attempts WHERE logical_turn_key = ?",
+                (logical_turn_key,),
+            ).fetchone()
+            return dict(claimed) if claimed else None
+
+        return self._execute_write(_do)
+
+    def transition_model_replay_attempt(
+        self,
+        *,
+        logical_turn_key: str,
+        expected_state: str,
+        new_state: str,
+        claim_token: str,
+    ) -> bool:
+        """Perform a fenced state transition; never resurrect an attempt."""
+        allowed = {
+            ("nudge_claimed", "nudge_dispatched"),
+            ("nudge_dispatched", "nudge_terminal_no_receipt"),
+            ("nudge_dispatched", "recovered"),
+            ("nudge_dispatched", "unverified"),
+            ("fallback_claimed", "fallback_dispatched"),
+            ("fallback_claimed", "unverified"),
+            ("fallback_claimed", "blocked"),
+            ("fallback_dispatched", "recovered"),
+            ("fallback_dispatched", "unverified"),
+            ("nudge_terminal_no_receipt", "unknown_dispatch"),
+            ("nudge_claimed", "unknown_dispatch"),
+            ("fallback_claimed", "unknown_dispatch"),
+            ("nudge_terminal_no_receipt", "blocked"),
+            ("fallback_dispatched", "blocked"),
+        }
+        if (expected_state, new_state) not in allowed or not claim_token:
+            return False
+        now = time.time()
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE model_replay_attempts SET state = ?, updated_at = ? "
+                "WHERE logical_turn_key = ? AND state = ? AND claim_token = ?",
+                (new_state, now, logical_turn_key, expected_state, claim_token),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(_do))
+
+    def record_model_replay_receipt(
+        self,
+        *,
+        logical_turn_key: str,
+        session_id: str,
+        branch_id: str,
+        expected_state: str,
+        claim_token: str,
+        invocation_id: str,
+        registry_digest: str,
+        tool_call_ids: list[str],
+    ) -> bool:
+        """Atomically accept one fresh receipt bound to the active claim.
+
+        The provider call IDs are stored as an audit fence. A receipt from a
+        different turn/branch, registry, claim, invocation, or a duplicate
+        provider ID is rejected before the tool dispatcher is allowed to run.
+        """
+        if expected_state not in {"nudge_dispatched", "fallback_dispatched"}:
+            return False
+        ids = [str(value or "") for value in (tool_call_ids or [])]
+        if not ids or any(not value for value in ids) or len(set(ids)) != len(ids):
+            return False
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT * FROM model_replay_attempts WHERE logical_turn_key = ?",
+                (logical_turn_key,),
+            ).fetchone()
+            if row is None:
+                return False
+            current = dict(row)
+            if (
+                current["session_id"] != session_id
+                or current["branch_id"] != branch_id
+                or current["state"] != expected_state
+                or current["claim_token"] != claim_token
+                or current["invocation_id"] != invocation_id
+                or current["registry_digest"] != registry_digest
+            ):
+                return False
+            try:
+                prior = json.loads(current.get("receipt_ids") or "[]")
+            except (TypeError, ValueError):
+                return False
+            if not isinstance(prior, list) or set(ids) & set(str(item) for item in prior):
+                return False
+            receipt_ids = json.dumps([*prior, *ids], separators=(",", ":"))
+            cursor = conn.execute(
+                "UPDATE model_replay_attempts SET state = 'recovered', receipt_ids = ?, "
+                "updated_at = ? WHERE logical_turn_key = ? AND state = ? "
+                "AND claim_token = ? AND invocation_id = ?",
+                (receipt_ids, time.time(), logical_turn_key, expected_state, claim_token, invocation_id),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(_do))
+
+    def get_model_replay_attempt(self, logical_turn_key: str) -> Optional[Dict[str, Any]]:
+        if not logical_turn_key:
+            return None
+        with self._read_ctx() as conn:
+            row = conn.execute(
+                "SELECT * FROM model_replay_attempts WHERE logical_turn_key = ?",
+                (logical_turn_key,),
+            ).fetchone()
+            return dict(row) if row else None
+
     # ── Meta key/value (scheduler bookkeeping) ──
 
     def get_meta(self, key: str) -> Optional[str]:

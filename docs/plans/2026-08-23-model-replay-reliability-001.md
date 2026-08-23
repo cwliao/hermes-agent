@@ -364,3 +364,45 @@ Ticket opened from the failed independent E2E verification of
 SESSION-TRANSCRIPT-REPLAY-001. The implementation is cross-reviewed locally
 and pending commit, deployment, and the real Webboard acceptance test. This
 ticket does not claim production deployment or closure until those checks pass.
+
+## Production retest finding after `3b8765a825`
+
+The first implementation was deployed as release `3b8765a825` and the same
+Telegram trigger was retested on `2026-08-23` using the affected session
+`20260821_163406_895ea0`. The retest still returned the prior Webboard answer,
+including timestamp `08:03:29` and leaked `AGENTS.md` content. Runtime showed
+`tool_turns=2`, but there was no tool executor call for that turn.
+
+The guard was present and its finalization call site was reached in the
+deployed release, but the real path silently returned `pass` for two reasons:
+
+1. `drafter-active` used `tool_use_enforcement=auto` and
+   `execution_guidance=auto`, so the original explicit-action metadata gate was
+   absent even though the runtime had a concrete tool-capable surface.
+2. Compression rotated the turn into
+   `20260823_192418_3bd23f`. The child transcript retained duplicate
+   `Webboard` user/assistant projections. The successful `terminal` report was
+   earlier in that child transcript, while the immediately preceding duplicate
+   answer had no tool call. The adjacency-only scan therefore found no
+   candidate. A failed phantom `webboard` call was also present beside the
+   real report.
+
+The corrective implementation remains fail-closed while covering this path:
+
+- a deterministic tool-capable surface plus the current request supplies an
+  action identity when explicit execution guidance is `auto`;
+- the exact normalized answer is searched through the compression-preserved
+  lineage for an earlier same-action answer with a successful tool result;
+- failed or duplicate tool outputs are excluded from execution evidence;
+- only the exact `hermes_webboard_report.sh` terminal command is treated as
+  read-only; arbitrary terminal/unknown tools and missing tool results become
+  `blocked`, never automatic re-execution;
+- every finalization decision emits a redacted `model_replay_guard` audit log,
+  including `invoked`, `pass` reasons, `nudge`, `fallback`, and `blocked`.
+
+The corrected code was reproduced against the actual rows in
+`20260823_192418_3bd23f`: it finds the earlier terminal receipt and marks it
+`recovery_safe=True`. Six replay-guard tests, 12 vLLM regression tests, and
+nine compression/session tests pass. The fix still requires deployment and a
+fresh same-session Telegram retest showing the runtime audit decision and a
+new tool invocation before this ticket can close.

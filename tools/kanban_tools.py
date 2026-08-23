@@ -628,7 +628,14 @@ def _handle_show(args: dict, **kw) -> str:
 
 
 def _handle_list(args: dict, **kw) -> str:
-    """List task summaries with the same core filters as the CLI."""
+    """List model-facing task summaries with safe default scope.
+
+    A new user turn must not be absorbed by an old terminal card merely
+    because its title looks similar. The CLI remains a complete history view,
+    but this orchestrator tool defaults to active work only. Models can
+    explicitly request ``status=done``/``status=archived`` when a user asks to
+    inspect historical work.
+    """
     guard = _require_orchestrator_tool("kanban_list")
     if guard:
         return guard
@@ -662,6 +669,7 @@ def _handle_list(args: dict, **kw) -> str:
                 conn,
                 assignee=assignee,
                 status=status,
+                exclude_statuses=("done",) if status is None else None,
                 tenant=tenant,
                 include_archived=include_archived,
                 limit=limit + 1,
@@ -678,6 +686,27 @@ def _handle_list(args: dict, **kw) -> str:
                     if truncated and limit < KANBAN_LIST_MAX_LIMIT else None
                 ),
                 "promoted": promoted,
+                "scope": (
+                    "active_plus_archived"
+                    if status is None and include_archived
+                    else "active_only"
+                    if status is None
+                    else "explicit_status"
+                ),
+                "terminal_history_note": (
+                    (
+                        "Default listing excludes done tasks; archived tasks are "
+                        "included only because include_archived=true. Pass an "
+                        "explicit status filter when the user asks to inspect "
+                        "history; a new request requires a new kanban task or swarm."
+                        if include_archived
+                        else
+                        "Default listing excludes done/archived tasks. Pass an "
+                        "explicit status filter only when the user asks to inspect "
+                        "history; a new request requires a new kanban task or swarm."
+                    )
+                    if status is None else None
+                ),
             })
         finally:
             conn.close()
@@ -965,6 +994,15 @@ def _handle_block(args: dict, **kw) -> str:
         # and `transient` (or an unset kind) route back through
         # kanban_complete, which the judge now gates.
         task = kb.get_task(conn, tid)
+        if task is not None and task.status in {"done", "archived"}:
+            conn.close()
+            return tool_error(
+                f"cannot block {tid}: task is terminal (status={task.status}). "
+                "Do not treat this as completion of the current user request. "
+                "If the user issued a new request, create a NEW Kanban task or "
+                "call kanban_swarm now; only inspect or resume this terminal "
+                "task when the user explicitly asks for its history."
+            )
         if (
             task
             and task.goal_mode
@@ -2069,14 +2107,17 @@ KANBAN_SHOW_SCHEMA = {
 KANBAN_LIST_SCHEMA = {
     "name": "kanban_list",
     "description": (
-        "List Kanban task summaries so an orchestrator profile can discover "
-        "work to route. Supports the same core filters as the CLI: assignee, "
+        "List active Kanban task summaries so an orchestrator profile can "
+        "discover work to route. By default, done/archived history is excluded "
+        "so a new user request cannot be mistaken for an already-completed task. "
+        "Supports the same core filters as the CLI: assignee, "
         "status, tenant, include_archived, and limit. Returns compact rows "
         "with ids, title, status, assignee, priority, parent/child ids, and "
         "counts. Bounded to 50 rows by default, 200 max, with truncation "
         "metadata. Also recomputes ready tasks before listing, matching the "
-        "CLI. Orchestrator-only — dispatcher-spawned task workers never see "
-        "this tool."
+        "CLI. Pass an explicit status filter only when the user asks to inspect "
+        "history; a new request requires a new task or swarm. Orchestrator-only "
+        "— dispatcher-spawned task workers never see this tool."
     ),
     "parameters": {
         "type": "object",
@@ -2091,7 +2132,10 @@ KANBAN_LIST_SCHEMA = {
                     "triage", "todo", "ready", "running",
                     "blocked", "done", "archived",
                 ],
-                "description": "Optional task status filter.",
+                "description": (
+                    "Optional task status filter. Omit for active tasks only; "
+                    "use done/archived explicitly for historical inspection."
+                ),
             },
             "tenant": {
                 "type": "string",

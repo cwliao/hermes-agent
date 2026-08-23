@@ -3776,6 +3776,7 @@ def list_tasks(
     *,
     assignee: Optional[str] = None,
     status: Optional[str] = None,
+    exclude_statuses: Optional[Iterable[str]] = None,
     tenant: Optional[str] = None,
     session_id: Optional[str] = None,
     include_archived: bool = False,
@@ -3794,6 +3795,17 @@ def list_tasks(
             raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
         query += " AND status = ?"
         params.append(status)
+    if exclude_statuses:
+        excluded = tuple(dict.fromkeys(str(value) for value in exclude_statuses))
+        invalid = sorted(set(excluded) - VALID_STATUSES)
+        if invalid:
+            raise ValueError(
+                f"exclude_statuses must contain only valid statuses: {invalid}"
+            )
+        if status is None:
+            placeholders = ",".join("?" * len(excluded))
+            query += f" AND status NOT IN ({placeholders})"
+            params.extend(excluded)
     if tenant is not None:
         query += " AND tenant = ?"
         params.append(tenant)

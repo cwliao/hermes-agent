@@ -1218,8 +1218,17 @@ def _is_failed_reference(text: str) -> bool:
     ``[skipped: …]`` recursion-guard notes — neither is real advice, so
     neither belongs in the aggregator prompt.
     """
+    if not isinstance(text, str) or not text.strip():
+        # A provider call that returns no usable text is not advice.  Treat it
+        # like a failed reference for quorum purposes instead of allowing an
+        # empty response to count as a healthy advisor.
+        return True
     sentinel = text.lstrip().lower()
-    return sentinel.startswith("[failed:") or sentinel.startswith("[skipped:")
+    return (
+        sentinel.startswith("[failed:")
+        or sentinel.startswith("[skipped:")
+        or sentinel == "(empty response)"
+    )
 
 
 def _successful_references(
@@ -1235,10 +1244,71 @@ def _failed_reference_labels(
     return [label for label, text, _accounting in reference_outputs if _is_failed_reference(text)]
 
 
-def _degraded_notice(failed_labels: list[str], policy: str) -> str:
-    if not failed_labels or policy.strip().lower() == "silent":
+def _minimum_reference_successes(reference_count: int) -> int:
+    """Return the default degraded quorum for N enabled references.
+
+    MoA has a separate acting aggregator, so references are advisory votes,
+    not a requirement that every configured slot answer.  The default rule is
+    one fewer than the configured reference count, with one reference still
+    required when a preset has only one slot:
+
+    * 4 references -> 3 usable references;
+    * 3 references -> 2 usable references;
+    * 2 references -> 1 usable reference;
+    * 1 reference  -> 1 usable reference.
+
+    A zero-reference preset is the normal aggregator-alone mode and therefore
+    has a zero threshold.
+    """
+    try:
+        count = max(0, int(reference_count))
+    except (TypeError, ValueError):
+        count = 0
+    return 0 if count == 0 else max(1, count - 1)
+
+
+def _reference_quorum_notice(
+    successful_count: int,
+    reference_count: int,
+    required_count: int,
+    policy: str,
+) -> str:
+    if (
+        successful_count >= required_count
+        or reference_count <= 0
+        or policy.strip().lower() == "silent"
+    ):
         return ""
-    return f"[Reference models unavailable: {', '.join(failed_labels)}]"
+    return (
+        f"[Reference quorum not met: {successful_count}/{reference_count} usable; "
+        f"need {required_count}. Aggregator will act without reference guidance.]"
+    )
+
+
+def _degraded_notice(
+    failed_labels: list[str],
+    policy: str,
+    *,
+    successful_count: int | None = None,
+    reference_count: int | None = None,
+    required_count: int | None = None,
+) -> str:
+    if policy.strip().lower() == "silent":
+        return ""
+    notices: list[str] = []
+    if failed_labels:
+        notices.append(f"[Reference models unavailable: {', '.join(failed_labels)}]")
+    if (
+        successful_count is not None
+        and reference_count is not None
+        and required_count is not None
+    ):
+        quorum = _reference_quorum_notice(
+            successful_count, reference_count, required_count, policy
+        )
+        if quorum:
+            notices.append(quorum)
+    return "\n\n".join(notices)
 
 
 def aggregate_moa_context(
@@ -1288,7 +1358,11 @@ def aggregate_moa_context(
         agent=agent,
     )
 
-    successful_outputs = _successful_references(reference_outputs)
+    all_successful_outputs = _successful_references(reference_outputs)
+    reference_count = len(reference_models)
+    required_successes = _minimum_reference_successes(reference_count)
+    quorum_met = len(all_successful_outputs) >= required_successes
+    successful_outputs = all_successful_outputs if quorum_met else []
     failed_labels = _failed_reference_labels(reference_outputs)
 
     # 'full' privacy mode (moa.privacy_filter) also covers this one-shot /moa
@@ -1309,7 +1383,21 @@ def aggregate_moa_context(
         f"Reference {idx} — {label}:\n{text}"
         for idx, (label, text, _accounting) in enumerate(successful_outputs, start=1)
     )
-    degraded = _degraded_notice(failed_labels, degraded_reference_policy)
+    degraded = _degraded_notice(
+        failed_labels,
+        degraded_reference_policy,
+        successful_count=len(all_successful_outputs),
+        reference_count=reference_count,
+        required_count=required_successes,
+    )
+    if not quorum_met and reference_count:
+        logger.warning(
+            "MoA: reference quorum not met (%d/%d usable, need %d) — "
+            "synthesizing without reference guidance",
+            len(all_successful_outputs),
+            reference_count,
+            required_successes,
+        )
     if degraded:
         joined = f"{joined}\n\n{degraded}" if joined else degraded
 
@@ -1319,7 +1407,7 @@ def aggregate_moa_context(
     # a non-retryable error that leaves the session hanging. The early return
     # carries only the sanitized unavailability notice (never raw provider
     # error text) so the main agent loop can still act in single-model mode.
-    if reference_outputs and not successful_outputs:
+    if reference_outputs and not all_successful_outputs:
         logger.warning(
             "MoA: all %d reference(s) failed — skipping aggregator synthesis",
             len(reference_outputs),
@@ -2252,7 +2340,11 @@ class MoAChatCompletions:
 
         guidance: str | None = None
         agg_messages = [dict(m) for m in messages]
-        successful_outputs = _successful_references(reference_outputs)
+        all_successful_outputs = _successful_references(reference_outputs)
+        reference_count = len(reference_models)
+        required_successes = _minimum_reference_successes(reference_count)
+        quorum_met = len(all_successful_outputs) >= required_successes
+        successful_outputs = all_successful_outputs if quorum_met else []
         failed_labels = _failed_reference_labels(reference_outputs)
         joined = ""
         _agg_refs: list = []
@@ -2273,8 +2365,14 @@ class MoAChatCompletions:
                 f"Reference {idx} — {label}:\n{text}"
                 for idx, (label, text, _usage) in enumerate(_agg_refs, start=1)
             )
-        degraded = _degraded_notice(failed_labels, degraded_reference_policy)
-        if reference_outputs and not successful_outputs:
+        degraded = _degraded_notice(
+            failed_labels,
+            degraded_reference_policy,
+            successful_count=len(all_successful_outputs),
+            reference_count=reference_count,
+            required_count=required_successes,
+        )
+        if reference_outputs and not all_successful_outputs:
             # Every reference failed or was skipped: don't wrap a wall of
             # failure sentinels in "use the reference responses below"
             # guidance — the aggregator IS the acting model, so it simply
@@ -2293,6 +2391,27 @@ class MoAChatCompletions:
                     f"Aggregator/acting model: {_slot_label(aggregator)}\n\n"
                     "All reference models failed this turn — no advisory "
                     "guidance is available. Act on your own judgment.\n\n"
+                    f"{degraded}"
+                )
+                _attach_reference_guidance(agg_messages, guidance)
+        elif not quorum_met:
+            # Some advisors answered, but fewer than the configured degraded
+            # quorum did.  Do not feed minority advice to the acting model;
+            # attach only the sanitized status notice and let it work alone.
+            logger.warning(
+                "MoA: reference quorum not met (%d/%d usable, need %d) — "
+                "acting aggregator without reference guidance",
+                len(all_successful_outputs),
+                reference_count,
+                required_successes,
+            )
+            if degraded:
+                guidance = (
+                    "[Mixture of Agents reference context]\n"
+                    f"Preset: {self.preset_name}\n"
+                    f"Aggregator/acting model: {_slot_label(aggregator)}\n\n"
+                    "Reference quorum was not met this turn. Act on your own "
+                    "judgment without using minority reference advice.\n\n"
                     f"{degraded}"
                 )
                 _attach_reference_guidance(agg_messages, guidance)

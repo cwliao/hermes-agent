@@ -80,7 +80,7 @@ def test_candidate_requires_explicit_action_signal_and_exact_answer():
         idempotent_tools=IDEMPOTENT_TOOL_NAMES,
         mutating_tools=MUTATING_TOOL_NAMES,
     ) is None
-    assert find_candidate(
+    inferred = find_candidate(
         messages,
         4,
         "fresh timestamp: 08:03:29",
@@ -88,7 +88,9 @@ def test_candidate_requires_explicit_action_signal_and_exact_answer():
         _evidence(_agent(explicit=False)),
         idempotent_tools=IDEMPOTENT_TOOL_NAMES,
         mutating_tools=MUTATING_TOOL_NAMES,
-    ) is None
+    )
+    assert inferred is not None
+    assert inferred.recovery_safe
 
 
 def test_candidate_fails_closed_for_incomplete_telemetry_or_mutation():
@@ -101,12 +103,79 @@ def test_candidate_fails_closed_for_incomplete_telemetry_or_mutation():
         mutating_tools=MUTATING_TOOL_NAMES,
     ) is None
     messages[1]["tool_calls"][0]["function"]["name"] = "terminal"
-    assert find_candidate(
+    unsafe = find_candidate(
         messages, 4, "fresh timestamp: 08:03:29", agent,
         _evidence(agent),
         idempotent_tools=IDEMPOTENT_TOOL_NAMES,
         mutating_tools=MUTATING_TOOL_NAMES,
-    ) is None
+    )
+    assert unsafe is not None
+    assert not unsafe.recovery_safe
+    assert "terminal" in unsafe.unsafe_reason
+
+
+def test_candidate_finds_tool_backed_answer_across_compression_duplicates():
+    agent = _agent(explicit=False)
+    answer = "Webboard report: timestamp 08:03:29"
+    messages = [
+        {"role": "user", "content": "Webboard"},
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "webboard-call",
+                "function": {
+                    "name": "terminal",
+                    "arguments": '{"command":"bash ~/.hermes/scripts/hermes_webboard_report.sh"}',
+                },
+            }],
+        },
+        {"role": "tool", "tool_call_id": "webboard-call", "content": "timestamp: 08:03:29"},
+        {"role": "assistant", "content": answer},
+        {"role": "session_meta", "content": "compression metadata"},
+        {"role": "user", "content": "Webboard"},
+        {"role": "assistant", "content": answer},
+        {"role": "user", "content": "Webboard"},
+    ]
+    candidate = find_candidate(
+        messages,
+        7,
+        answer,
+        agent,
+        _evidence(agent),
+        idempotent_tools=IDEMPOTENT_TOOL_NAMES,
+        mutating_tools=MUTATING_TOOL_NAMES,
+    )
+    assert candidate is not None
+    assert candidate.previous_tool_names == ("terminal",)
+    assert candidate.recovery_safe
+
+
+def test_candidate_blocks_missing_tool_receipt():
+    agent = _agent(explicit=False)
+    messages = [
+        {"role": "user", "content": "check the board"},
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call-without-result",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }],
+        },
+        {"role": "assistant", "content": "board: unchanged"},
+        {"role": "user", "content": "check the board"},
+    ]
+    candidate = find_candidate(
+        messages,
+        3,
+        "board: unchanged",
+        agent,
+        _evidence(agent),
+        idempotent_tools=IDEMPOTENT_TOOL_NAMES,
+        mutating_tools=MUTATING_TOOL_NAMES,
+    )
+    assert candidate is not None
+    assert not candidate.recovery_safe
+    assert "missing_receipt:read_file" in candidate.unsafe_reason
 
 
 def test_ledger_is_atomic_and_never_reopens_a_claim(tmp_path):

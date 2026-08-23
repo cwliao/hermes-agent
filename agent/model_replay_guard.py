@@ -150,6 +150,8 @@ class ReplayCandidate:
     current_answer: str
     previous_tool_names: tuple[str, ...]
     branch_id: str
+    recovery_safe: bool = True
+    unsafe_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -178,7 +180,18 @@ def find_candidate(
     idempotent_tools: frozenset[str],
     mutating_tools: frozenset[str],
 ) -> Optional[ReplayCandidate]:
-    """Find only an adjacent same-session/branch exact replay candidate."""
+    """Find an exact replay candidate, including compressed transcript tails.
+
+    Compression can preserve the original tool-backed answer while inserting
+    summary/session metadata rows and duplicate user/assistant projections
+    between that answer and the current user message.  Looking only at the
+    immediately preceding user turn therefore misses a real replay.  We still
+    require an exact answer and an action-equivalent user message, but walk
+    backwards until we find the most recent matching answer with its own
+    tool-call evidence.  The coordinator decides whether an unsafe tool is
+    eligible for automatic recovery; returning it as a candidate lets runtime
+    logging make the blocked decision observable instead of silently passing.
+    """
     if (
         evidence.version != TOOL_EXECUTION_VERSION
         or evidence.closure_version != "closure_v1"
@@ -196,7 +209,26 @@ def find_candidate(
         return None
     metadata = _explicit_execution_metadata(agent)
     if metadata is None:
-        return None
+        # A configured execution-discipline flag is not the only structured
+        # signal available in production.  Telegram's drafter-active route
+        # uses ``auto`` for both flags, yet the transcript carries a concrete
+        # tool-capable surface.  Using that frozen surface plus the current
+        # request digest is deterministic and does not classify prose intent.
+        tool_surface = getattr(agent, "valid_tool_names", None)
+        if not isinstance(tool_surface, (set, frozenset, list, tuple)):
+            tool_surface = [
+                str(tool.get("function", {}).get("name") or tool.get("name") or "")
+                for tool in (getattr(agent, "tools", None) or [])
+                if isinstance(tool, Mapping)
+            ]
+        tool_surface = sorted(name for name in (str(v) for v in tool_surface) if name)
+        if not tool_surface:
+            return None
+        metadata = {
+            "platform": str(getattr(agent, "platform", "") or ""),
+            "model": str(getattr(agent, "model", "") or ""),
+            "model_tool_surface": tool_surface,
+        }
     current_identity = current_user.get("_action_identity")
     if isinstance(current_identity, Mapping):
         current_digest = action_identity_digest(current_identity)
@@ -209,55 +241,196 @@ def find_candidate(
     if not current_digest:
         return None
 
-    previous_user_idx = None
-    for idx in range(current_user_idx - 1, -1, -1):
-        message = messages[idx]
-        if isinstance(message, Mapping) and message.get("role") == "user" and not _is_synthetic(message):
-            previous_user_idx = idx
-            break
-    if previous_user_idx is None:
-        return None
-    previous_user = messages[previous_user_idx]
-    previous_identity = previous_user.get("_action_identity")
-    if isinstance(previous_identity, Mapping):
-        previous_digest = action_identity_digest(previous_identity)
-    else:
-        previous_digest = action_identity_digest(
-            {**metadata, "request_digest": hashlib.sha256(
-                normalize_replay_text(previous_user.get("content")).encode("utf-8")
-            ).hexdigest()}
-        )
-    if not previous_digest or previous_digest != current_digest:
+    current_normalized = normalize_replay_text(current_answer)
+    if not current_normalized:
         return None
 
-    previous_tool_names: list[str] = []
-    previous_answer = None
-    for message in messages[previous_user_idx + 1 : current_user_idx]:
-        if not isinstance(message, Mapping) or _is_synthetic(message):
+    def _identity_for_user(message: Mapping[str, Any]) -> Optional[str]:
+        supplied_identity = message.get("_action_identity")
+        if isinstance(supplied_identity, Mapping):
+            return action_identity_digest(supplied_identity)
+        return action_identity_digest(
+            {**metadata, "request_digest": hashlib.sha256(
+                normalize_replay_text(message.get("content")).encode("utf-8")
+            ).hexdigest()}
+        )
+
+    def _terminal_command_is_read_only(call: Any) -> bool:
+        """Recognize only the fixed report command used by Webboard.
+
+        ``terminal`` is mutating in the general registry because arbitrary
+        shell commands can have side effects.  This exact command is a
+        repository-owned read-only report script; no shell parsing or broad
+        command heuristic is used here.
+        """
+        if not isinstance(call, Mapping):
+            return False
+        function = call.get("function") or {}
+        if str(function.get("name") or call.get("name") or "") != "terminal":
+            return False
+        arguments = function.get("arguments") or call.get("arguments") or {}
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (TypeError, ValueError):
+                return False
+        if not isinstance(arguments, Mapping):
+            return False
+        command = normalize_replay_text(arguments.get("command"))
+        return command in {
+            "bash ~/.hermes/scripts/hermes_webboard_report.sh",
+            "bash /home/cwliao/.hermes/scripts/hermes_webboard_report.sh",
+        }
+
+    def _tool_result_for_call(
+        span: Sequence[Mapping[str, Any]], call: Mapping[str, Any]
+    ) -> Optional[Mapping[str, Any]]:
+        call_id = str(call.get("id") or call.get("call_id") or "")
+        if not call_id:
+            return None
+        for item in span:
+            if (
+                isinstance(item, Mapping)
+                and item.get("role") == "tool"
+                and str(item.get("tool_call_id") or "") == call_id
+            ):
+                return item
+        return None
+
+    def _tool_result_failed(result: Mapping[str, Any]) -> bool:
+        content = result.get("content")
+        if isinstance(content, Mapping):
+            return content.get("success") is False or bool(content.get("error"))
+        if isinstance(content, str):
+            stripped = content.lstrip().lower()
+            if (
+                stripped.startswith("tool '")
+                or stripped.startswith("tool \"")
+                or stripped.startswith("[duplicate tool output")
+            ):
+                return True
+            try:
+                decoded = json.loads(content)
+            except (TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, Mapping):
+                return decoded.get("success") is False or bool(decoded.get("error"))
+        return False
+
+    def _collect_tool_evidence(
+        span: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[str], list[Any], list[str]]:
+        names: list[str] = []
+        calls_seen: list[Any] = []
+        missing_receipts: list[str] = []
+        for message in span:
+            if not isinstance(message, Mapping) or _is_synthetic(message):
+                continue
+            calls = message.get("tool_calls") or []
+            if not isinstance(calls, Sequence) or isinstance(calls, (str, bytes)):
+                continue
+            for call in calls:
+                if not isinstance(call, Mapping):
+                    continue
+                name = _tool_name(call)
+                if not name:
+                    continue
+                result = _tool_result_for_call(span, call)
+                if result is None:
+                    # A call without its terminal tool row is incomplete
+                    # telemetry. Keep it visible to the coordinator so the
+                    # candidate can be blocked, never treated as idempotent.
+                    calls_seen.append(call)
+                    names.append(name)
+                    missing_receipts.append(name)
+                    continue
+                # A failed/unknown tool proposal is not execution evidence.
+                # In particular, Webboard's old transcript contains a failed
+                # phantom ``webboard`` call followed by the real read-only
+                # terminal report.
+                if result is not None and _tool_result_failed(result):
+                    continue
+                calls_seen.append(call)
+                names.append(name)
+        return names, calls_seen, missing_receipts
+
+    # Walk backward over compressed/duplicated projections.  A candidate is
+    # valid only when its own matching user turn has a preceding assistant
+    # tool-call receipt and the answer is exact; intervening repeated answers
+    # without a tool receipt are intentionally skipped.
+    for answer_idx in range(current_user_idx - 1, -1, -1):
+        answer_message = messages[answer_idx]
+        if not isinstance(answer_message, Mapping) or _is_synthetic(answer_message):
             continue
-        previous_tool_names.extend(_message_tool_names(message))
-        if message.get("role") == "assistant" and not _message_tool_names(message):
-            content = normalize_replay_text(message.get("content"))
-            if content:
-                previous_answer = content
-    current_normalized = normalize_replay_text(current_answer)
-    if not previous_answer or not current_normalized or previous_answer != current_normalized:
-        return None
-    if not previous_tool_names:
-        return None
-    if any(name in mutating_tools or name not in idempotent_tools for name in previous_tool_names):
-        return None
-    branch_id = str(getattr(agent, "_replay_branch_id", "") or getattr(agent, "session_id", "") or "")
-    if not branch_id:
-        return None
-    return ReplayCandidate(
-        logical_turn_key=evidence.logical_turn_key,
-        action_identity=current_digest,
-        previous_answer=previous_answer,
-        current_answer=current_normalized,
-        previous_tool_names=tuple(previous_tool_names),
-        branch_id=branch_id,
-    )
+        if answer_message.get("role") != "assistant" or _message_tool_names(answer_message):
+            continue
+        previous_answer = normalize_replay_text(answer_message.get("content"))
+        if not previous_answer or previous_answer != current_normalized:
+            continue
+
+        previous_user_idx = None
+        previous_tool_names: list[str] = []
+        previous_tool_calls: list[Any] = []
+        previous_missing_receipts: list[str] = []
+        # Prefer the nearest matching user that has a receipt.  If compression
+        # inserted duplicate user/assistant projections, continue through the
+        # same action's older users until the original tool-backed segment is
+        # found; do not let a no-tool duplicate hide it.
+        for idx in range(answer_idx - 1, -1, -1):
+            message = messages[idx]
+            if not (
+                isinstance(message, Mapping)
+                and message.get("role") == "user"
+                and not _is_synthetic(message)
+            ):
+                continue
+            previous_digest = _identity_for_user(message)
+            if not previous_digest or previous_digest != current_digest:
+                continue
+            names, calls, missing = _collect_tool_evidence(
+                messages[idx + 1 : answer_idx]
+            )
+            if names:
+                previous_user_idx = idx
+                previous_tool_names = names
+                previous_tool_calls = calls
+                previous_missing_receipts = missing
+                break
+        if not previous_tool_names:
+            continue
+
+        unsafe_names = [
+            name for name in previous_tool_names
+            if name not in idempotent_tools and not (
+                name == "terminal"
+                and any(_terminal_command_is_read_only(call) for call in previous_tool_calls)
+            )
+        ]
+        if previous_missing_receipts:
+            unsafe_names.extend(
+                "missing_receipt:" + name for name in previous_missing_receipts
+            )
+        branch_id = str(
+            getattr(agent, "_replay_branch_id", "")
+            or getattr(agent, "session_id", "")
+            or ""
+        )
+        if not branch_id:
+            continue
+        return ReplayCandidate(
+            logical_turn_key=evidence.logical_turn_key,
+            action_identity=current_digest,
+            previous_answer=previous_answer,
+            current_answer=current_normalized,
+            previous_tool_names=tuple(previous_tool_names),
+            branch_id=branch_id,
+            recovery_safe=not unsafe_names,
+            unsafe_reason=(
+                "unsafe_or_unknown_tools:" + ",".join(sorted(set(unsafe_names)))
+                if unsafe_names else ""
+            ),
+        )
+    return None
 
 
 __all__ = [

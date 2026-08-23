@@ -186,7 +186,15 @@ class SessionManager:
         new_id = str(uuid.uuid4())
         agent = self._make_agent(session_id=new_id, cwd=cwd, model=original.model or None)
         model = getattr(agent, "model", original.model) or original.model
-        state = self._install_state(new_id, agent, cwd, model, copy.deepcopy(original.history))
+        child_history = copy.deepcopy(original.history)
+        # A fork is a new transcript: parent row identities must not be
+        # replayed into the child, or the next flush can be mistaken for a
+        # durable rewrite of the parent rows.
+        for message in child_history:
+            if isinstance(message, dict):
+                message.pop("_row_id", None)
+                message.pop("_db_persisted", None)
+        state = self._install_state(new_id, agent, cwd, model, child_history)
         logger.info("Forked ACP session %s -> %s", session_id, new_id)
         return state
 
@@ -344,7 +352,11 @@ class SessionManager:
         # repair_alternation: this list becomes the resumed agent's LIVE conversation; a durable
         # ``user;user`` violation in state.db would otherwise re-fire the pre-request repair every request.
         try:
-            history = db.get_messages_as_conversation(session_id, repair_alternation=True)
+            history = db.get_messages_as_conversation(
+                session_id,
+                repair_alternation=True,
+                include_row_ids=True,
+            )
         except Exception:
             logger.warning("Failed to load messages for ACP session %s", session_id, exc_info=True)
             history = []

@@ -8,6 +8,8 @@ Verifies that:
 """
 
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -113,6 +115,194 @@ class TestFlushDeduplication:
             finally:
                 db.close()
 
+    def test_cold_copied_sqlite_history_is_not_appended_again(self):
+        """Durable row ids survive history copies without duplicates."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.append_messages_batch(
+                    session_id=agent.session_id,
+                    messages=[
+                        {"role": "user", "content": "old question"},
+                        {"role": "assistant", "content": "old answer"},
+                    ],
+                )
+                loaded = db.get_messages_as_conversation(
+                    agent.session_id, include_row_ids=True
+                )
+                copied_history = [{**message} for message in loaded]
+                copied_messages = copied_history + [
+                    {"role": "user", "content": "new question"},
+                    {"role": "assistant", "content": "new answer"},
+                ]
+
+                # Model a cold/resume path: object identity and in-memory
+                # markers are unavailable, but durable ids remain.
+                agent._db_flush_scan_prefix = None
+                agent._last_flushed_db_idx = 0
+                agent._flush_messages_to_session_db(copied_messages, [])
+
+                rows = db.get_messages(agent.session_id)
+                assert [row["content"] for row in rows] == [
+                    "old question", "old answer", "new question", "new answer"
+                ]
+            finally:
+                db.close()
+
+    def test_ten_cold_resume_turns_keep_one_active_row_per_nonce(self, tmp_path):
+        """Ten process-boundary turns never replay a prior nonce.
+
+        Each child models one quiet CLI invocation: it creates a fresh
+        ``AIAgent``, restores the transcript with durable row ids, copies that
+        history into the turn list, and flushes one unique user/assistant pair.
+        The final active transcript is the machine-checkable invariant from
+        the synthetic replay probe: ten unique user rows and ten matching
+        assistant rows, with no duplicate historical rows.
+        """
+        from hermes_state import SessionDB
+
+        repo_root = Path(__file__).resolve().parents[2]
+        hermes_home = tmp_path / "hermes-home"
+        hermes_home.mkdir()
+        db_path = hermes_home / "state.db"
+        session_id = "ten-cold-resume-turns"
+
+        db = SessionDB(db_path=db_path)
+        db.create_session(session_id=session_id, source="cli")
+        db.close()
+
+        child_script = r"""
+import os
+from pathlib import Path
+
+from hermes_state import SessionDB
+from run_agent import AIAgent
+
+home = Path(os.environ["HERMES_HOME"])
+session_id = os.environ["HERMES_SESSION_ID"]
+turn = int(os.environ["HERMES_TURN"])
+nonce = f"SYNTH-{turn}-8f3c"
+db = SessionDB(home / "state.db")
+try:
+    agent = AIAgent(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="test/model",
+        quiet_mode=True,
+        session_db=db,
+        session_id=session_id,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    agent._ensure_db_session()
+    restored = db.get_messages_as_conversation(
+        session_id,
+        repair_alternation=True,
+        include_row_ids=True,
+    )
+    copied_history = [{**message} for message in restored]
+    messages = copied_history + [
+        {
+            "role": "user",
+            "content": (
+                f"Synthetic replay probe only. This is turn {turn} of 10, "
+                f"nonce {nonce}. Do not reuse prior results."
+            ),
+        },
+        {"role": "assistant", "content": f"PROBE_ACK {turn} {nonce}"},
+    ]
+    assert agent._flush_messages_to_session_db(messages, restored)
+finally:
+    db.close()
+"""
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "HERMES_HOME": str(hermes_home),
+                "HERMES_SESSION_ID": session_id,
+                "PYTHONPATH": os.pathsep.join(
+                    part
+                    for part in (str(repo_root), env.get("PYTHONPATH", ""))
+                    if part
+                ),
+                "OPENROUTER_API_KEY": "test-key",
+            }
+        )
+        for turn in range(1, 11):
+            turn_env = dict(env, HERMES_TURN=str(turn))
+            result = subprocess.run(
+                [sys.executable, "-c", child_script],
+                cwd=repo_root,
+                env=turn_env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            assert result.returncode == 0, result.stderr or result.stdout
+            assert result.stdout == ""
+            assert result.stderr == ""
+
+        db = SessionDB(db_path=db_path)
+        try:
+            rows = db.get_messages_as_conversation(
+                session_id,
+                include_row_ids=True,
+            )
+        finally:
+            db.close()
+
+        assert len(rows) == 20
+        assert [row["role"] for row in rows] == [
+            role for _turn in range(1, 11) for role in ("user", "assistant")
+        ]
+        assert [
+            row["content"] for row in rows if row["role"] == "user"
+        ] == [
+            (
+                f"Synthetic replay probe only. This is turn {turn} of 10, "
+                f"nonce SYNTH-{turn}-8f3c. Do not reuse prior results."
+            )
+            for turn in range(1, 11)
+        ]
+        assert [
+            row["content"] for row in rows if row["role"] == "assistant"
+        ] == [
+            f"PROBE_ACK {turn} SYNTH-{turn}-8f3c" for turn in range(1, 11)
+        ]
+        row_ids = [row["_row_id"] for row in rows]
+        assert len(set(row_ids)) == 20
+
+    def test_rewrite_clears_row_id_and_remains_durable(self):
+        """An explicit rewrite path can append the replacement row."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            try:
+                agent = self._make_agent(db)
+                db.append_messages_batch(
+                    session_id=agent.session_id,
+                    messages=[{"role": "assistant", "content": "empty"}],
+                )
+                loaded = db.get_messages_as_conversation(
+                    agent.session_id, include_row_ids=True
+                )
+                rewritten = dict(loaded[0])
+                rewritten["content"] = "filled final answer"
+                rewritten.pop("_row_id", None)
+                rewritten.pop("_db_persisted", None)
+
+                agent._flush_messages_to_session_db([rewritten], [])
+
+                rows = db.get_messages(agent.session_id)
+                assert rows[-1]["content"] == "filled final answer"
+            finally:
+                db.close()
+
 
 # ---------------------------------------------------------------------------
 # Test: append_to_transcript skip_db parameter
@@ -168,4 +358,3 @@ class TestFlushIdxInit:
                 skip_memory=True,
             )
         assert agent._last_flushed_db_idx == 0
-

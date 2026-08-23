@@ -99,6 +99,7 @@ from agent.model_replay_guard import (
     replay_tool_call_is_safe,
     tool_registry_digest,
 )
+from agent.kanban_execution_guard import try_finalization as _kanban_execution_guard_try_finalization
 from agent.trajectory import has_incomplete_scratchpad
 # Bind before the turn starts so a source-tree swap cannot load a skewed
 # finalizer at turn end.
@@ -2278,6 +2279,7 @@ def run_conversation(
     agent._model_replay_guard_phase = ""
     agent._model_replay_guard_claim = None
     agent._model_replay_guard_previous_answer = ""
+    agent._kanban_execution_guard_phase = ""
 
     # Commentary deduplication spans all provider continuations and tool calls
     # within one user turn, but must not suppress the same phrase next turn.
@@ -8561,6 +8563,23 @@ def run_conversation(
                     final_response = None
                     continue
 
+                # A fresh four-lane Kanban request is not allowed to end on
+                # model prose. Require a successful current-turn swarm
+                # receipt before accepting task IDs or lane results. This is
+                # deliberately separate from the stale-answer replay guard:
+                # no prior answer is needed for a fabricated execution plan.
+                _kanban_execution_outcome = _kanban_execution_guard_try_finalization(
+                    agent,
+                    messages,
+                    current_turn_user_idx,
+                    final_response,
+                    final_msg,
+                    append_message,
+                )
+                if _kanban_execution_outcome == "nudge":
+                    final_response = None
+                    continue
+
                 # Narrow stale-answer replay guard. It runs only after the
                 # response has passed normal empty/thinking/tool-call gates,
                 # and before the ordinary final transcript append. Synthetic
@@ -8597,6 +8616,7 @@ def run_conversation(
                         or messages[-1].get("_empty_terminal_sentinel")
                         or messages[-1].get("_dropped_toolcall_nudge")
                         or messages[-1].get("_model_replay_guard_synthetic")
+                        or messages[-1].get("_kanban_execution_guard_synthetic")
                     )
                 ):
                     messages.pop()

@@ -54,6 +54,7 @@ _VERIFICATION_CONTINUATION_FLAGS = (
     "_verification_stop_synthetic",
     "_pre_verify_synthetic",
     "_model_replay_guard_synthetic",
+    "_kanban_execution_guard_synthetic",
 )
 
 

@@ -103,7 +103,8 @@ def run_tool_round(
         _registry = __import__("agent.conversation_loop", fromlist=["tool_registry_digest"])
         _registry_digest = _registry.tool_registry_digest(_idempotent, _mutating)
         _receipt_valid = bool(_names) and all(_names) and all(
-            name in _idempotent and name not in _mutating for name in _names
+            _registry.replay_tool_call_is_safe(tc, _idempotent, _mutating)
+            for tc in assistant_message.tool_calls
         ) and all(_ids) and len(set(_ids)) == len(_ids)
         if _receipt_valid:
             _receipt_valid = bool(agent._session_db.record_model_replay_receipt(

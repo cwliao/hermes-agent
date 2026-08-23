@@ -1026,6 +1026,9 @@ def _handle_create(args: dict, **kw) -> str:
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
+        _assignee_name = str(assignee).strip()
+        if kb.assignee_availability(conn, _assignee_name) is None:
+            return tool_error(kb.assignee_unavailable_message(conn, _assignee_name))
         from gateway.session_context import get_session_env
         from tools.async_delegation import _current_origin_session_id
         self_tid = (os.environ.get("HERMES_KANBAN_TASK")
@@ -1281,6 +1284,14 @@ def _handle_swarm(args: dict, **kw) -> str:
             max_runtime_seconds=max_runtime,
         ))
 
+    # Preserve the swarm topology validation error before routing preflight:
+    # a mixed lane-bound/unbound graph is malformed independently of whether
+    # its default profile happens to be available.
+    if any(spec.lane_id for spec in specs) and any(not spec.lane_id for spec in specs):
+        return tool_error(
+            "kanban_swarm: lane-bound swarms require a lane_id for every worker"
+        )
+
     verifier_assignee = args.get("verifier_assignee") or default_profile
     synthesizer_assignee = args.get("synthesizer_assignee") or default_profile
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
@@ -1298,6 +1309,20 @@ def _handle_swarm(args: dict, **kw) -> str:
         )
 
     with _board(args.get("board")) as (kb, conn):
+        routing = [
+            (f"workers[{i}].profile", spec.profile)
+            for i, spec in enumerate(specs, start=1)
+        ]
+        routing.extend([
+            ("verifier_assignee", str(verifier_assignee)),
+            ("synthesizer_assignee", str(synthesizer_assignee)),
+        ])
+        for field_name, assignee_name in routing:
+            if kb.assignee_availability(conn, assignee_name) is None:
+                return tool_error(
+                    f"kanban_swarm: {field_name}={assignee_name!r} is unavailable. "
+                    f"{kb.assignee_unavailable_message(conn, assignee_name)}"
+                )
         origin = {}
         from gateway.session_context import resolve_notify_origin
         origin = resolve_notify_origin()

@@ -4,6 +4,12 @@ Plan key: `hermes-agent`
 Last verified: 2026-08-19 (Asia/Taipei), Claude continuation session
 Authoritative roadmap: `docs/ROADMAP-HERMES-DGX.md`
 
+> **Current-read notice (2026-08-23):** The historical sections below retain
+> earlier orchestration/deployment evidence. For the current replay-reliability
+> state, read [the five-round memory record](memory/2026-08-23-model-replay-five-rounds.md)
+> and the current addendum below first. Re-verify live PID, release, and
+> `origin/main` instead of treating any historical SHA as current.
+
 ## 1. Project identity and boundary
 
 Verified in this session unless marked carried forward.
@@ -500,3 +506,38 @@ separate gates and are not authorized. Before ending, update the repo
 handover only with facts verified in that session, and keep evidence
 metadata-only.
 ```
+
+## 2026-08-23 current addendum — replay reliability
+
+Read this section and
+[`docs/memory/2026-08-23-model-replay-five-rounds.md`](memory/2026-08-23-model-replay-five-rounds.md)
+before relying on the historical sections above. The historical four-lane
+status and old release identities are not current replay status.
+
+- `MODEL-REPLAY-RELIABILITY-001` is code-complete, deployed, and passed the
+  required real Telegram E2E. The fix is on `a780bd4772` (full SHA is recorded
+  in the memory document), not merely in unit tests.
+- The verified live release at the time of acceptance was
+  `v2026.8.23-model-replay-a780bd4772`, with matching release venv and an
+  active `hermes-gateway.service`. PID is evidence for that check only; always
+  re-read the effective unit and process before a new runtime claim.
+- The Telegram acceptance observed a fresh Webboard tool execution and a new
+  result timestamp; the final response did not contain the stale `08:03:29` or
+  `AGENTS.md` leak. The guard log contained `decision=invoked`.
+- `SESSION-TRANSCRIPT-REPLAY-001` remains correctly scoped: `_row_id` fixes
+  database duplicate rows; it does not prove that a model will never copy a
+  prior answer. That model limitation is tracked separately.
+- `hermes update --gateway --yes --backup` reporting source-current did not
+  itself switch the running release. Repo update, release creation, venv
+  creation, systemd switch, restart, and user-visible delivery are separate
+  gates.
+- The old deploy-backup set was removed only after the requested cleanup. The
+  current rollback zip was retained through E2E acceptance; do not remove a
+  rollback artifact merely because it is large or old-looking.
+
+The durable runbook is: verify repo and upstream boundaries; use upstream as
+download-only; compare content at file/patch level; build immutable release and
+matching venv; inspect effective systemd/process identity; run focused and
+integration tests; then perform real inbound → tool call → tool result → guard
+decision → fresh final → user-visible delivery validation. Keep reports
+metadata-only and record unavailable external reviewers honestly.

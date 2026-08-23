@@ -1,6 +1,6 @@
 # KANBAN-EXECUTION-EVIDENCE-FABRICATION-001
 
-Status: implementation in progress
+Status: deployed; Telegram acceptance pending
 
 ## Incident
 
@@ -65,8 +65,8 @@ scaffolding filters so it cannot become future evidence or context pollution.
 - [x] Successful four-lane `kanban_swarm` receipts are accepted.
 - [x] Literal `\\0` and actual NUL output are not delivered.
 - [x] Focused Kanban/replay tests pass.
-- [ ] Commit and push to `origin/main`.
-- [ ] Deploy an immutable release and verify the release SHA/systemd drop-in.
+- [x] Commit and push to `origin/main` (`6684cf86ec`).
+- [x] Deploy an immutable release and verify the release SHA/systemd drop-in.
 - [ ] Repeat the exact prompt in Telegram.
 - [ ] Verify `kanban list` contains the newly created root, four worker tasks,
   verifier, and synthesizer; verify the four worker runs have real run/event

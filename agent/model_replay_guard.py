@@ -22,6 +22,11 @@ NORMALIZATION_VERSION = "normalization_v1"
 ACTION_IDENTITY_VERSION = "action_identity_v1"
 TOOL_EXECUTION_VERSION = "tool_execution_v1"
 REGISTRY_VERSION = "hermes-tool-registry-v1"
+# These are exact, user-facing action names whose result must come from the
+# live report tool even when transcript compression left no clean baseline.
+# Keep this registry narrow and explicit; do not replace it with prose or
+# timestamp heuristics.
+FRESHNESS_REQUIRED_ACTIONS = frozenset({"webboard"})
 
 REPLAY_NUDGE = (
     "[Internal recovery: re-evaluate the current request from the live state. "
@@ -108,6 +113,44 @@ def _tool_name(call: Any) -> Optional[str]:
     return str(getattr(function, "name", None) or getattr(call, "name", None) or "") or None
 
 
+def is_read_only_webboard_report_call(call: Any) -> bool:
+    """Recognize only the repository-owned, read-only Webboard report call."""
+    if isinstance(call, Mapping):
+        function = call.get("function") or {}
+        name = str(function.get("name") or call.get("name") or "")
+        arguments = function.get("arguments") or call.get("arguments") or {}
+    else:
+        function = getattr(call, "function", None)
+        name = str(getattr(function, "name", None) or getattr(call, "name", None) or "")
+        arguments = getattr(function, "arguments", None) or getattr(call, "arguments", None) or {}
+    if name != "terminal":
+        return False
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(arguments, Mapping):
+        return False
+    command = normalize_replay_text(arguments.get("command"))
+    return command in {
+        "bash ~/.hermes/scripts/hermes_webboard_report.sh",
+        "bash /home/cwliao/.hermes/scripts/hermes_webboard_report.sh",
+    }
+
+
+def replay_tool_call_is_safe(
+    call: Any, idempotent_tools: Sequence[str], mutating_tools: Sequence[str]
+) -> bool:
+    """Apply the same registry fence at both candidate and receipt time."""
+    name = _tool_name(call)
+    if not name:
+        return False
+    if name in idempotent_tools and name not in mutating_tools:
+        return True
+    return is_read_only_webboard_report_call(call)
+
+
 def _message_tool_names(message: Mapping[str, Any]) -> list[str]:
     calls = message.get("tool_calls") or []
     if not isinstance(calls, Sequence) or isinstance(calls, (str, bytes)):
@@ -142,6 +185,52 @@ def _explicit_execution_metadata(agent: Any) -> Optional[dict[str, Any]]:
     }
 
 
+def _resolved_action_metadata(agent: Any) -> Optional[dict[str, Any]]:
+    """Return deterministic action metadata for the current runtime surface."""
+    metadata = _explicit_execution_metadata(agent)
+    if metadata is not None:
+        return metadata
+    tool_surface = getattr(agent, "valid_tool_names", None)
+    if not isinstance(tool_surface, (set, frozenset, list, tuple)):
+        tool_surface = [
+            str(tool.get("function", {}).get("name") or tool.get("name") or "")
+            for tool in (getattr(agent, "tools", None) or [])
+            if isinstance(tool, Mapping)
+        ]
+    tool_surface = sorted(name for name in (str(v) for v in tool_surface) if name)
+    if not tool_surface:
+        return None
+    return {
+        "platform": str(getattr(agent, "platform", "") or ""),
+        "model": str(getattr(agent, "model", "") or ""),
+        "model_tool_surface": tool_surface,
+    }
+
+
+def _action_identity_for_user(
+    message: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> Optional[str]:
+    supplied_identity = message.get("_action_identity")
+    if isinstance(supplied_identity, Mapping):
+        return action_identity_digest(supplied_identity)
+    return action_identity_digest(
+        {
+            **metadata,
+            "request_digest": hashlib.sha256(
+                normalize_replay_text(message.get("content")).encode("utf-8")
+            ).hexdigest(),
+        }
+    )
+
+
+def _has_tool_surface(agent: Any, tool_name: str) -> bool:
+    metadata = _resolved_action_metadata(agent)
+    if not metadata:
+        return False
+    names = metadata.get("model_tool_surface") or ()
+    return tool_name in {str(name) for name in names}
+
+
 @dataclass(frozen=True)
 class ReplayCandidate:
     logical_turn_key: str
@@ -152,6 +241,7 @@ class ReplayCandidate:
     branch_id: str
     recovery_safe: bool = True
     unsafe_reason: str = ""
+    baseline_missing: bool = False
 
 
 @dataclass(frozen=True)
@@ -207,80 +297,16 @@ def find_candidate(
     current_user = messages[current_user_idx]
     if not isinstance(current_user, Mapping) or current_user.get("role") != "user" or _is_synthetic(current_user):
         return None
-    metadata = _explicit_execution_metadata(agent)
+    metadata = _resolved_action_metadata(agent)
     if metadata is None:
-        # A configured execution-discipline flag is not the only structured
-        # signal available in production.  Telegram's drafter-active route
-        # uses ``auto`` for both flags, yet the transcript carries a concrete
-        # tool-capable surface.  Using that frozen surface plus the current
-        # request digest is deterministic and does not classify prose intent.
-        tool_surface = getattr(agent, "valid_tool_names", None)
-        if not isinstance(tool_surface, (set, frozenset, list, tuple)):
-            tool_surface = [
-                str(tool.get("function", {}).get("name") or tool.get("name") or "")
-                for tool in (getattr(agent, "tools", None) or [])
-                if isinstance(tool, Mapping)
-            ]
-        tool_surface = sorted(name for name in (str(v) for v in tool_surface) if name)
-        if not tool_surface:
-            return None
-        metadata = {
-            "platform": str(getattr(agent, "platform", "") or ""),
-            "model": str(getattr(agent, "model", "") or ""),
-            "model_tool_surface": tool_surface,
-        }
-    current_identity = current_user.get("_action_identity")
-    if isinstance(current_identity, Mapping):
-        current_digest = action_identity_digest(current_identity)
-    else:
-        current_digest = action_identity_digest(
-            {**metadata, "request_digest": hashlib.sha256(
-                normalize_replay_text(current_user.get("content")).encode("utf-8")
-            ).hexdigest()}
-        )
+        return None
+    current_digest = _action_identity_for_user(current_user, metadata)
     if not current_digest:
         return None
 
     current_normalized = normalize_replay_text(current_answer)
     if not current_normalized:
         return None
-
-    def _identity_for_user(message: Mapping[str, Any]) -> Optional[str]:
-        supplied_identity = message.get("_action_identity")
-        if isinstance(supplied_identity, Mapping):
-            return action_identity_digest(supplied_identity)
-        return action_identity_digest(
-            {**metadata, "request_digest": hashlib.sha256(
-                normalize_replay_text(message.get("content")).encode("utf-8")
-            ).hexdigest()}
-        )
-
-    def _terminal_command_is_read_only(call: Any) -> bool:
-        """Recognize only the fixed report command used by Webboard.
-
-        ``terminal`` is mutating in the general registry because arbitrary
-        shell commands can have side effects.  This exact command is a
-        repository-owned read-only report script; no shell parsing or broad
-        command heuristic is used here.
-        """
-        if not isinstance(call, Mapping):
-            return False
-        function = call.get("function") or {}
-        if str(function.get("name") or call.get("name") or "") != "terminal":
-            return False
-        arguments = function.get("arguments") or call.get("arguments") or {}
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except (TypeError, ValueError):
-                return False
-        if not isinstance(arguments, Mapping):
-            return False
-        command = normalize_replay_text(arguments.get("command"))
-        return command in {
-            "bash ~/.hermes/scripts/hermes_webboard_report.sh",
-            "bash /home/cwliao/.hermes/scripts/hermes_webboard_report.sh",
-        }
 
     def _tool_result_for_call(
         span: Sequence[Mapping[str, Any]], call: Mapping[str, Any]
@@ -384,7 +410,7 @@ def find_candidate(
                 and not _is_synthetic(message)
             ):
                 continue
-            previous_digest = _identity_for_user(message)
+            previous_digest = _action_identity_for_user(message, metadata)
             if not previous_digest or previous_digest != current_digest:
                 continue
             names, calls, missing = _collect_tool_evidence(
@@ -401,9 +427,10 @@ def find_candidate(
 
         unsafe_names = [
             name for name in previous_tool_names
-            if name not in idempotent_tools and not (
-                name == "terminal"
-                and any(_terminal_command_is_read_only(call) for call in previous_tool_calls)
+            if not any(
+                replay_tool_call_is_safe(call, idempotent_tools, mutating_tools)
+                for call in previous_tool_calls
+                if _tool_name(call) == name
             )
         ]
         if previous_missing_receipts:
@@ -433,16 +460,88 @@ def find_candidate(
     return None
 
 
+def find_baseline_less_candidate(
+    messages: Sequence[Mapping[str, Any]],
+    current_user_idx: int,
+    current_answer: Any,
+    agent: Any,
+    evidence: ReplayEvidence,
+) -> Optional[ReplayCandidate]:
+    """Require a fresh result for an exact live action with no clean baseline.
+
+    This is intentionally narrower than replay detection.  It only covers the
+    Telegram ``Webboard`` action while a terminal tool surface is present.  A
+    missing baseline is not evidence that the answer is stale; it is a reason
+    to refuse silently accepting the answer and request one bounded fresh
+    execution instead.
+    """
+    if (
+        evidence.version != TOOL_EXECUTION_VERSION
+        or evidence.closure_version != "closure_v1"
+        or not evidence.complete
+        or not evidence.zero_calls_proven
+        or evidence.cutoff_sequence <= 0
+        or evidence.calls
+        or not evidence.session_id
+        or evidence.logical_turn_key != str(getattr(agent, "_current_turn_id", "") or "")
+        or not (0 <= current_user_idx < len(messages))
+    ):
+        return None
+    current_user = messages[current_user_idx]
+    if (
+        not isinstance(current_user, Mapping)
+        or current_user.get("role") != "user"
+        or _is_synthetic(current_user)
+        or normalize_replay_text(current_user.get("content")).casefold()
+        not in FRESHNESS_REQUIRED_ACTIONS
+    ):
+        return None
+    if str(getattr(agent, "platform", "") or "").casefold() != "telegram":
+        return None
+    if not _has_tool_surface(agent, "terminal"):
+        return None
+    current_normalized = normalize_replay_text(current_answer)
+    if not current_normalized:
+        return None
+    metadata = _resolved_action_metadata(agent)
+    if metadata is None:
+        return None
+    branch_id = str(
+        getattr(agent, "_replay_branch_id", "")
+        or getattr(agent, "session_id", "")
+        or ""
+    )
+    if not branch_id:
+        return None
+    current_digest = _action_identity_for_user(current_user, metadata)
+    if not current_digest:
+        return None
+    return ReplayCandidate(
+        logical_turn_key=evidence.logical_turn_key,
+        action_identity=current_digest,
+        previous_answer="",
+        current_answer=current_normalized,
+        previous_tool_names=(),
+        branch_id=branch_id,
+        recovery_safe=True,
+        baseline_missing=True,
+    )
+
+
 __all__ = [
     "ACTION_IDENTITY_VERSION",
     "NORMALIZATION_VERSION",
     "REGISTRY_VERSION",
+    "FRESHNESS_REQUIRED_ACTIONS",
     "REPLAY_NUDGE",
     "ReplayCandidate",
     "ReplayEvidence",
     "TOOL_EXECUTION_VERSION",
     "action_identity_digest",
     "find_candidate",
+    "find_baseline_less_candidate",
+    "is_read_only_webboard_report_call",
     "normalize_replay_text",
+    "replay_tool_call_is_safe",
     "tool_registry_digest",
 ]

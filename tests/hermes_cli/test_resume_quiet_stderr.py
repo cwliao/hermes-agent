@@ -99,6 +99,11 @@ class TestResumeQuietStderr:
         assert "↻ Resumed session" in captured.err
         assert "20260524_111111_xyz" in captured.err
         assert "demo" in captured.err
+        db.get_messages_as_conversation.assert_called_once_with(
+            "20260524_111111_xyz",
+            repair_alternation=True,
+            include_row_ids=True,
+        )
 
     def test_no_messages_goes_to_stderr_in_quiet_mode(self, capsys):
         db = MagicMock()

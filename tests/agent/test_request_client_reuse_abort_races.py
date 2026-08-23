@@ -31,6 +31,12 @@ Invariants pinned here:
    slot.
 """
 from contextlib import contextmanager
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from types import SimpleNamespace
@@ -191,6 +197,295 @@ def test_relay_managed_close_failure_poisons_request_client(tmp_path, monkeypatc
 
     assert stream.close_calls == 1
     assert abort_reasons == [(request_client, "interrupt_stream_close_failed")]
+
+
+def test_late_timed_out_worker_cannot_leak_into_next_request():
+    """A provider response arriving after timeout stays owned by turn A.
+
+    The stale watchdog returns control to the caller while the provider worker
+    is still unwinding. Start turn B before releasing A's delayed response and
+    verify that B receives only its own response. This is the narrow transport
+    invariant required before adding a full two-process session fixture.
+    """
+    from agent.chat_completion_helpers import interruptible_api_call
+
+    agent = _make_agent()
+    agent._compute_non_stream_stale_timeout = lambda _payload: 0.05
+
+    first_started = threading.Event()
+    first_release = threading.Event()
+    first_finished = threading.Event()
+    second_started = threading.Event()
+    second_release = threading.Event()
+    created = []
+
+    class _Completions:
+        def __init__(self, label):
+            self.label = label
+
+        def create(self, **_kwargs):
+            if self.label == "A":
+                first_started.set()
+                assert first_release.wait(timeout=5.0)
+                first_finished.set()
+            else:
+                second_started.set()
+                assert second_release.wait(timeout=5.0)
+            return SimpleNamespace(turn=self.label)
+
+    class _Client:
+        def __init__(self, label):
+            self.chat = SimpleNamespace(completions=_Completions(label))
+
+    def create_client(*_args, **_kwargs):
+        label = "A" if not created else "B"
+        client = _Client(label)
+        created.append(client)
+        return client
+
+    with patch.object(
+        agent, "_create_request_openai_client", side_effect=create_client
+    ), patch.object(agent, "_abort_request_openai_client"), patch.object(
+        agent, "_close_request_openai_client"
+    ):
+        timed_out = {}
+
+        def run_first():
+            try:
+                interruptible_api_call(
+                    agent,
+                    {"model": "test/model", "messages": [{"role": "user", "content": "A"}]},
+                )
+            except Exception as exc:  # expected stale timeout
+                timed_out["error"] = exc
+
+        first_thread = threading.Thread(target=run_first, daemon=True)
+        first_thread.start()
+        assert first_started.wait(timeout=2.0)
+        first_thread.join(timeout=3.0)
+        assert isinstance(timed_out.get("error"), TimeoutError)
+        assert first_thread.is_alive() is False
+
+        second_result = {}
+
+        def run_second():
+            second_result["response"] = interruptible_api_call(
+                agent,
+                {"model": "test/model", "messages": [{"role": "user", "content": "B"}]},
+            )
+
+        second_thread = threading.Thread(target=run_second, daemon=True)
+        second_thread.start()
+        assert second_started.wait(timeout=2.0)
+
+        # A returns late while B is still in flight. Neither worker shares its
+        # response slot, client holder, or persistence result with the other.
+        first_release.set()
+        assert first_finished.wait(timeout=2.0)
+        second_release.set()
+        second_thread.join(timeout=3.0)
+
+    assert second_thread.is_alive() is False
+    assert second_result["response"].turn == "B"
+
+
+def test_two_process_late_provider_is_fenced_from_next_session_turn(tmp_path):
+    """A late provider worker cannot append after process B owns the turn.
+
+    This is the full SessionDB acceptance shape: two independent Python
+    processes share a temporary HERMES_HOME. Process A times out and releases
+    its durable turn lease while its provider worker remains blocked. Process
+    B then completes the next turn. Only after B is done is A's worker
+    released; its old holder must be rejected by the SQLite write fence, and
+    neither B's response nor the durable transcript may contain A's late row.
+    """
+    from hermes_state import SessionDB
+
+    repo_root = Path(__file__).resolve().parents[2]
+    hermes_home = tmp_path / "hermes-home"
+    sync_dir = tmp_path / "sync"
+    hermes_home.mkdir()
+    sync_dir.mkdir()
+    session_id = "two-process-timeout-race"
+
+    db = SessionDB(hermes_home / "state.db")
+    db.create_session(session_id, source="test")
+    db.close()
+
+    common = os.environ.copy()
+    common["HERMES_HOME"] = str(hermes_home)
+    common["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(repo_root), common.get("PYTHONPATH", "")) if part
+    )
+
+    def _wait_flag(path: Path, timeout: float = 12.0) -> None:
+        deadline = time.monotonic() + timeout
+        while not path.exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for {path.name}")
+            time.sleep(0.02)
+
+    def _touch(name: str) -> None:
+        (sync_dir / name).touch()
+
+    worker_script = textwrap.dedent(
+        """
+        import json
+        import os
+        from pathlib import Path
+        import threading
+        import time
+
+        from hermes_state import SessionDB, SessionTurnLeaseLostError
+
+        home = Path(os.environ["HERMES_HOME"])
+        sync = Path(os.environ["RACE_SYNC_DIR"])
+        result_path = sync / "a-result.json"
+        db = SessionDB(home / "state.db")
+        sid = "two-process-timeout-race"
+        holder = f"pid={os.getpid()}:turn=A"
+
+        def wait_flag(name):
+            path = sync / name
+            deadline = time.monotonic() + 12
+            while not path.exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for {name}")
+                time.sleep(0.02)
+
+        assert db.acquire_session_turn_lease(sid, holder, ttl_seconds=20)
+        db.append_messages_batch(
+            sid,
+            [{"role": "user", "content": "A request"}],
+            turn_lease_holder=holder,
+            turn_lease_ttl_seconds=20,
+        )
+
+        late_result = {}
+
+        def late_provider_worker():
+            wait_flag("release-a-late-provider")
+            try:
+                db.append_messages_batch(
+                    sid,
+                    [{"role": "assistant", "content": "A late provider result"}],
+                    turn_lease_holder=holder,
+                    turn_lease_ttl_seconds=20,
+                )
+            except SessionTurnLeaseLostError:
+                late_result["status"] = "rejected"
+            else:
+                late_result["status"] = "accepted"
+
+        late_worker = threading.Thread(target=late_provider_worker, daemon=True)
+        late_worker.start()
+        (sync / "a-ready").touch()
+
+        # The caller timed out: it returns without a final assistant row and
+        # releases the durable lease while the provider worker is still alive.
+        wait_flag("timeout-a")
+        db.release_session_turn_lease(sid, holder)
+        (sync / "a-released").touch()
+
+        wait_flag("b-done")
+        (sync / "release-a-late-provider").touch()
+        late_worker.join(timeout=8)
+        result_path.write_text(json.dumps(late_result), encoding="utf-8")
+        db.close()
+        """
+    )
+
+    next_turn_script = textwrap.dedent(
+        """
+        import os
+        from pathlib import Path
+        import time
+
+        from hermes_state import SessionDB
+
+        home = Path(os.environ["HERMES_HOME"])
+        sync = Path(os.environ["RACE_SYNC_DIR"])
+        sid = "two-process-timeout-race"
+        holder = f"pid={os.getpid()}:turn=B"
+
+        def wait_flag(name):
+            path = sync / name
+            deadline = time.monotonic() + 12
+            while not path.exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for {name}")
+                time.sleep(0.02)
+
+        wait_flag("a-released")
+        db = SessionDB(home / "state.db")
+        assert db.acquire_session_turn_lease(sid, holder, ttl_seconds=20, wait_seconds=8)
+        db.append_messages_batch(
+            sid,
+            [
+                {"role": "user", "content": "B request"},
+                {"role": "assistant", "content": "B current response"},
+            ],
+            turn_lease_holder=holder,
+            turn_lease_ttl_seconds=20,
+        )
+        (sync / "b-response.txt").write_text("B current response", encoding="utf-8")
+        db.release_session_turn_lease(sid, holder)
+        (sync / "b-done").touch()
+        db.close()
+        """
+    )
+
+    env = dict(common)
+    env["RACE_SYNC_DIR"] = str(sync_dir)
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", worker_script],
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ),
+        subprocess.Popen(
+            [sys.executable, "-c", next_turn_script],
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ),
+    ]
+    try:
+        _wait_flag(sync_dir / "a-ready")
+        _touch("timeout-a")
+        _wait_flag(sync_dir / "b-done")
+        _wait_flag(sync_dir / "a-result.json")
+        outputs = [proc.communicate(timeout=5) for proc in processes]
+    finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=5)
+
+    for output, error in outputs:
+        assert error == "", error
+        assert output == "", output
+
+    assert json.loads((sync_dir / "a-result.json").read_text()) == {
+        "status": "rejected"
+    }
+    assert (sync_dir / "b-response.txt").read_text() == "B current response"
+
+    db = SessionDB(hermes_home / "state.db")
+    try:
+        rows = db.get_messages_as_conversation(session_id)
+    finally:
+        db.close()
+    assert [(row["role"], row["content"]) for row in rows] == [
+        ("user", "A request"),
+        ("user", "B request"),
+        ("assistant", "B current response"),
+    ]
 
 
 def test_stale_abort_is_atomic_with_holder_read(monkeypatch):

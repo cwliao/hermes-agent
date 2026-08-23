@@ -133,4 +133,9 @@ Current local validation after the final rollback correction:
 - The warnings are existing/dependency or test-double warnings; they are not
   failures from this change.
 
-No commit, push, production deployment, or gateway restart was performed.
+Implementation commit: `dc4179fdf9e7f8c45fd65f6d2f94af4d19efae28`, pushed to
+`origin/main`. Production deployment was completed through immutable release
+`v2026.8.23-session-transcript-replay-idempotency-dc4179fdf9`, with the
+matching pinned gateway venv and systemd drop-in 69. Post-deploy verification
+found `hermes-gateway.service` active/running with `NRestarts=0` and
+`HERMES_RELEASE_SHA` matching the commit.

@@ -698,6 +698,24 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def test_create_rejects_unknown_swarm_lane_as_profile(monkeypatch, worker_env):
+    """Lane IDs must not become silently undispatchable assignee values."""
+    from hermes_cli import profiles
+    monkeypatch.setattr(
+        profiles, "profile_exists", lambda name: name == "test-worker"
+    )
+    from tools import kanban_tools as kt
+
+    out = json.loads(kt._handle_create({
+        "title": "agy joke",
+        "assignee": "grok",
+        "parents": [worker_env],
+    }))
+    assert "error" in out
+    assert "lane_id" in out["error"]
+    assert "grok" in out["error"]
+
+
 def test_link_happy_path(worker_env):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
@@ -1666,6 +1684,27 @@ def test_swarm_rejects_unknown_lane_before_creating_any_card(monkeypatch, worker
     finally:
         conn.close()
     assert after == before, "an invalid lane must not leave a partial graph"
+
+
+def test_swarm_rejects_lane_named_nonexistent_profile(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_cli import profiles
+    monkeypatch.setattr(
+        profiles, "profile_exists", lambda name: name == "test-worker"
+    )
+    from tools import kanban_tools as kt
+
+    out = json.loads(kt._handle_swarm({
+        "goal": "x",
+        "workers": [{
+            "lane_id": "agy",
+            "profile": "grok",
+            "title": "agy joke",
+        }],
+    }))
+    assert "error" in out
+    assert "lane ID" in out["error"]
+    assert "grok" in out["error"]
 
 
 def test_swarm_rejects_skill_conflicting_with_lane(monkeypatch, worker_env):

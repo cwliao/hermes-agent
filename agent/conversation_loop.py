@@ -42,7 +42,9 @@ from agent.model_replay_guard import (
     ReplayEvidence,
     TOOL_EXECUTION_VERSION,
     find_candidate,
+    find_baseline_less_candidate,
     normalize_replay_text,
+    replay_tool_call_is_safe,
     tool_registry_digest,
 )
 from agent.turn_finalizer import finalize_turn

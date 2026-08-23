@@ -265,12 +265,23 @@ class SessionManager:
             cwd=cwd,
             model=original.model or None,
         )
+        # The source history may have durable row identities because it came
+        # from a live-replay restore. Those ids belong to the parent session,
+        # not the new child. Carrying them across the fork would make a later
+        # AIAgent flush treat the copied rows as already durable in the child;
+        # if the initial child persistence failed, the transcript would then
+        # disappear after restart. The child must create fresh rows.
+        fork_history = copy.deepcopy(original.history)
+        for message in fork_history:
+            if isinstance(message, dict):
+                message.pop("_row_id", None)
+                message.pop("_db_persisted", None)
         state = SessionState(
             session_id=new_id,
             agent=agent,
             cwd=cwd,
             model=getattr(agent, "model", original.model) or original.model,
-            history=copy.deepcopy(original.history),
+            history=fork_history,
             cancel_event=threading.Event(),
         )
         with self._lock:
@@ -553,7 +564,9 @@ class SessionManager:
         # for the rest of the session (see hermes_state.get_messages_as_conversation).
         try:
             history = db.get_messages_as_conversation(
-                session_id, repair_alternation=True
+                session_id,
+                repair_alternation=True,
+                include_row_ids=True,
             )
         except Exception:
             logger.warning("Failed to load messages for ACP session %s", session_id, exc_info=True)

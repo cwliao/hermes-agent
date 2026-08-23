@@ -137,6 +137,43 @@ class TestWslCwdTranslation:
         assert forked is not None
         assert forked.cwd == "/mnt/d/work/project"
 
+    def test_fork_drops_parent_row_identity(self, manager):
+        """A fork must create child rows, never reuse parent row ids."""
+        original = manager.create_session(cwd="/tmp/base")
+        original.history.extend([
+            {"role": "user", "content": "parent question"},
+            {"role": "assistant", "content": "parent answer"},
+        ])
+        manager.save_session(original.session_id)
+
+        # Force a cold restore so the source history carries SessionDB ids.
+        with manager._lock:
+            del manager._sessions[original.session_id]
+        restored = manager.get_session(original.session_id)
+        assert restored is not None
+        parent_row_ids = {
+            message["_row_id"]
+            for message in restored.history
+            if isinstance(message.get("_row_id"), int)
+        }
+        assert len(parent_row_ids) == len(restored.history)
+
+        forked = manager.fork_session(original.session_id, cwd="/tmp/child")
+
+        assert forked is not None
+        child_row_ids = {
+            message["_row_id"]
+            for message in forked.history
+            if isinstance(message.get("_row_id"), int)
+        }
+        assert len(child_row_ids) == len(forked.history)
+        assert parent_row_ids.isdisjoint(child_row_ids)
+        child_rows = manager._get_db().get_messages(forked.session_id)
+        assert [row["content"] for row in child_rows] == [
+            "parent question",
+            "parent answer",
+        ]
+
     def test_update_cwd_stores_translated_cwd_on_wsl(self, manager, monkeypatch):
         monkeypatch.setattr("hermes_constants._wsl_detected", True)
         state = manager.create_session(cwd="/tmp/old")
@@ -325,7 +362,9 @@ class TestPersistence:
         restored = manager.get_session(state.session_id)
         assert restored is not None
         msg = restored.history[0]
+        assert isinstance(msg.get("_row_id"), int)
         assert isinstance(msg.pop("timestamp", None), (int, float))
+        msg.pop("_row_id", None)
         assert restored.history == [{
             "role": "assistant",
             "content": "hello",

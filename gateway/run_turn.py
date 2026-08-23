@@ -2773,7 +2773,7 @@ class GatewayTurnMixin:
     def _proxy_error_result(text: str) -> Dict[str, Any]:
         return {"final_response": text, "messages": [], "api_calls": 0, "tools": []}
 
-    def _proxy_stream_consumer(self, source: "SessionSource", event_message_id, _thread_metadata, _run_still_current):
+    def _proxy_stream_consumer(self, source: "SessionSource", event_message_id, _thread_metadata, _run_still_current, message: Any = None):
         """Platform stream consumer for the proxy path when streaming is enabled, else ``None``."""
         from gateway.run import _load_gateway_config, _platform_config_key
         _scfg = getattr(getattr(self, "config", None), "streaming", None)
@@ -2788,7 +2788,11 @@ class GatewayTurnMixin:
             return None
         from gateway.display_config import resolve_display_setting
         _plat_streaming = resolve_display_setting(_load_gateway_config(), _platform_config_key(source.platform), "streaming")
-        if not _scfg.enabled_for(_plat_streaming):
+        _streaming_enabled = _scfg.enabled_for(_plat_streaming)
+        from gateway.run import _is_kanban_transactional_turn
+        if _is_kanban_transactional_turn(message):
+            _streaming_enabled = False
+        if not _streaming_enabled:
             return None
         try:
             from gateway.stream_consumer import GatewayStreamConsumer
@@ -2875,7 +2879,7 @@ class GatewayTurnMixin:
         )
         _stream_consumer = (
             None if scheduled_heartbeat
-            else self._proxy_stream_consumer(source, event_message_id, _thread_metadata, _run_still_current)
+            else self._proxy_stream_consumer(source, event_message_id, _thread_metadata, _run_still_current, message=message)
         )
         stream_task = asyncio.create_task(_stream_consumer.run()) if _stream_consumer else None
 

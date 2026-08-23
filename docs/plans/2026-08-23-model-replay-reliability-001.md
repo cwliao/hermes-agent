@@ -406,3 +406,35 @@ The corrected code was reproduced against the actual rows in
 nine compression/session tests pass. The fix still requires deployment and a
 fresh same-session Telegram retest showing the runtime audit decision and a
 new tool invocation before this ticket can close.
+
+## Baseline-less lineage finding and corrective design
+
+The next production retest used the rotated lineage
+`20260821_163406_895ea0` → `20260823_192418_3bd23f` →
+`20260823_195406_62658f`. The deployed guard was invoked, but correctly logged
+`decision=pass reason=no_exact_tool_backed_candidate`: no message in that
+lineage was a clean, tool-backed baseline. The final response was nevertheless
+the unchanged `08:03:29` Webboard answer containing leaked `AGENTS.md` text.
+
+The three contaminated IDs were drained and deleted through the official
+session CLI, then the gateway was restarted. Deleting all three was necessary
+because deleting only a root or only the latest session leaves compression
+children available for recovery. Verification found no rows for those IDs.
+
+The corrective design adds an explicit `FRESHNESS_REQUIRED_ACTIONS` registry,
+currently containing only the exact normalized Telegram action `Webboard`.
+When that action has a terminal tool surface but no tool-backed baseline, the
+guard claims one bounded fresh-execution nudge with reason
+`baseline_missing_exact_live_report_action`. A non-tool answer after the nudge
+is blocked; a receipt is required. This is an exact action rule, not a prose,
+timestamp, or statistics heuristic, and it does not apply to arbitrary text or
+non-Telegram platforms.
+
+The exact read-only Webboard terminal command is now checked by the same safety
+predicate at both candidate detection and fresh-receipt validation. This avoids
+classifying the command as safe in one layer while rejecting its actual receipt
+in the next layer. Ten replay-guard tests and the combined replay/vLLM/
+compression/session regression set (35 tests) pass locally. Production deploy
+and a new real Telegram Webboard acceptance test remain pending; the ticket
+must not be closed until logs show the baseline-less nudge or blocked decision
+and the final response is demonstrably fresh.

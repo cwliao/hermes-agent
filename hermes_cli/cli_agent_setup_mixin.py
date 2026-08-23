@@ -604,7 +604,11 @@ class CLIAgentSetupMixin:
                 t("cli.resume.cannot_resume", error=resume_limit_error),
                 f"[bold red]{_escape(t('cli.resume.cannot_resume_prefix'))}[/] {_escape(resume_limit_error)}")
             return False
-        restored = self._session_db.get_messages_as_conversation(self.session_id, repair_alternation=True)
+        restored = self._session_db.get_messages_as_conversation(
+            self.session_id,
+            repair_alternation=True,
+            include_row_ids=True,
+        )
         if restored:
             restored = [m for m in restored if m.get("role") != "session_meta"]
             self.conversation_history = restored

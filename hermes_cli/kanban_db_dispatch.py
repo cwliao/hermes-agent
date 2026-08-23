@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import signal
@@ -2048,7 +2049,9 @@ def _worker_terminal_timeout_env(
     return str(desired)
 
 
-def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[str]]:
+def _resolve_worker_cli_toolsets(
+    hermes_home: Optional[str], *, task_body: Optional[str] = None
+) -> Optional[list[str]]:
     """Return the assigned profile's effective CLI toolsets for a worker.
 
     Resolved at dispatch time and passed as an explicit ``--toolsets`` pin so
@@ -2067,7 +2070,29 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
         token = set_hermes_home_override(hermes_home)
         try:
             cfg = load_config()
-            toolsets = sorted(_get_platform_tools(cfg, "cli"))
+            available = set(_get_platform_tools(cfg, "cli"))
+            raw_override = (cfg.get("kanban") or {}).get("worker_toolsets")
+            requested = None
+            if task_body:
+                try:
+                    from hermes_cli.kanban_swarm import WORKER_TOOLSETS_PREFIX
+                    for line in reversed(task_body.splitlines()):
+                        if line.startswith(WORKER_TOOLSETS_PREFIX):
+                            parsed = json.loads(line[len(WORKER_TOOLSETS_PREFIX):])
+                            if isinstance(parsed, list) and parsed:
+                                requested = [str(name).strip() for name in parsed if str(name).strip()]
+                            break
+                except Exception:
+                    requested = None
+            if requested is None:
+                requested = (
+                    [str(name).strip() for name in raw_override if str(name).strip()]
+                    if isinstance(raw_override, list) and raw_override
+                    else ["file", "kanban", "skills", "terminal", "web"]
+                )
+            toolsets = [name for name in requested if name in available]
+            if "kanban" in available and "kanban" not in toolsets:
+                toolsets.insert(0, "kanban")
         finally:
             reset_hermes_home_override(token)
         return toolsets or None
@@ -2134,7 +2159,7 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
     # model at a different depth.
     if task.reasoning_effort:
         cmd.extend(["--reasoning", task.reasoning_effort])
-    worker_toolsets = _resolve_worker_cli_toolsets(hermes_home)
+    worker_toolsets = _resolve_worker_cli_toolsets(hermes_home, task_body=task.body)
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     cmd.extend(["chat", "-q", f"work kanban task {task.id}"])

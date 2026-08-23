@@ -642,8 +642,9 @@ _SUMMARY_TOKENS_CEILING = 10_000
 _MICRO_COMPACT_MAX_CONSECUTIVE_FAILURES = 3
 
 # Prompt-side char cap on the serialized turn block (~40K tokens; head+tail kept,
-# see _bound_summary_input). NEVER add a max_tokens wire cap on the summary call.
+# see _bound_summary_input).
 _SUMMARY_INPUT_MAX_CHARS = 160_000
+_SUMMARY_OUTPUT_SAFETY_MARGIN_TOKENS = 512
 
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
@@ -1799,6 +1800,24 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     @max_summary_tokens.setter
     def max_summary_tokens(self, value: int) -> None:
         self._max_summary_tokens = value
+
+    def _compression_output_budget(
+        self,
+        prompt_messages: List[Dict[str, Any]],
+        requested_tokens: int,
+        *,
+        context_length: Optional[int] = None,
+    ) -> int:
+        """Reserve summary output space inside the auxiliary context window."""
+        requested = max(1, int(requested_tokens or 1))
+        context = context_length
+        if context is None:
+            context = getattr(self, "_resolved_context_length", None)
+        prompt_tokens = estimate_messages_tokens_rough(prompt_messages)
+        if not context or context <= 0:
+            return requested
+        available = int(context) - int(prompt_tokens) - _SUMMARY_OUTPUT_SAFETY_MARGIN_TOKENS
+        return 1 if available <= 0 else max(1, min(requested, available))
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Clear all per-session compaction state at a real session boundary.
@@ -3191,6 +3210,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             call_kwargs["model"] = self.summary_model
         # Pinned route (stall fallback) overrides task routing so the retry leaves the stalled backend.
         call_kwargs.update(_pinned_summary_call_kwargs())
+        call_kwargs["max_tokens"] = self._compression_output_budget(
+            call_kwargs["messages"],
+            self.max_summary_tokens,
+            context_length=(self.context_length if not self.summary_model or self.summary_model == self.model else None),
+        )
         # Compression is atomic: protect the in-flight summary call from a mid-turn gateway interrupt.
         # Without this, an incoming user message aborts the summary and compression falls back to a degraded
         # static marker, losing the real handoff (#23975). Re-entrant: a main-model retry (_generate_summary

@@ -661,7 +661,7 @@ def _handle_complete(args: dict, **kw) -> str:
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         from hermes_cli import kanban_swarm as _kanban_swarm
         contract_error = _kanban_swarm.validate_completion(
-            task, metadata=metadata, result=result,
+            task, metadata=metadata, result=result, summary=summary,
         )
         if contract_error:
             return tool_error(contract_error)

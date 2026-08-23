@@ -310,6 +310,7 @@ _CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
 _CTX_MAX_FIELD_BYTES    = 4 * 1024   # per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
+_CTX_MAX_TOTAL_CHARS    = 24 * 1024  # aggregate worker context cap
 
 
 def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
@@ -2715,10 +2716,17 @@ def complete_task(
     if task_for_contract:
         from hermes_cli import kanban_swarm as _kanban_swarm
         contract_error = _kanban_swarm.validate_completion(
-            task_for_contract, metadata=metadata, result=result,
+            task_for_contract, metadata=metadata, result=result, summary=summary,
         )
         if contract_error:
             raise ValueError(contract_error)
+        output_meta = _kanban_swarm.swarm_output_metadata(
+            result if (result or "").strip() else summary,
+            contract=_kanban_swarm.extract_contract(task_for_contract.body),
+        )
+        if output_meta:
+            metadata = dict(metadata or {})
+            metadata["output_contract"] = output_meta
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
@@ -3879,6 +3887,51 @@ def schedule_task(
 
 
 
+def _mandatory_worker_contract_text(task_body: Optional[str]) -> str:
+    if not task_body:
+        return ""
+    try:
+        from hermes_cli.kanban_swarm import _completion_requirements, _contract_line, extract_contract
+        contract = extract_contract(task_body)
+        if not contract:
+            return ""
+        return (
+            "## Mandatory swarm contract (preserved under context trimming)\n"
+            + _completion_requirements(contract) + "\n" + _contract_line(contract)
+        )
+    except Exception as exc:
+        _log.debug("kanban worker contract preservation skipped (%s)", exc)
+        return ""
+
+
+def _bound_worker_context(text: str, *, mandatory: str = "") -> str:
+    if len(text) <= _CTX_MAX_TOTAL_CHARS and not mandatory:
+        return text
+    marker_template = "\n\n...[worker context truncated: omitted {omitted:,} chars]...\n\n"
+    marker = marker_template.format(omitted=max(0, len(text)))
+    reserved = len(marker) + len(mandatory) + 2
+    if reserved >= _CTX_MAX_TOTAL_CHARS:
+        return (mandatory or text)[:_CTX_MAX_TOTAL_CHARS]
+    available = _CTX_MAX_TOTAL_CHARS - reserved
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    omitted = max(0, len(text) - head_chars - tail_chars)
+    marker = marker_template.format(omitted=omitted)
+    available = max(_CTX_MAX_TOTAL_CHARS - len(marker) - len(mandatory) - 2, 0)
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    bounded = (
+        text[:head_chars].rstrip() + marker
+        + (mandatory.strip() + "\n\n" if mandatory.strip() else "")
+        + text[-tail_chars:].lstrip()
+    )
+    _log.info(
+        "kanban worker context budget chars_before=%d chars_after=%d mandatory_contract=%s",
+        len(text), len(bounded), bool(mandatory),
+    )
+    return bounded[:_CTX_MAX_TOTAL_CHARS]
+
+
 def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     """Everything a worker should read about its task: header, body,
     attachments, prior attempts, done-parent handoffs, the assignee's recent
@@ -3896,7 +3949,11 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     _ctx_parent_results(lines, conn, task_id, now)
     _ctx_role_history(lines, conn, task, now)
     _ctx_comments(lines, list_comments(conn, task_id), now)
-    return "\n".join(lines).rstrip() + "\n"
+    rendered = "\n".join(lines).rstrip() + "\n"
+    return _bound_worker_context(
+        rendered,
+        mandatory=_mandatory_worker_contract_text(task.body),
+    )
 
 
 def _ctx_cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
@@ -4576,6 +4633,7 @@ _PLUGIN_COMPAT_LAZY = {
     'detect_crashed_workers': ('hermes_cli.kanban_db_dispatch', 'detect_crashed_workers'),
     'detect_stale_running': ('hermes_cli.kanban_db_dispatch', 'detect_stale_running'),
     '_default_spawn': ('hermes_cli.kanban_db_dispatch', '_default_spawn'),
+    '_resolve_worker_cli_toolsets': ('hermes_cli.kanban_db_dispatch', '_resolve_worker_cli_toolsets'),
     'dispatch_once': ('hermes_cli.kanban_db_dispatch', 'dispatch_once'),
     'enforce_max_runtime': ('hermes_cli.kanban_db_dispatch', 'enforce_max_runtime'),
     'has_spawnable_ready': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_ready'),

@@ -1898,6 +1898,7 @@ _SYNTHETIC_USER_FLAGS = (
     "_todo_snapshot_synthetic", "_empty_recovery_synthetic", "_verification_stop_synthetic", "_pre_verify_synthetic",
     "_dropped_toolcall_nudge",
     "_model_replay_guard_synthetic",
+    "_kanban_execution_guard_synthetic",
 )
 
 

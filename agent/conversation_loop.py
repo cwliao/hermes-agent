@@ -306,6 +306,18 @@ def _replay_guard_try_finalization(
         mutating_tools=mutating,
     )
     if candidate is None:
+        # Some compressed Telegram action turns retain no clean tool-backed
+        # baseline at all.  The narrow Webboard freshness rule still requires
+        # one live execution; it must not silently pass merely because replay
+        # evidence is absent.
+        candidate = find_baseline_less_candidate(
+            messages,
+            current_user_idx,
+            final_response,
+            agent,
+            evidence,
+        )
+    if candidate is None:
         _replay_guard_audit(
             agent,
             decision="pass",
@@ -1848,6 +1860,7 @@ def run_conversation(
     agent._model_replay_guard_phase = ""
     agent._model_replay_guard_claim = None
     agent._model_replay_guard_previous_answer = ""
+    agent._kanban_execution_guard_phase = ""
 
     # Per-turn agent state (the gateway caches agents across turns, so none of this may
     # leak into the next message): interim-commentary dedup spans the whole turn but not

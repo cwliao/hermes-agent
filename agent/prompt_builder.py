@@ -305,6 +305,11 @@ KANBAN_GUIDANCE = (
     "- Do not assign follow-up work to yourself. Assign it to the right specialist profile.\n"
     "- Do not call `delegate_task` as a board substitute. `delegate_task` is for short reasoning subtasks inside your "
     "own run; board tasks are for cross-agent handoffs that outlive one API loop."
+    "\n"
+    "A new user request is a new logical Kanban operation. Never reuse, block, or report an old `done`/`archived` "
+    "card as the result of the current turn unless the user explicitly names that card and asks to inspect or resume "
+    "it. For a new request, create a fresh task or call `kanban_swarm`; a similar old title is not proof that the "
+    "current work is complete."
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (

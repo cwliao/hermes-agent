@@ -554,6 +554,10 @@ def _handle_list(args: dict, **kw) -> str:
     """Task summaries with the same core filters as the CLI."""
     _require_orchestrator_tool("kanban_list")
     include_archived = _parse_bool_arg(args, "include_archived")
+    explicit_status = args.get("status")
+    exclude_statuses = None
+    if explicit_status is None:
+        exclude_statuses = ("done",) if include_archived else ("done", "archived")
     limit = args.get("limit")
     try:
         limit = KANBAN_LIST_DEFAULT_LIMIT if limit is None else int(limit)
@@ -568,6 +572,7 @@ def _handle_list(args: dict, **kw) -> str:
         # One extra row lets the output report truncation without dumping the board.
         rows = kb.list_tasks(
             conn, assignee=args.get("assignee"), status=args.get("status"),
+            exclude_statuses=exclude_statuses,
             tenant=args.get("tenant"), include_archived=include_archived, limit=limit + 1)
         truncated = len(rows) > limit
         tasks = rows[:limit]
@@ -576,7 +581,12 @@ def _handle_list(args: dict, **kw) -> str:
             "count": len(tasks), "limit": limit, "truncated": truncated,
             "next_limit": (min(limit * 2, KANBAN_LIST_MAX_LIMIT)
                            if truncated and limit < KANBAN_LIST_MAX_LIMIT else None),
-            "promoted": promoted})
+            "promoted": promoted,
+            "scope": ("explicit_status" if explicit_status is not None
+                       else "active_plus_archived" if include_archived else "active_only"),
+            "scope_note": ("A new request requires a fresh task or swarm; terminal history is shown only when explicitly requested."
+                            if explicit_status is None else "Explicit historical/status scope requested."),
+        })
 
 _SWARM_ROOT_RE = re.compile(
     r"Swarm root / shared blackboard:\s*`([^`]+)`"
@@ -718,6 +728,11 @@ def _handle_block(args: dict, **kw) -> str:
         # worker cannot resolve itself; `capability` and `transient` (or an unset kind) route back through
         # kanban_complete, which the judge now gates.
         task = kb.get_task(conn, tid)
+        if task and task.status in {"done", "archived"}:
+            return tool_error(
+                f"cannot block terminal task {tid} (status={task.status}); no state was changed. "
+                "This is historical work. For a new request, create a NEW Kanban task or call kanban_swarm."
+            )
         _check(not (task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS),
                f"goal_mode tasks can only block with kind in "
                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "

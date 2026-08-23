@@ -315,6 +315,73 @@ def test_list_filters_tasks(monkeypatch, worker_env):
     assert tenant_ids == [c]
 
 
+def test_model_list_hides_terminal_history_by_default(monkeypatch, worker_env):
+    """A new request must not be absorbed by a similarly titled done card."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        active = kb.create_task(conn, title="autumn joke request", assignee="factory")
+        finished = kb.create_task(conn, title="autumn joke request", assignee="factory")
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = 2 WHERE id = ?",
+            (finished,),
+        )
+        archived = kb.create_task(conn, title="archived autumn joke", assignee="factory")
+        conn.execute(
+            "UPDATE tasks SET status = 'archived', completed_at = 3 WHERE id = ?",
+            (archived,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    default_rows = json.loads(kt._handle_list({"assignee": "factory"}))
+    default_ids = [row["id"] for row in default_rows["tasks"]]
+    assert active in default_ids
+    assert finished not in default_ids
+    assert default_rows["scope"] == "active_only"
+    assert archived not in default_ids
+
+    history_rows = json.loads(
+        kt._handle_list({"assignee": "factory", "status": "done"})
+    )
+    assert [row["id"] for row in history_rows["tasks"]] == [finished]
+    assert history_rows["scope"] == "explicit_status"
+
+    archived_rows = json.loads(
+        kt._handle_list({"assignee": "factory", "include_archived": True})
+    )
+    assert archived in [row["id"] for row in archived_rows["tasks"]]
+    assert finished not in [row["id"] for row in archived_rows["tasks"]]
+    assert archived_rows["scope"] == "active_plus_archived"
+
+
+def test_blocking_terminal_task_directs_new_request_to_fresh_swarm(worker_env):
+    """A terminal-card mutation must not become a false 'request finished'."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = 2 WHERE id = ?",
+            (worker_env,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = json.loads(
+        kt._handle_block({"reason": "the old task appears complete"})
+    )
+    assert result.get("error")
+    assert "NEW Kanban task" in result["error"]
+    assert "kanban_swarm" in result["error"]
+
+
 def test_complete_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_complete({

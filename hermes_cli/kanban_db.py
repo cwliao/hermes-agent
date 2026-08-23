@@ -1585,12 +1585,18 @@ VALID_SORT_ORDERS: dict[str, str] = {
 
 def list_tasks(
     conn: sqlite3.Connection, *, assignee: Optional[str] = None, status: Optional[str] = None,
+    exclude_statuses: Optional[Iterable[str]] = None,
     tenant: Optional[str] = None, session_id: Optional[str] = None, include_archived: bool = False,
     limit: Optional[int] = None, order_by: Optional[str] = None,
     workflow_template_id: Optional[str] = None, current_step_key: Optional[str] = None,
 ) -> list[Task]:
     if status is not None and status not in VALID_STATUSES:
         raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
+    if exclude_statuses and status is None:
+        excluded = tuple(dict.fromkeys(str(value) for value in exclude_statuses))
+        invalid = sorted(set(excluded) - VALID_STATUSES)
+        if invalid:
+            raise ValueError(f"exclude_statuses must contain only valid statuses: {invalid}")
     query = "SELECT * FROM tasks WHERE 1=1"
     params: list[Any] = []
     for col, val in (
@@ -1603,6 +1609,10 @@ def list_tasks(
             params.append(val)
     if not include_archived and status != "archived":
         query += " AND status != 'archived'"
+    if exclude_statuses and status is None:
+        placeholders = ",".join("?" * len(excluded))
+        query += f" AND status NOT IN ({placeholders})"
+        params.extend(excluded)
     if order_by is not None:
         order_by = order_by.strip().lower()
         if order_by not in VALID_SORT_ORDERS:

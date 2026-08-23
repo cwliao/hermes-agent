@@ -34,6 +34,23 @@ Read `docs/operations/dgx-spark-hermes-directory-boundaries.md` before any
 deployment, update, cleanup, systemd, release, venv, or state operation.
 Known boundary debt is tracked in Kanban ticket `t_44c44870`.
 
+## Current operational memory / first read
+
+Before diagnosing replay, session, deployment, or Telegram delivery behavior,
+read `docs/memory/2026-08-23-model-replay-five-rounds.md` and the current
+addendum in `docs/HANDOVER.md`. This is a living pointer, not a substitute for
+checking the effective systemd unit, process cwd, release marker, and live
+state. The five non-negotiable distinctions are:
+
+- database duplicate rows are not proof of model replay or proof of fresh work;
+- a guard in unit tests is not proof that the production conversation loop calls it;
+- a rotated session ID must be checked through its full lineage and receipts;
+- repo source, immutable release, release venv, systemd paths, and live state are separate;
+- a real user-visible E2E result is required before calling a delivery fix complete.
+
+When the memory document and a live command disagree, the live command wins and
+the handover must be updated with the newly verified fact.
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a messaging

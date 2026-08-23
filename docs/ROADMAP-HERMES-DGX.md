@@ -4,6 +4,17 @@ Snapshot: 2026-08-18 (Asia/Taipei), Claude continuation session. This file is th
 state summary. Git history contains older deployment snapshots; do not use
 those older snapshots to infer the current PR or runtime state.
 
+## Current addendum — 2026-08-23
+
+The 2026-08-18 snapshot is historical. The current replay-reliability record is
+[`docs/memory/2026-08-23-model-replay-five-rounds.md`](memory/2026-08-23-model-replay-five-rounds.md),
+and the current handover entry is in `docs/HANDOVER.md`. The latest verified
+production change is `a780bd4772d36ba1971907d9407efb0e785d3abf`, deployed as an
+immutable release with a matching release-pinned venv and systemd drop-in.
+The real Telegram acceptance completed on 2026-08-23; all future runtime claims
+still require fresh effective-unit/process/release checks. Do not use the older
+ticket table below to conclude that replay acceptance is unexecuted.
+
 ## Source-of-truth rules
 
 - `origin/main` and the repository-local handover are authoritative.

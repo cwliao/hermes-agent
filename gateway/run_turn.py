@@ -2443,6 +2443,9 @@ class GatewayTurnMixin:
         _streaming_enabled = (
             _scfg.enabled and _scfg.transport != "off" if _plat_streaming is None else bool(_plat_streaming)
         )
+        from gateway.run import _is_kanban_transactional_turn
+        if _is_kanban_transactional_turn(message):
+            _streaming_enabled = False
         if not _streaming_enabled:
             return None
         try:

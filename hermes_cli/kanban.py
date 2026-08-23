@@ -856,6 +856,41 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_hb.add_argument("--note", default=None,
                       help="Optional short note attached to the heartbeat event")
 
+    # --- external watcher leases ---
+    p_watcher = sub.add_parser(
+        "watcher",
+        help="Register and heartbeat an external terminal assignee lease",
+        description=(
+            "An external terminal that pulls tasks with claim_task must keep "
+            "a short-lived lease alive. A process name alone never makes an "
+            "assignee available to model-facing task creation."
+        ),
+    )
+    watcher_sub = p_watcher.add_subparsers(dest="watcher_action")
+    p_wreg = watcher_sub.add_parser("register", help="Register or refresh a watcher lease")
+    p_wreg.add_argument("--assignee", required=True)
+    p_wreg.add_argument(
+        "--watcher-id",
+        default=None,
+        help="Stable watcher identity (default: $HERMES_WATCHER_ID or host:pid)",
+    )
+    p_wreg.add_argument("--ttl", type=int, default=kb.EXTERNAL_WATCHER_DEFAULT_TTL_SECONDS)
+    p_wreg.add_argument("--capability", action="append", default=[])
+    p_wreg.add_argument("--metadata", default=None, help="JSON metadata object")
+    p_wreg.add_argument("--json", action="store_true")
+    p_whb = watcher_sub.add_parser("heartbeat", help="Extend an existing watcher lease")
+    p_whb.add_argument("--assignee", required=True)
+    p_whb.add_argument("--watcher-id", default=None)
+    p_whb.add_argument("--ttl", type=int, default=kb.EXTERNAL_WATCHER_DEFAULT_TTL_SECONDS)
+    p_whb.add_argument("--json", action="store_true")
+    p_wun = watcher_sub.add_parser("unregister", help="Remove a watcher lease")
+    p_wun.add_argument("--assignee", required=True)
+    p_wun.add_argument("--watcher-id", default=None)
+    p_wun.add_argument("--json", action="store_true")
+    p_wls = watcher_sub.add_parser("list", help="List active watcher leases")
+    p_wls.add_argument("--all", action="store_true", dest="include_expired")
+    p_wls.add_argument("--json", action="store_true")
+
     # --- assignees ---
     p_asg = sub.add_parser(
         "assignees",
@@ -1076,7 +1111,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
-    "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
+    "heartbeat", "watcher", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "gc",
 })
 
@@ -1184,6 +1219,124 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
                                  expected_run_id=_worker_run_id_for(args.task_id))
     return _ok_or_err(ok, f"cannot heartbeat {args.task_id} (not running?)",
                       f"Heartbeat recorded for {args.task_id}")
+
+
+def _default_watcher_id() -> str:
+    import socket
+
+    return os.environ.get("HERMES_WATCHER_ID") or f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _cmd_watcher(args: argparse.Namespace) -> int:
+    action = getattr(args, "watcher_action", None)
+    if not action:
+        print(
+            "usage: hermes kanban watcher {register|heartbeat|unregister|list}",
+            file=sys.stderr,
+        )
+        return 2
+    if action == "list":
+        with kb.connect_closing() as conn:
+            data = kb.list_external_watchers(
+                conn, include_expired=bool(getattr(args, "include_expired", False))
+            )
+        if getattr(args, "json", False):
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+        elif not data:
+            print("(no active external watcher leases)")
+        else:
+            print(f"{'ASSIGNEE':20s}  {'WATCHER':24s}  {'EXPIRES':12s}  ACTIVE")
+            for entry in data:
+                expires = _fmt_ts(entry["expires_at"])
+                print(
+                    f"{entry['assignee']:20s}  {entry['watcher_id']:24s}  "
+                    f"{expires:12s}  {'yes' if entry['active'] else 'no'}"
+                )
+        return 0
+
+    watcher_id = getattr(args, "watcher_id", None) or _default_watcher_id()
+    try:
+        if action == "register":
+            metadata = {}
+            if getattr(args, "metadata", None):
+                decoded = json.loads(args.metadata)
+                if not isinstance(decoded, dict):
+                    raise ValueError("--metadata must be a JSON object")
+                metadata = decoded
+            with kb.connect_closing() as conn:
+                expires_at = kb.register_external_watcher(
+                    conn,
+                    assignee=args.assignee,
+                    watcher_id=watcher_id,
+                    ttl_seconds=args.ttl,
+                    capabilities=args.capability,
+                    metadata=metadata,
+                )
+            payload = {
+                "ok": True,
+                "action": action,
+                "assignee": args.assignee,
+                "watcher_id": watcher_id,
+                "expires_at": expires_at,
+            }
+        elif action == "heartbeat":
+            with kb.connect_closing() as conn:
+                expires_at = kb.heartbeat_external_watcher(
+                    conn,
+                    assignee=args.assignee,
+                    watcher_id=watcher_id,
+                    ttl_seconds=args.ttl,
+                )
+            if expires_at is None:
+                print(
+                    f"no watcher lease for assignee={args.assignee!r}, "
+                    f"watcher_id={watcher_id!r}; register first",
+                    file=sys.stderr,
+                )
+                return 1
+            payload = {
+                "ok": True,
+                "action": action,
+                "assignee": args.assignee,
+                "watcher_id": watcher_id,
+                "expires_at": expires_at,
+            }
+        elif action == "unregister":
+            with kb.connect_closing() as conn:
+                removed = kb.unregister_external_watcher(
+                    conn, assignee=args.assignee, watcher_id=watcher_id
+                )
+            payload = {
+                "ok": removed,
+                "action": action,
+                "assignee": args.assignee,
+                "watcher_id": watcher_id,
+            }
+            if not removed:
+                print("no matching watcher lease", file=sys.stderr)
+                return 1
+        else:
+            print(f"kanban watcher: unknown action {action!r}", file=sys.stderr)
+            return 2
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"kanban watcher: {exc}", file=sys.stderr)
+        return 2
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    elif action == "register":
+        print(
+            f"Registered {args.assignee!r} for watcher {watcher_id!r} "
+            f"until {_fmt_ts(payload['expires_at'])}"
+        )
+    elif action == "heartbeat":
+        print(
+            f"Heartbeat extended for {args.assignee!r} / {watcher_id!r} "
+            f"until {_fmt_ts(payload['expires_at'])}"
+        )
+    else:
+        print(f"Unregistered {args.assignee!r} / {watcher_id!r}")
+    return 0
 
 
 def _cmd_assignees(args: argparse.Namespace) -> int:
@@ -2291,7 +2444,7 @@ _HANDLERS = {
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
     "daemon": _cmd_daemon, "watch": _cmd_watch, "stats": _cmd_stats,
-    "log": _cmd_log, "runs": _cmd_runs, "heartbeat": _cmd_heartbeat,
+    "log": _cmd_log, "runs": _cmd_runs, "heartbeat": _cmd_heartbeat, "watcher": _cmd_watcher,
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
     "context": _cmd_context, "specify": _cmd_specify, "decompose": _cmd_decompose,

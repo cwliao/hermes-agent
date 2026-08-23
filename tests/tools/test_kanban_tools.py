@@ -264,6 +264,15 @@ def worker_env(monkeypatch, tmp_path):
     kb.init_db()
     conn = kbc.connect()
     try:
+        # Model-facing task creation now requires either a real Hermes profile
+        # or an explicit external watcher lease. These synthetic child-owner
+        # names represent the test's external peer/QA terminals.
+        for assignee in ("peer", "qa"):
+            kb.register_external_watcher(
+                conn,
+                assignee=assignee,
+                watcher_id="test-fixture",
+            )
         tid = kb.create_task(conn, title="worker-test", assignee="test-worker")
         kb.claim_task(conn, tid)
     finally:
@@ -714,6 +723,88 @@ def test_create_rejects_unknown_swarm_lane_as_profile(monkeypatch, worker_env):
     assert "error" in out
     assert "lane_id" in out["error"]
     assert "grok" in out["error"]
+
+
+def test_create_rejects_unavailable_assignee_without_creating_card(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    finally:
+        conn.close()
+
+    out = json.loads(kt._handle_create({
+        "title": "must not rot in ready",
+        "assignee": "verifier-default",
+        "parents": [worker_env],
+    }))
+    assert "error" in out
+    assert "No task was created" in out["error"]
+
+    conn = kb.connect()
+    try:
+        after = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    finally:
+        conn.close()
+    assert after == before
+
+
+def test_swarm_rejects_unavailable_verifier_before_any_card(worker_env):
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        from hermes_cli import kanban_db as kb
+        from tools import kanban_tools as kt
+
+        conn = kb.connect()
+        try:
+            before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        finally:
+            conn.close()
+        out = json.loads(kt._handle_swarm({
+            "goal": "reject impossible verifier",
+            "workers": [{"title": "worker"}],
+            "verifier_assignee": "verifier-default",
+        }))
+        assert "error" in out
+        assert "verifier_assignee" in out["error"]
+        conn = kb.connect()
+        try:
+            after = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        finally:
+            conn.close()
+        assert after == before
+    finally:
+        monkeypatch.undo()
+
+
+def test_external_watcher_lease_expires(worker_env):
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        expires = kb.register_external_watcher(
+            conn,
+            assignee="temporary-terminal",
+            watcher_id="watcher-1",
+            ttl_seconds=5,
+        )
+        assert kb.external_watcher_available(
+            conn, "temporary-terminal", now=expires - 1
+        )
+        assert not kb.external_watcher_available(
+            conn, "temporary-terminal", now=expires
+        )
+        assert kb.heartbeat_external_watcher(
+            conn,
+            assignee="temporary-terminal",
+            watcher_id="watcher-1",
+            ttl_seconds=5,
+        ) is not None
+    finally:
+        conn.close()
 
 
 def test_link_happy_path(worker_env):
@@ -1246,6 +1337,13 @@ def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env,
         "kanban:\n  auto_subscribe_on_create: false\n"
     )
     monkeypatch.setenv("HERMES_HOME", str(home))
+    from hermes_cli import kanban_db as kb
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        kb.register_external_watcher(
+            conn, assignee="peer", watcher_id="test-fixture"
+        )
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
     monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "channel-1")
 

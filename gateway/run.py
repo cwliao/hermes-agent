@@ -65,6 +65,22 @@ _GATEWAY_PROXY_SSE_BUFFER_MAX_CHARS = 16 * 1024 * 1024
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 _GATEWAY_HYGIENE_PLATFORM = "gateway_hygiene"
 
+
+def _is_kanban_transactional_turn(message: Any) -> bool:
+    """Return whether final assistant text must wait for Kanban proof.
+
+    Keep this classifier deliberately narrow and side-effect free. It runs
+    before the agent/stream consumer is constructed; the execution guard
+    remains the authority that validates the eventual tool receipt.
+    """
+    try:
+        from agent.kanban_execution_guard import (
+            request_requires_transactional_delivery,
+        )
+        return bool(request_requires_transactional_delivery(getattr(message, "text", message)))
+    except Exception:
+        return False
+
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"("  # transient/auxiliary status that should stay in logs, not gateway chats
     r"auxiliary\s+.+\s+failed"

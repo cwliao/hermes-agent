@@ -792,6 +792,7 @@ class TurnRunner:
     def _setup_stream_consumer(self, platform_key):
         ctx = self._ctx
         stream_consumer = None
+        from gateway.run import _is_kanban_transactional_turn
         # The streaming-TTS consumer is created on the outer loop thread before run_sync launches;
         # run_sync only reads it via the holder for delta-callback wiring.
         stts = ctx.streaming_tts_consumer_holder[0]
@@ -805,6 +806,14 @@ class TurnRunner:
             scfg.enabled and scfg.transport != "off" if plat_streaming is None else bool(plat_streaming)
         )
         want_interim_messages = ctx.interim_assistant_messages_enabled
+        if _is_kanban_transactional_turn(ctx.message):
+            logger.info(
+                "Kanban transactional response mode: buffering final text "
+                "until mutation receipt finalization (session=%s)",
+                ctx.session_key or "?",
+            )
+            want_stream_deltas = False
+            want_interim_messages = False
         if want_stream_deltas or want_interim_messages:
             try:
                 from gateway.stream_consumer import GatewayStreamConsumer

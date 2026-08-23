@@ -179,6 +179,7 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_kanban_stop_synthetic",
     "_dropped_toolcall_nudge",
     "_model_replay_guard_synthetic",
+    "_kanban_execution_guard_synthetic",
 )
 
 

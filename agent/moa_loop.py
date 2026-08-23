@@ -554,6 +554,17 @@ def _run_references_parallel(
     # Propagate the turn's contextvars (approval callbacks, Nous conversation tag).
     from tools.thread_context import propagate_context_to_thread
     completed = 0
+
+    def _report_progress(idx: int) -> None:
+        """Account for one terminal reference slot and notify the display."""
+        nonlocal completed
+        completed += 1
+        if progress_callback is not None:
+            try:
+                progress_callback(completed, total, _slot_label(reference_models[idx]))
+            except Exception as exc:  # pragma: no cover - display must never break
+                logger.debug("MoA progress_callback failed: %s", exc)
+
     executor = ThreadPoolExecutor(max_workers=min(_MAX_REFERENCE_WORKERS, total))
     interrupted = False
     # Shared per-fan-out context-length cache (dict get/set is GIL-atomic).
@@ -563,6 +574,9 @@ def _run_references_parallel(
         for idx, slot in enumerate(reference_models):
             if slot.get("provider") == "moa":
                 results[idx] = _placeholder_output(slot, "[skipped: MoA presets cannot recursively reference MoA]")
+                # A recursion-guard slot is a terminal reference outcome even
+                # though it never creates a future.
+                _report_progress(idx)
                 continue
             futures[executor.submit(
                 propagate_context_to_thread(_run_reference), slot, ref_messages, temperature=temperature,
@@ -577,12 +591,7 @@ def _run_references_parallel(
             for future in done:
                 idx = futures[future]
                 results[idx] = future.result()
-                completed += 1
-                if progress_callback is not None:
-                    try:
-                        progress_callback(completed, total, _slot_label(reference_models[idx]))
-                    except Exception as exc:  # pragma: no cover - display must never break
-                        logger.debug("MoA progress_callback failed: %s", exc)
+                _report_progress(idx)
             if pending and agent is not None and getattr(agent, "_interrupt_requested", False):
                 interrupted = True
                 _settle_interrupted(futures, results, reference_models, late_accounting_sink)

@@ -101,6 +101,27 @@ def test_failed_mutation_receipt_is_blocked_without_retry():
     assert try_finalization(agent, messages, 0, final_msg["content"], final_msg, list.append) == "blocked"
 
 
+def test_mixed_success_and_failure_receipts_are_blocked():
+    agent = _agent()
+    messages = [
+        {"role": "user", "content": PROMPT},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "create-1", "function": {"name": "kanban_create", "arguments": "{}"}},
+                {"id": "create-2", "function": {"name": "kanban_create", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "create-1", "content": '{"ok": true, "task_id": "t_one"}'},
+        {"role": "tool", "tool_call_id": "create-2", "content": '{"error": "title is required"}'},
+    ]
+    final_msg = {"role": "assistant", "content": "Both tasks were created."}
+    assert try_finalization(
+        agent, messages, 0, final_msg["content"], final_msg, list.append
+    ) == "blocked"
+    assert "could not verify" in final_msg["content"]
+
+
 def test_old_receipt_before_current_user_does_not_count():
     agent = _agent()
     messages = _receipt_messages() + [

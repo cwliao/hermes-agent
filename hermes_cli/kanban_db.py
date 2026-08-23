@@ -1067,6 +1067,22 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
+-- A short-lived registration for an external terminal that actively pulls
+-- tasks with ``claim_task``.  A non-profile assignee is not spawnable by the
+-- embedded Hermes dispatcher, so it must prove that a real external watcher
+-- is currently present before a model-facing task creation can use it.
+-- Multiple watchers may serve one lane; expiry is the liveness boundary.
+CREATE TABLE IF NOT EXISTS kanban_assignee_watchers (
+    assignee            TEXT NOT NULL,
+    watcher_id          TEXT NOT NULL,
+    capabilities        TEXT,
+    metadata            TEXT,
+    registered_at       INTEGER NOT NULL,
+    last_heartbeat_at   INTEGER NOT NULL,
+    expires_at          INTEGER NOT NULL,
+    PRIMARY KEY (assignee, watcher_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
@@ -1076,6 +1092,8 @@ CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, cre
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_assignee_watchers_expiry
+    ON kanban_assignee_watchers(assignee, expires_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 """
 
@@ -1115,6 +1133,217 @@ def _validate_model_override(model: Optional[str], provider: Optional[str]) -> t
         raise ValueError("provider_override requires a model_override")
     return model, provider
 
+# ---------------------------------------------------------------------------
+# Assignee availability (Hermes profiles + external watcher leases)
+# ---------------------------------------------------------------------------
+
+EXTERNAL_WATCHER_DEFAULT_TTL_SECONDS = 120
+EXTERNAL_WATCHER_MAX_TTL_SECONDS = 3600
+
+
+def _normalise_watcher_text(value: Any, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} is required")
+    if len(text) > 200:
+        raise ValueError(f"{field} is too long")
+    return text
+
+
+def register_external_watcher(
+    conn: sqlite3.Connection,
+    *,
+    assignee: str,
+    watcher_id: str,
+    ttl_seconds: int = EXTERNAL_WATCHER_DEFAULT_TTL_SECONDS,
+    capabilities: Optional[Iterable[str]] = None,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> int:
+    """Register or refresh an external terminal watcher lease.
+
+    Non-profile assignees are intentionally not inferred from process names.
+    An external runner must explicitly register and heartbeat a lease before
+    model-facing task creation can route work to it. Returns the absolute
+    expiry timestamp.
+    """
+    assignee = _canonical_assignee(_normalise_watcher_text(assignee, "assignee")) or ""
+    watcher_id = _normalise_watcher_text(watcher_id, "watcher_id")
+    try:
+        ttl_seconds = int(ttl_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ttl_seconds must be an integer") from exc
+    if not 5 <= ttl_seconds <= EXTERNAL_WATCHER_MAX_TTL_SECONDS:
+        raise ValueError(
+            f"ttl_seconds must be between 5 and {EXTERNAL_WATCHER_MAX_TTL_SECONDS}"
+        )
+    caps = sorted({str(item).strip() for item in (capabilities or ()) if str(item).strip()})
+    metadata_json = json.dumps(dict(metadata or {}), ensure_ascii=False, sort_keys=True)
+    now = int(time.time())
+    expires_at = now + ttl_seconds
+    with write_txn(conn):
+        conn.execute(
+            "INSERT INTO kanban_assignee_watchers "
+            "(assignee, watcher_id, capabilities, metadata, registered_at, "
+            "last_heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(assignee, watcher_id) DO UPDATE SET "
+            "capabilities=excluded.capabilities, metadata=excluded.metadata, "
+            "last_heartbeat_at=excluded.last_heartbeat_at, "
+            "expires_at=excluded.expires_at",
+            (
+                assignee,
+                watcher_id,
+                json.dumps(caps, ensure_ascii=False),
+                metadata_json,
+                now,
+                now,
+                expires_at,
+            ),
+        )
+    return expires_at
+
+
+def heartbeat_external_watcher(
+    conn: sqlite3.Connection,
+    *,
+    assignee: str,
+    watcher_id: str,
+    ttl_seconds: int = EXTERNAL_WATCHER_DEFAULT_TTL_SECONDS,
+) -> Optional[int]:
+    """Extend an existing watcher lease, returning its new expiry or ``None``."""
+    assignee = _canonical_assignee(_normalise_watcher_text(assignee, "assignee")) or ""
+    watcher_id = _normalise_watcher_text(watcher_id, "watcher_id")
+    try:
+        ttl_seconds = int(ttl_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ttl_seconds must be an integer") from exc
+    if not 5 <= ttl_seconds <= EXTERNAL_WATCHER_MAX_TTL_SECONDS:
+        raise ValueError(
+            f"ttl_seconds must be between 5 and {EXTERNAL_WATCHER_MAX_TTL_SECONDS}"
+        )
+    now = int(time.time())
+    expires_at = now + ttl_seconds
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE kanban_assignee_watchers SET last_heartbeat_at=?, expires_at=? "
+            "WHERE assignee=? AND watcher_id=?",
+            (now, expires_at, assignee, watcher_id),
+        )
+    return expires_at if cur.rowcount else None
+
+
+def unregister_external_watcher(
+    conn: sqlite3.Connection, *, assignee: str, watcher_id: str
+) -> bool:
+    """Remove one external watcher lease."""
+    assignee = _canonical_assignee(_normalise_watcher_text(assignee, "assignee")) or ""
+    watcher_id = _normalise_watcher_text(watcher_id, "watcher_id")
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM kanban_assignee_watchers WHERE assignee=? AND watcher_id=?",
+            (assignee, watcher_id),
+        )
+    return bool(cur.rowcount)
+
+
+def list_external_watchers(
+    conn: sqlite3.Connection, *, include_expired: bool = False
+) -> list[dict[str, Any]]:
+    """List watcher leases for diagnostics and external runner startup."""
+    now = int(time.time())
+    sql = (
+        "SELECT assignee, watcher_id, capabilities, metadata, registered_at, "
+        "last_heartbeat_at, expires_at FROM kanban_assignee_watchers"
+    )
+    params: tuple[Any, ...] = ()
+    if not include_expired:
+        sql += " WHERE expires_at > ?"
+        params = (now,)
+    sql += " ORDER BY assignee, watcher_id"
+    out = []
+    for row in conn.execute(sql, params):
+        try:
+            caps = json.loads(row["capabilities"] or "[]")
+        except (TypeError, ValueError):
+            caps = []
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        out.append({
+            "assignee": row["assignee"],
+            "watcher_id": row["watcher_id"],
+            "capabilities": caps if isinstance(caps, list) else [],
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "registered_at": row["registered_at"],
+            "last_heartbeat_at": row["last_heartbeat_at"],
+            "expires_at": row["expires_at"],
+            "active": int(row["expires_at"] or 0) > now,
+        })
+    return out
+
+
+def external_watcher_available(
+    conn: sqlite3.Connection, assignee: str, *, now: Optional[int] = None
+) -> bool:
+    """Return true only when an external watcher lease is currently alive."""
+    raw_assignee = str(assignee or "").strip()
+    if not raw_assignee:
+        return False
+    assignee = _canonical_assignee(raw_assignee) or ""
+    now = int(time.time()) if now is None else int(now)
+    row = conn.execute(
+        "SELECT 1 FROM kanban_assignee_watchers "
+        "WHERE assignee=? AND expires_at > ? LIMIT 1",
+        (assignee, now),
+    ).fetchone()
+    return row is not None
+
+
+def assignee_availability(
+    conn: sqlite3.Connection, assignee: str
+) -> Optional[str]:
+    """Return ``hermes_profile``, ``external_watcher`` or ``None``.
+
+    ``profile_exists`` is imported lazily to avoid making the DB module depend
+    on the full profile/config startup path for ordinary board operations.
+    """
+    raw_assignee = str(assignee or "").strip()
+    if not raw_assignee:
+        return None
+    assignee = _canonical_assignee(raw_assignee) or ""
+    # ``default`` is the implicit profile on every Hermes home, and the
+    # process's own HERMES_PROFILE is necessarily a live profile even in
+    # embedded/test runtimes that do not materialise a profiles/<name>/ tree.
+    if assignee == "default" or assignee == str(os.environ.get("HERMES_PROFILE") or "").strip():
+        return "hermes_profile"
+    try:
+        from hermes_cli.profiles import profile_exists
+        if profile_exists(assignee):
+            return "hermes_profile"
+    except Exception:
+        # A missing profile module is not proof of availability. Continue to
+        # the explicit watcher lease rather than failing open.
+        pass
+    if external_watcher_available(conn, assignee):
+        return "external_watcher"
+    return None
+
+
+def assignee_unavailable_message(conn: sqlite3.Connection, assignee: str) -> str:
+    """Build the stable, model-actionable creation error for bad routing."""
+    name = str(assignee or "").strip()
+    return (
+        f"assignee={name!r} is unavailable: it is not an installed Hermes "
+        "profile and has no live external watcher lease. Register an external "
+        "terminal with `hermes kanban watcher register --assignee "
+        f"{name}` and heartbeat it, or use an installed profile such as "
+        "'default'. No task was created."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task creation / mutation
+# ---------------------------------------------------------------------------
 
 def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     """Lowercase-assignee normalization for Kanban rows (dashboard/CLI parity)."""

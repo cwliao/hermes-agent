@@ -20,6 +20,10 @@ KANBAN_EXECUTION_GUARD_SYNTHETIC = "_kanban_execution_guard_synthetic"
 KANBAN_SWARM_TOOL = "kanban_swarm"
 KANBAN_MUTATION_TOOLS = frozenset({"kanban_swarm", "kanban_create"})
 LANE_IDS = ("native_hermes", "claude", "grok", "agy")
+_KANBAN_MUTATION_WORDS = (
+    "create", "建立", "創建", "新增", "assign", "指派", "dispatch",
+    "建立任務", "建立工作", "建立 swarm", "建立 任務",
+)
 
 KANBAN_EXECUTION_NUDGE = (
     "[Internal execution check: the current user request explicitly requires "
@@ -31,8 +35,9 @@ KANBAN_EXECUTION_NUDGE = (
 
 KANBAN_EXECUTION_BLOCKED = (
     "I could not verify that a new Kanban swarm was created for this request. "
-    "No task IDs or lane results are being reported as completed. Please retry "
-    "after the Kanban tool is available."
+    "A Kanban mutation may have failed or only partially completed, so no task "
+    "IDs or lane results are being reported as completed. Please inspect the "
+    "board and retry after the Kanban tool is available."
 )
 
 
@@ -56,6 +61,27 @@ def request_requires_four_lane_swarm(value: Any) -> bool:
     has_independent_outputs = "各自獨立" in text or "獨立產出" in text or "獨立産出" in text
     has_swarm_stage = any(word in text for word in ("verifier", "synthesizer", "kanban", "swarm"))
     return lane_hits >= 3 and has_lane_shape and has_independent_outputs and has_swarm_stage
+
+
+def request_requires_transactional_delivery(value: Any) -> bool:
+    """Recognize turns whose Kanban mutation prose must not stream early.
+
+    The four-lane classifier remains the strict execution-proof gate. This
+    wider delivery classifier also covers ordinary requests such as
+    "建立一個 Kanban task" without making the execution guard invent a
+    receipt requirement for read-only Kanban questions.
+    """
+    text = _text(value).casefold()
+    if request_requires_four_lane_swarm(value):
+        return True
+    if not any(term in text for term in ("kanban", "task", "任務", "swarm")):
+        return False
+    if any(
+        phrase in text
+        for phrase in ("不要建立", "不建立", "不要 create", "do not create", "don't create")
+    ):
+        return False
+    return any(term.casefold() in text for term in _KANBAN_MUTATION_WORDS)
 
 
 def _calls(message: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -135,6 +161,37 @@ def _mutation_attempted(messages: Sequence[Mapping[str, Any]], current_user_idx:
     return False
 
 
+def _failed_mutation_tools(
+    messages: Sequence[Mapping[str, Any]], current_user_idx: int
+) -> list[str]:
+    """Return mutation tool names with an explicit failed receipt.
+
+    ``_mutation_attempted`` is deliberately broad and catches a missing
+    receipt. This companion keeps the stronger evidence separate: a model
+    turn that contains one successful ``kanban_create`` and one failed one is
+    still known-bad, even if another receipt exists in the same turn.
+    """
+    calls_by_id: dict[str, Mapping[str, Any]] = {}
+    for message in messages[current_user_idx + 1 :]:
+        if not isinstance(message, Mapping):
+            continue
+        for call in _calls(message):
+            if _call_id(call):
+                calls_by_id[_call_id(call)] = call
+    failed: list[str] = []
+    for message in messages[current_user_idx + 1 :]:
+        if not isinstance(message, Mapping) or message.get("role") != "tool":
+            continue
+        call = calls_by_id.get(str(message.get("tool_call_id") or ""))
+        name = _call_name(call or {})
+        if name not in KANBAN_MUTATION_TOOLS:
+            continue
+        payload = _decode_result(message.get("content"))
+        if payload is None or payload.get("ok") is not True:
+            failed.append(name)
+    return failed
+
+
 def _has_tool(agent: Any, name: str) -> bool:
     names = getattr(agent, "valid_tool_names", None)
     if isinstance(names, (set, frozenset, list, tuple)):
@@ -167,6 +224,17 @@ def try_finalization(
     if not isinstance(current_user, Mapping) or not request_requires_four_lane_swarm(current_user.get("content")):
         agent._kanban_execution_guard_phase = ""
         return "pass"
+
+    failed_mutations = _failed_mutation_tools(messages, current_user_idx)
+    if failed_mutations:
+        agent._kanban_execution_guard_phase = "blocked"
+        final_msg["content"] = KANBAN_EXECUTION_BLOCKED
+        logger.warning(
+            "kanban_execution_guard decision=blocked "
+            "reason=known_mutation_failure tools=%s",
+            ",".join(sorted(set(failed_mutations))),
+        )
+        return "blocked"
 
     payload = _successful_swarm_payload(messages, current_user_idx)
     phase = str(getattr(agent, "_kanban_execution_guard_phase", "") or "")
@@ -228,5 +296,6 @@ __all__ = [
     "KANBAN_EXECUTION_GUARD_SYNTHETIC",
     "KANBAN_EXECUTION_NUDGE",
     "request_requires_four_lane_swarm",
+    "request_requires_transactional_delivery",
     "try_finalization",
 ]

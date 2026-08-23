@@ -21,6 +21,7 @@ logger = logging.getLogger("agent.conversation_loop")
 _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_thinking_prefill", "_empty_recovery_synthetic", "_empty_terminal_sentinel",
     "_dropped_toolcall_nudge", "_model_replay_guard_synthetic",
+    "_kanban_execution_guard_synthetic",
 )
 
 
@@ -205,6 +206,15 @@ def finish_text_response(
 
     # Narrow stale-answer replay guard, after the normal response gates.
     from agent.conversation_loop import _replay_guard_try_finalization
+    from agent.kanban_execution_guard import try_finalization as _kanban_execution_guard_try_finalization
+
+    _kanban_outcome = _kanban_execution_guard_try_finalization(
+        agent, messages, current_turn_user_idx, final_response, final_msg, append_message
+    )
+    if _kanban_outcome == "nudge":
+        final_response = None
+        return _verdict("continue")
+
     _replay_outcome = _replay_guard_try_finalization(
         agent, messages, current_turn_user_idx, turn_id, final_response, final_msg
     )

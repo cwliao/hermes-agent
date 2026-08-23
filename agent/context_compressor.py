@@ -668,11 +668,11 @@ _MICRO_COMPACT_MAX_CONSECUTIVE_FAILURES = 3
 # especially). 160K chars ≈ 40K tokens — comfortably inside every supported
 # aux model's window while leaving room for the template + previous summary.
 # Applied AFTER per-message truncation, with head+tail retention and an
-# explicit omitted-middle marker (see _bound_summary_input). This is a
-# prompt-side bound only — NEVER add a max_tokens wire cap on the summary
-# call (see the no-wire-cap contract test in
-# test_compression_small_ctx_threshold_floor.py).
+# explicit omitted-middle marker (see _bound_summary_input). The summary call
+# also gets a dynamic wire-level output reservation so providers do not pair a
+# 40K-token input with their 65K-token default output ceiling.
 _SUMMARY_INPUT_MAX_CHARS = 160_000
+_SUMMARY_OUTPUT_SAFETY_MARGIN_TOKENS = 512
 
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
@@ -3990,6 +3990,43 @@ class ContextCompressor(ContextEngine):
         budget = int(content_tokens * _SUMMARY_RATIO)
         return max(_MIN_SUMMARY_TOKENS, min(budget, self.max_summary_tokens))
 
+    def _compression_output_budget(
+        self,
+        prompt_messages: List[Dict[str, Any]],
+        requested_tokens: int,
+        *,
+        context_length: Optional[int] = None,
+    ) -> int:
+        """Return an output reservation that fits the auxiliary context window.
+
+        OpenAI-compatible providers commonly count ``input + max_tokens``
+        against one context window. Omitting ``max_tokens`` therefore lets a
+        local backend default to the full 65,536-token window, even when the
+        prompt already occupies tens of thousands of tokens. The primary
+        summary model normally is the main model, so its resolved context is
+        known here. A separately configured summary model keeps the existing
+        prompt-level budget until its adapter supplies a context limit.
+        """
+        requested = max(1, int(requested_tokens or 1))
+        context = context_length
+        if context is None:
+            context = getattr(self, "_resolved_context_length", None)
+        prompt_tokens = estimate_messages_tokens_rough(prompt_messages)
+        if not context or context <= 0:
+            return requested
+        available = (
+            int(context)
+            - int(prompt_tokens)
+            - _SUMMARY_OUTPUT_SAFETY_MARGIN_TOKENS
+        )
+        if available <= 0:
+            # The caller's normal compression guard should have bounded the
+            # input already. Returning one token keeps the request explicit
+            # and makes the provider's failure actionable instead of silently
+            # requesting its maximum native output.
+            return 1
+        return max(1, min(requested, available))
+
     # Truncation limits for the summarizer input.  These bound how much of
     # each message the summary model sees — the budget is the *summary*
     # model's context window, not the main model's.
@@ -4814,15 +4851,10 @@ This compaction should PRIORITISE preserving all information related to the focu
                     "api_mode": self.api_mode,
                 },
                 "messages": [{"role": "user", "content": prompt}],
-                # NO max_tokens: the output cap must never truncate a summary.
-                # ``summary_budget`` is prompt-level guidance only ("Target ~N
-                # tokens" above). Most OpenAI-compatible wires already omit the
-                # param (see _build_call_kwargs), but the Anthropic Messages
-                # wire and NVIDIA NIM forward it — a hard cap there cut
-                # summaries mid-section (thinking models burn the cap on
-                # reasoning first), producing truncated/thinking-only
-                # summaries and compaction loops. Omitting lets the adapter
-                # fall back to the model's native output ceiling.
+                # Bound below after the prompt and resolved context are known.
+                # The old omission let local providers default to their full
+                # 65,536-token output ceiling and reject an otherwise usable
+                # compression prompt.
                 # timeout resolved from auxiliary.compression.timeout config by call_llm
             }
             if self.summary_model:
@@ -4843,6 +4875,11 @@ This compaction should PRIORITISE preserving all information related to the focu
                     _aux_context = self.context_length
             except Exception:
                 pass
+            call_kwargs["max_tokens"] = self._compression_output_budget(
+                call_kwargs["messages"],
+                summary_budget,
+                context_length=_aux_context,
+            )
             # Compression is atomic: protect the in-flight summary call from a
             # mid-turn gateway interrupt. Without this, an incoming user message
             # aborts the summary and compression falls back to a degraded static
@@ -4855,9 +4892,6 @@ This compaction should PRIORITISE preserving all information related to the focu
             finally:
                 self._record_aux_compression_call(
                     prompt_messages=call_kwargs["messages"],
-                    # Current main intentionally omits max_tokens from the aux
-                    # call (summary_budget is prompt-level guidance only) —
-                    # use .get() so the telemetry hook never breaks the call.
                     max_tokens=call_kwargs.get("max_tokens"),
                     duration_ms=int((time.monotonic() - _aux_call_start) * 1000),
                     aux_provider=_aux_provider,

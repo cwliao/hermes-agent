@@ -91,15 +91,8 @@ class TestReasoningExcludedFromSummarizer:
 
 
 class TestSummaryBudgetEnvelope:
-    def test_no_max_tokens_wire_cap_on_summary_call(self):
-        """The summary budget is PROMPT GUIDANCE only ("Target ~N tokens").
-
-        A wire-level max_tokens cap truncates summaries mid-section on the
-        Anthropic Messages / NVIDIA NIM paths (which forward the param), and
-        thinking models burn the cap on reasoning before emitting the summary
-        body — producing truncated or thinking-only summaries and compaction
-        loops. The call must NOT carry max_tokens.
-        """
+    def test_summary_call_has_context_fitting_max_tokens(self):
+        """A summary reservation must fit beside the prompt, not default to the window."""
         comp = _make(128_000)
         captured = {}
 
@@ -119,13 +112,23 @@ class TestSummaryBudgetEnvelope:
         with patch.object(cc, "call_llm", side_effect=fake_call_llm):
             out = comp._generate_summary([{"role": "user", "content": "hi"}])
         assert out is not None
-        assert "max_tokens" not in captured
+        assert 1 <= captured["max_tokens"] <= 10_000
+        assert captured["max_tokens"] < comp.context_length
         # The budget still lands as prompt guidance, within the envelope.
         prompt = captured["messages"][0]["content"]
         import re
         m = re.search(r"Target ~(\d+) tokens", prompt)
         assert m, "prompt-level token target guidance missing"
         assert 1_000 <= int(m.group(1)) <= 10_000
+
+    def test_large_65536_window_never_requests_full_default_output(self):
+        comp = _make(65_536)
+        messages = [{"role": "user", "content": "x" * 131_083}]
+        budget = comp._compression_output_budget(messages, 65_536)
+        from agent.model_metadata import estimate_messages_tokens_rough
+        prompt_tokens = estimate_messages_tokens_rough(messages)
+        assert budget < 65_536
+        assert prompt_tokens + budget + 512 <= 65_536
 
     def test_budget_capped_at_10k_even_on_1m_window(self):
         comp = _make(1_000_000)

@@ -846,10 +846,21 @@ def _handle_complete(args: dict, **kw) -> str:
             # _goal_judge_available for why an unavailable judge fails open.
             task = kb.get_task(conn, tid)
             from hermes_cli import kanban_swarm as _kanban_swarm
+            if task:
+                contract = _kanban_swarm.extract_contract(task.body)
+                output_text = result if (result or "").strip() else summary
+                output_meta = _kanban_swarm.swarm_output_metadata(
+                    output_text,
+                    contract=contract,
+                )
+                if output_meta:
+                    metadata = dict(metadata or {})
+                    metadata["output_contract"] = output_meta
             contract_error = _kanban_swarm.validate_completion(
                 task,
                 metadata=metadata,
                 result=result,
+                summary=summary,
             ) if task else None
             if contract_error:
                 return tool_error(f"kanban_complete rejected: {contract_error}")

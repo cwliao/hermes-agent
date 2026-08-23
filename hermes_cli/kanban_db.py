@@ -481,6 +481,22 @@ _CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
 _CTX_MAX_FIELD_BYTES    = 4 * 1024   # 4 KB per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # 8 KB per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # 2 KB per comment
+# Per-field caps do not bound the aggregate: 30 comments plus 10 attempts and
+# several parent handoffs can still produce a prompt large enough to consume a
+# worker's context before it reaches kanban_complete. Keep this conservative
+# character cap below the common 64K-token window while preserving mandatory
+# contract facts separately in build_worker_context().
+_CTX_MAX_TOTAL_CHARS    = 24 * 1024
+
+# A worker needs the Kanban lifecycle surface, file/terminal access for normal
+# task work, skills for its explicit task skills, and web for the common
+# research lane. The profile's full CLI surface is intentionally not inherited
+# by default: memory/browser/computer-use/image/code-execution tool schemas can
+# add tens of thousands of prompt characters before the worker does any work.
+# ``kanban.worker_toolsets`` in the profile config is an explicit override.
+KANBAN_WORKER_DEFAULT_TOOLSETS = (
+    "file", "kanban", "skills", "terminal", "web",
+)
 
 
 def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
@@ -10876,16 +10892,20 @@ def _worker_terminal_timeout_env(
     return str(desired)
 
 
-def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[str]]:
+def _resolve_worker_cli_toolsets(
+    hermes_home: Optional[str],
+    *,
+    task_body: Optional[str] = None,
+) -> Optional[list[str]]:
     """Return the assigned profile's effective CLI toolsets for a worker.
 
     Dispatcher-spawned workers are launched from a long-lived gateway process,
     then the child re-enters the CLI with ``-p <assignee>``. Resolve the
-    assignee profile's CLI tool surface at dispatch time and pass it as an
-    explicit ``--toolsets`` pin so worker startup cannot fall back to a stale
-    root/active-profile config or a profile whose top-level ``toolsets`` entry
-    is only the kanban orchestrator surface. ``model_tools`` still appends the
-    task-scoped kanban lifecycle tools when ``HERMES_KANBAN_TASK`` is set.
+    assignee profile's CLI tool surface at dispatch time and pass a bounded
+    explicit ``--toolsets`` pin. The profile may opt into a different bounded
+    list with ``kanban.worker_toolsets``; otherwise only the normal worker
+    surface is retained. ``model_tools`` still appends task-scoped kanban
+    lifecycle tools when ``HERMES_KANBAN_TASK`` is set.
     """
     if not hermes_home:
         return None
@@ -10897,7 +10917,38 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
         token = set_hermes_home_override(hermes_home)
         try:
             cfg = load_config()
-            toolsets = sorted(_get_platform_tools(cfg, "cli"))
+            available = set(_get_platform_tools(cfg, "cli"))
+            raw_override = (cfg.get("kanban") or {}).get("worker_toolsets")
+            requested = None
+            if task_body:
+                try:
+                    from hermes_cli.kanban_swarm import WORKER_TOOLSETS_PREFIX
+
+                    for line in reversed(task_body.splitlines()):
+                        if line.startswith(WORKER_TOOLSETS_PREFIX):
+                            parsed = json.loads(line[len(WORKER_TOOLSETS_PREFIX):])
+                            if isinstance(parsed, list) and parsed:
+                                requested = [
+                                    str(name).strip()
+                                    for name in parsed
+                                    if str(name).strip()
+                                ]
+                            break
+                except Exception:
+                    requested = None
+            if requested is None:
+                if isinstance(raw_override, list) and raw_override:
+                    requested = [
+                        str(name).strip() for name in raw_override if str(name).strip()
+                    ]
+                else:
+                    requested = list(KANBAN_WORKER_DEFAULT_TOOLSETS)
+            # A worker without the lifecycle tool cannot satisfy the task
+            # contract. Keep it even when a malformed override omits it, but
+            # never add a tool that the profile explicitly disabled.
+            toolsets = [name for name in requested if name in available]
+            if "kanban" in available and "kanban" not in toolsets:
+                toolsets.insert(0, "kanban")
         finally:
             reset_hermes_home_override(token)
         return toolsets or None
@@ -11122,9 +11173,19 @@ def _default_spawn(
     # branch, not a nested one.
     if task.reasoning_effort:
         cmd.extend(["--reasoning", task.reasoning_effort])
-    worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
+    worker_toolsets = _resolve_worker_cli_toolsets(
+        env.get("HERMES_HOME"),
+        task_body=task.body,
+    )
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
+        _log.info(
+            "kanban worker tool budget task=%s profile=%s toolset_count=%d toolsets=%s",
+            task.id,
+            profile_arg,
+            len(worker_toolsets),
+            ",".join(worker_toolsets),
+        )
     cmd.extend([
         "chat",
         "-q", prompt,
@@ -11253,6 +11314,77 @@ def run_daemon(
 # Worker context builder (what a spawned worker sees)
 # ---------------------------------------------------------------------------
 
+def _mandatory_worker_contract_text(task_body: Optional[str]) -> str:
+    """Render swarm lifecycle facts that aggregate trimming must preserve.
+
+    Import locally because ``hermes_cli.kanban_swarm`` builds on this module.
+    The contract is generated from the same validator source used at task
+    creation, so a context cap cannot silently remove the only copy of the
+    ``kanban_complete``/``kanban_block`` protocol.
+    """
+    if not task_body:
+        return ""
+    try:
+        from hermes_cli.kanban_swarm import (
+            _completion_requirements,
+            _contract_line,
+            extract_contract,
+        )
+
+        contract = extract_contract(task_body)
+        if not contract:
+            return ""
+        return (
+            "## Mandatory swarm contract (preserved under context trimming)\n"
+            + _completion_requirements(contract)
+            + "\n"
+            + _contract_line(contract)
+        )
+    except Exception as exc:
+        _log.debug("kanban worker contract preservation skipped (%s)", exc)
+        return ""
+
+
+def _bound_worker_context(text: str, *, mandatory: str = "") -> str:
+    """Bound a rendered worker context while retaining recent and mandatory data."""
+    if len(text) <= _CTX_MAX_TOTAL_CHARS and not mandatory:
+        return text
+    marker_template = (
+        "\n\n...[worker context truncated: omitted {omitted:,} chars]...\n\n"
+    )
+    marker = marker_template.format(omitted=max(0, len(text)))
+    # The mandatory block is generated from the validator contract and is
+    # deliberately placed between the old head and recent tail. It is allowed
+    # to duplicate a contract already present in ``text``; correctness wins
+    # over a few characters, and the result remains bounded deterministically.
+    reserved = len(marker) + len(mandatory) + 2
+    if reserved >= _CTX_MAX_TOTAL_CHARS:
+        # Current contracts are much smaller than this, but fail closed if a
+        # future contract grows unexpectedly: retain the beginning and the
+        # contract itself rather than return an unbounded prompt.
+        return (mandatory or text)[:_CTX_MAX_TOTAL_CHARS]
+    available = _CTX_MAX_TOTAL_CHARS - reserved
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    omitted = max(0, len(text) - head_chars - tail_chars)
+    marker = marker_template.format(omitted=omitted)
+    available = max(_CTX_MAX_TOTAL_CHARS - len(marker) - len(mandatory) - 2, 0)
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    bounded = (
+        text[:head_chars].rstrip()
+        + marker
+        + (mandatory.strip() + "\n\n" if mandatory.strip() else "")
+        + text[-tail_chars:].lstrip()
+    )
+    _log.info(
+        "kanban worker context budget chars_before=%d chars_after=%d mandatory_contract=%s",
+        len(text),
+        len(bounded),
+        bool(mandatory),
+    )
+    return bounded[:_CTX_MAX_TOTAL_CHARS]
+
 def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     """Return the full text a worker should read to understand its task.
 
@@ -11272,9 +11404,10 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
       6. Comment thread (most recent ``_CTX_MAX_COMMENTS`` shown, older
          collapsed).
 
-    All caps exist so worker prompts stay bounded even on pathological
-    boards (retry-heavy tasks, comment storms). The per-field char cap
-    prevents a single 1 MB summary from dominating context.
+    Per-field caps prevent a single 1 MB summary from dominating context;
+    the aggregate cap below is the final guard for retry-heavy tasks, comment
+    storms, and multi-parent swarms. Swarm lifecycle/contract facts are
+    regenerated and preserved after trimming.
     """
     task = get_task(conn, task_id)
     if not task:
@@ -11498,7 +11631,11 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
             lines.append("")
 
-    return "\n".join(lines).rstrip() + "\n"
+    rendered = "\n".join(lines).rstrip() + "\n"
+    return _bound_worker_context(
+        rendered,
+        mandatory=_mandatory_worker_contract_text(task.body),
+    )
 
 
 # ---------------------------------------------------------------------------

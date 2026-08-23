@@ -2418,10 +2418,21 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         for tid in ids:
             task = kb.get_task(conn, tid)
+            if task:
+                contract = ks.extract_contract(task.body)
+                output_text = args.result if (args.result or "").strip() else summary
+                output_meta = ks.swarm_output_metadata(
+                    output_text,
+                    contract=contract,
+                )
+                if output_meta:
+                    metadata = dict(metadata or {})
+                    metadata["output_contract"] = output_meta
             reason = ks.validate_completion(
                 task,
                 metadata=metadata,
                 result=args.result,
+                summary=summary,
             ) if task else None
             if reason:
                 failed.append(tid)

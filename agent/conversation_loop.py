@@ -94,7 +94,9 @@ from agent.model_replay_guard import (
     ReplayEvidence,
     TOOL_EXECUTION_VERSION,
     find_candidate,
+    find_baseline_less_candidate,
     normalize_replay_text,
+    replay_tool_call_is_safe,
     tool_registry_digest,
 )
 from agent.trajectory import has_incomplete_scratchpad
@@ -397,6 +399,21 @@ def _replay_guard_try_finalization(
         idempotent_tools=idempotent,
         mutating_tools=mutating,
     )
+    candidate_reason = "exact_tool_backed_replay_candidate"
+    if candidate is None:
+        # A compressed lineage may contain only copied answers and therefore
+        # no trustworthy baseline.  For the exact Telegram Webboard action,
+        # require one bounded fresh execution instead of silently accepting a
+        # plausible-looking answer with no live report receipt.
+        candidate = find_baseline_less_candidate(
+            messages,
+            current_user_idx,
+            final_response,
+            agent,
+            evidence,
+        )
+        if candidate is not None:
+            candidate_reason = "baseline_missing_exact_live_report_action"
     if candidate is None:
         _replay_guard_audit(
             agent,
@@ -480,7 +497,7 @@ def _replay_guard_try_finalization(
     _replay_guard_audit(
         agent,
         decision="nudge",
-        reason="exact_tool_backed_replay_candidate",
+        reason=candidate_reason,
         turn_id=turn_id,
         current_user_idx=current_user_idx,
         message_count=len(messages),
@@ -7328,7 +7345,12 @@ def run_conversation(
                     )
                     _replay_receipt_valid = (
                         all(_replay_names)
-                        and all(_name in _replay_idempotent and _name not in _replay_mutating for _name in _replay_names)
+                        and all(
+                            replay_tool_call_is_safe(
+                                _call, _replay_idempotent, _replay_mutating
+                            )
+                            for _call in assistant_message.tool_calls
+                        )
                         and all(_replay_ids)
                         and len(set(_replay_ids)) == len(_replay_ids)
                     )

@@ -1,11 +1,14 @@
 from types import SimpleNamespace
 
+from agent.conversation_loop import _replay_guard_try_finalization
 from agent.model_replay_guard import (
     ReplayEvidence,
     TOOL_EXECUTION_VERSION,
     action_identity_digest,
+    find_baseline_less_candidate,
     find_candidate,
     normalize_replay_text,
+    replay_tool_call_is_safe,
 )
 from agent.tool_guardrails import IDEMPOTENT_TOOL_NAMES, MUTATING_TOOL_NAMES
 from hermes_state import SessionDB
@@ -148,6 +151,87 @@ def test_candidate_finds_tool_backed_answer_across_compression_duplicates():
     assert candidate is not None
     assert candidate.previous_tool_names == ("terminal",)
     assert candidate.recovery_safe
+
+
+def test_baseline_less_webboard_requires_fresh_execution():
+    agent = _agent(explicit=False)
+    agent.tools = [{"function": {"name": "terminal"}}]
+    stale = "Webboard report: timestamp 08:03:29 with AGENTS.md content"
+    candidate = find_baseline_less_candidate(
+        [{"role": "user", "content": "Webboard"}],
+        0,
+        stale,
+        agent,
+        _evidence(agent),
+    )
+    assert candidate is not None
+    assert candidate.baseline_missing
+    assert candidate.previous_answer == ""
+    assert candidate.recovery_safe
+
+
+def test_baseline_less_guard_does_not_classify_arbitrary_prose():
+    agent = _agent(explicit=False)
+    agent.tools = [{"function": {"name": "terminal"}}]
+    assert find_baseline_less_candidate(
+        [{"role": "user", "content": "give me a timestamp"}],
+        0,
+        "timestamp: 08:03:29",
+        agent,
+        _evidence(agent),
+    ) is None
+
+
+def test_webboard_read_only_receipt_is_safe_even_if_terminal_is_mutating():
+    exact = {
+        "id": "webboard-call",
+        "function": {
+            "name": "terminal",
+            "arguments": '{"command":"bash ~/.hermes/scripts/hermes_webboard_report.sh"}',
+        },
+    }
+    arbitrary = {
+        "id": "other-call",
+        "function": {
+            "name": "terminal",
+            "arguments": '{"command":"rm -f /tmp/example"}',
+        },
+    }
+    assert replay_tool_call_is_safe(exact, frozenset(), frozenset({"terminal"}))
+    assert not replay_tool_call_is_safe(arbitrary, frozenset(), frozenset({"terminal"}))
+
+
+def test_conversation_loop_dispatches_baseline_less_webboard_nudge():
+    class FakeDB:
+        def claim_model_replay_attempt(self, **kwargs):
+            return {"claim_token": kwargs["claim_token"], "state": "nudge_claimed"}
+
+        def transition_model_replay_attempt(self, **kwargs):
+            return True
+
+    agent = _agent(explicit=False)
+    agent.tools = [{"function": {"name": "terminal"}}]
+    agent._session_db = FakeDB()
+    agent._model_replay_guard_phase = ""
+    agent._model_replay_guard_claim = None
+    agent._model_replay_guard_previous_answer = ""
+    agent._emit_status = lambda _message: None
+    agent._session_messages = []
+    messages = [{"role": "user", "content": "Webboard"}]
+    final_msg = {"role": "assistant", "content": "stale 08:03:29"}
+
+    outcome = _replay_guard_try_finalization(
+        agent,
+        messages,
+        0,
+        agent._current_turn_id,
+        "stale 08:03:29",
+        final_msg,
+    )
+
+    assert outcome == "nudge"
+    assert agent._model_replay_guard_phase == "nudge_dispatched"
+    assert messages[-1]["_model_replay_guard_synthetic"]
 
 
 def test_candidate_blocks_missing_tool_receipt():

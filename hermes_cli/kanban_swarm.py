@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+import re
 import sqlite3
 import time
 from typing import Any, Iterable, Optional
@@ -25,6 +26,7 @@ from hermes_cli import kanban_db as kb
 
 BLACKBOARD_PREFIX = "[swarm:blackboard] "
 CONTRACT_PREFIX = "[swarm:contract] "
+WORKER_TOOLSETS_PREFIX = "[kanban:worker_toolsets] "
 MULTI_AGENT_LANE_IDS = ("native_hermes", "claude", "grok", "agy")
 REQUIRED_LANE_ID = "native_hermes"
 EXTERNAL_LANE_IDS = ("claude", "grok", "agy")
@@ -75,6 +77,13 @@ DEFAULT_WORKER_MAX_RUNTIME_SECONDS = 300
 DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS = 600
 DEFAULT_GOAL_MAX_TURNS = 5
 
+_INTERNAL_LENGTH_MARKER_RE = re.compile(r"(?:（\s*\d+\s*字\s*）|\(\s*\d+\s*字\s*\))")
+_QUOTE_PAIRS = (("「", "」"), ("“", "”"), ("（", "）"), ("(", ")"))
+DEFAULT_OUTPUT_CONTRACT_POLICY = {
+    "reject_internal_length_marker": True,
+    "require_balanced_quotes": True,
+}
+
 
 def _default_worker_max_runtime_seconds(lane_id: Optional[str]) -> int:
     """Lane-aware fallback used only when the caller leaves the swarm-wide
@@ -97,6 +106,7 @@ class SwarmWorkerSpec:
     max_runtime_seconds: Optional[int] = None
     lane_id: Optional[str] = None
     preflight_skill_id: str = ""
+    toolsets: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -227,6 +237,7 @@ def _completion_requirements(contract: dict[str, Any]) -> str:
         f'  role = "{role}"',
         f'  root_id = "{contract.get("root_id")}"',
     ]
+    output_policy = contract.get("output_policy") or {}
     if role == "worker":
         lines += [
             f'  lane_id = "{contract.get("expected_lane_id")}"',
@@ -234,6 +245,10 @@ def _completion_requirements(contract: dict[str, Any]) -> str:
             '  outcome = "completed"',
             "  verified_clean = true",
         ]
+        if output_policy.get("reject_internal_length_marker"):
+            lines.append("  output text must not contain an internal length marker")
+        if output_policy.get("require_balanced_quotes"):
+            lines.append("  output text must not contain unbalanced quotes/brackets")
     elif role == "verifier":
         expected = contract.get("expected_lane_count")
         lines += [
@@ -248,12 +263,46 @@ def _completion_requirements(contract: dict[str, Any]) -> str:
             "  result_present = true",
             "  and the task result itself must be non-empty",
         ]
+        if output_policy.get("reject_internal_length_marker"):
+            lines.append("  result text must not contain an internal length marker")
+        if output_policy.get("require_balanced_quotes"):
+            lines.append("  result text must not contain unbalanced quotes/brackets")
     lines.append(
         "Send these as completion metadata. Do not complete with a subset."
     )
     lines.append("")
     lines.append(_completion_call_example(contract))
     return "\n".join(lines)
+
+
+def validate_swarm_output_text(
+    text: Optional[str], *, contract: Optional[dict[str, Any]]
+) -> Optional[str]:
+    """Validate only the narrow output policy attached to swarm contracts."""
+    if not contract or contract.get("role") not in {"worker", "synthesizer"}:
+        return None
+    value = (text or "").strip()
+    if not value:
+        return "swarm output text is empty"
+    policy = contract.get("output_policy") or {}
+    if policy.get("reject_internal_length_marker") and _INTERNAL_LENGTH_MARKER_RE.search(value):
+        return "swarm output contains an internal length marker"
+    if policy.get("require_balanced_quotes"):
+        for opening, closing in _QUOTE_PAIRS:
+            if value.count(closing) != value.count(opening):
+                side = "closing" if value.count(closing) > value.count(opening) else "opening"
+                return f"swarm output has an unmatched {side} {closing if side == 'closing' else opening!r}"
+    return None
+
+
+def swarm_output_metadata(
+    text: Optional[str], *, contract: Optional[dict[str, Any]]
+) -> Optional[dict[str, Any]]:
+    if not contract or contract.get("role") not in {"worker", "synthesizer"}:
+        return None
+    value = (text or "").strip()
+    reason = validate_swarm_output_text(value, contract=contract)
+    return {"char_count": len(value), "format_valid": reason is None, "validation_reason": reason or "ok"}
 
 
 def _completion_call_example(contract: dict[str, Any]) -> str:
@@ -338,6 +387,7 @@ def extract_contract(body: Optional[str]) -> Optional[dict[str, Any]]:
 
 def validate_completion(
     task: Any, *, metadata: Optional[dict[str, Any]], result: Optional[str] = None,
+    summary: Optional[str] = None,
 ) -> Optional[str]:
     """Return a rejection reason for a contract-bound task, else ``None``."""
     contract = extract_contract(getattr(task, "body", None))
@@ -349,6 +399,11 @@ def validate_completion(
         return f"swarm {role} completion requires metadata role={role!r}"
     if metadata.get("root_id") != contract.get("root_id"):
         return "swarm completion root_id does not match the task contract"
+    output_text = result if (result or "").strip() else summary
+    if (output_text or "").strip():
+        output_reason = validate_swarm_output_text(output_text, contract=contract)
+        if output_reason:
+            return output_reason
     if role == "worker":
         if metadata.get("lane_id") != contract.get("expected_lane_id"):
             return "worker lane_id does not match the expected lane"
@@ -661,11 +716,18 @@ def _create_swarm_uncommitted(
             contract = {
                 "version": 1, "role": "worker", "root_id": root,
                 "expected_lane_id": worker_lane, "preflight_skill_id": expected_skill,
+                "output_policy": dict(DEFAULT_OUTPUT_CONTRACT_POLICY),
             }
         worker_body = (spec.body or "") + context_suffix
         if contract:
             worker_body += "\n" + _completion_requirements(contract)
             worker_body += "\n" + _contract_line(contract)
+        if spec.toolsets:
+            requested_toolsets = [str(name).strip() for name in spec.toolsets if str(name).strip()]
+            if requested_toolsets:
+                worker_body += "\n" + WORKER_TOOLSETS_PREFIX + json.dumps(
+                    requested_toolsets, ensure_ascii=False
+                )
         worker_id = kb.create_task(
             conn,
             title=spec.title,
@@ -740,6 +802,7 @@ def _create_swarm_uncommitted(
             "role": "synthesizer",
             "root_id": root,
             "verifier_id": verifier,
+            "output_policy": dict(DEFAULT_OUTPUT_CONTRACT_POLICY),
         }
         synthesizer_body += "\n" + _completion_requirements(synthesizer_contract)
         synthesizer_body += "\n" + _contract_line(synthesizer_contract)

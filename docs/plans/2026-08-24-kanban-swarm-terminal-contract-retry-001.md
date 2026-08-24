@@ -1,6 +1,6 @@
 # KANBAN-SWARM-TERMINAL-CONTRACT-RETRY-001
 
-Status: IMPLEMENTED_PENDING_DEPLOY
+Status: DEPLOYED_PENDING_TELEGRAM_E2E
 Date: 2026-08-24
 Type: ticket
 Target repo: hermes-agent
@@ -49,7 +49,9 @@ incident without durable task/artifact evidence.
 - [x] Regression test covers role, root, lane, skill, output, and verification
   defects in one response.
 - [x] Run the focused test suite: 37 focused + 78 cross-review tests passed.
-- [ ] Deploy the release and run one real Telegram retry.
+- [x] Deploy immutable release `v2026.8.24-kanban-swarm-contract-retry-c53d2ac43a`
+      with pinned venv `gateway-c53d2ac43a` and effective systemd drop-in 87.
+- [ ] Run one real Telegram retry.
 - [ ] Verify task runs, verifier/synthesizer execution, durable attachments,
   and outbound Telegram delivery against the Kanban DB/logs.
 

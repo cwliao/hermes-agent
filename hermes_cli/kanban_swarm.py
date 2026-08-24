@@ -149,6 +149,11 @@ def _swarm_context(root_id: str, goal: str) -> str:
         "\n\n## Swarm protocol\n"
         f"- Swarm root / shared blackboard: `{root_id}`.\n"
         "- Read sibling/parent handoffs from Kanban context before working.\n"
+        "- Treat the Goal line as authoritative. Do not invent extra deliverables "
+        "or ask the user for PNGs, diagrams, files, or other artifacts unless "
+        "the goal explicitly requests them. For a text-only goal such as "
+        "autumn homophone jokes, return text and complete; an optional artifact "
+        "is never a blocker.\n"
         "- Put machine-readable facts in completion metadata.\n"
         "- To post cross-worker notes on the shared blackboard, call the "
         f'`kanban_comment` tool with task_id="{root_id}" and your note as '

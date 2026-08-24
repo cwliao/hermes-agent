@@ -91,6 +91,29 @@ agent:
         assert required in pinned
 
 
+def test_worker_toolset_resolution_discovers_plugins_before_filtering(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / ".hermes"
+    root.mkdir()
+    root.joinpath("config.yaml").write_text("toolsets:\n  - kanban\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    import hermes_cli.plugins as plugins
+    from hermes_cli import kanban_db as kb
+
+    calls = []
+    monkeypatch.setattr(
+        plugins,
+        "discover_plugins",
+        lambda: calls.append(True),
+    )
+
+    kb._resolve_worker_cli_toolsets(str(root))
+
+    assert calls
+
+
 def test_default_worker_toolsets_include_mermaid_renderer_when_enabled(
     monkeypatch, tmp_path
 ):

@@ -543,6 +543,31 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
         conn2.close()
 
 
+def test_goal_mode_transport_failed_judge_does_not_wedge_completion(monkeypatch):
+    """An unavailable auxiliary judge must not loop a valid handoff forever."""
+    from types import SimpleNamespace
+    from tools import kanban_tools as kt
+
+    task = SimpleNamespace(
+        goal_mode=True,
+        title="swarm worker",
+        body="complete the lane handoff",
+    )
+    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+    monkeypatch.setattr(
+        "tools.kanban_tools.judge_goal",
+        lambda **kwargs: (
+            "continue",
+            "judge error: APITimeoutError",
+            False,
+            None,
+            True,
+        ),
+    )
+
+    assert kt._goal_mode_handoff_rejection(task, "lane handoff") is None
+
+
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need clarification"})

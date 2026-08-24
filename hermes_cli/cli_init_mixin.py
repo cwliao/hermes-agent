@@ -214,6 +214,26 @@ class CLIInitMixin:
 
         if toolsets and "all" not in toolsets and "*" not in toolsets:
             # MCP server names only resolve after discover_mcp_tools runs; skip them here.
+            # Plugin toolsets register in the live registry during discovery.
+            # Dispatcher-spawned workers pass an explicit bounded toolset list,
+            # so discover before validating it; otherwise a valid plugin name
+            # such as mermaid_renderer is reported as unknown on cold startup.
+            # Preserve the Termux prompt-first path. Kanban workers carry an
+            # explicit task marker and must validate their bounded plugin
+            # toolsets synchronously even if deferred startup leaked through.
+            if (
+                os.environ.get("HERMES_DEFER_AGENT_STARTUP") != "1"
+                or os.environ.get("HERMES_KANBAN_TASK")
+            ):
+                try:
+                    from hermes_cli.plugins import discover_plugins
+
+                    discover_plugins()
+                except Exception:
+                    logger.debug(
+                        "plugin discovery failed before toolset validation",
+                        exc_info=True,
+                    )
             mcp_names = set((CLI_CONFIG.get("mcp_servers") or {}).keys())
             # Plugin toolsets register during plugin discovery, which startup runs on a background thread
             # that has not necessarily landed yet; names it declared (or the previous launch persisted, which

@@ -20,6 +20,7 @@ import json
 import re
 import sqlite3
 import time
+import unicodedata
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
@@ -83,6 +84,78 @@ DEFAULT_OUTPUT_CONTRACT_POLICY = {
     "reject_internal_length_marker": True,
     "require_balanced_quotes": True,
 }
+
+# Conservative high-signal Simplified -> Traditional pairs. This is a
+# rejection gate, not an automatic converter: if a synthesizer emits one of
+# these glyphs, the completion is retried instead of silently rewriting the
+# user's deliverable.
+_SIMPLIFIED_TO_TRADITIONAL = str.maketrans({
+    "\u5199": "\u5beb",  # 写 -> 寫
+    "\u8bdd": "\u8a71",  # 话 -> 話
+    "\u53cc": "\u96d9",  # 双 -> 雙
+    "\u5173": "\u95dc",  # 关 -> 關
+    "\u9f9f": "\u9f9c",  # 龟 -> 龜
+    "\u5417": "\u55ce",  # 吗 -> 嗎
+    "\u4e70": "\u8cb7",  # 买 -> 買
+    "\u94f6": "\u9280",  # 银 -> 銀
+    "\u5458": "\u54e1",  # 员 -> 員
+    "\u8bf4": "\u8aaa",  # 说 -> 說
+    "\u5356": "\u8ce3",  # 卖 -> 賣
+    "\u6e29": "\u6eab",  # 温 -> 溫
+    "\u542c": "\u807d",  # 听 -> 聽
+    "\u89c1": "\u898b",  # 见 -> 見
+    "\u8bcd": "\u8a5e",  # 词 -> 詞
+    "\u70ed": "\u71b1",  # 热 -> 熱
+    "\u732b": "\u8c93",  # 猫 -> 貓
+    "\u5f53": "\u7576",  # 当 -> 當
+    "\u4f1a": "\u6703",  # 会 -> 會
+    "\u7ed3": "\u7d50",  # 结 -> 結
+    "\u5934": "\u982d",  # 头 -> 頭
+})
+
+def _simplified_glyphs(value: str) -> set[str]:
+    return {char for char in value if ord(char) in _SIMPLIFIED_TO_TRADITIONAL}
+
+
+def _is_han(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2FA1F
+    )
+
+
+def _goal_anchor_terms(goal: str) -> list[str]:
+    """Extract conservative subject anchors from a Chinese homophone goal."""
+    marker = chr(0x8ae7) + chr(0x97f3)
+    matches = re.findall(r"([\u3400-\u9fff]{1,8})" + marker, goal or "")
+    terms: list[str] = []
+    for value in reversed(matches):
+        if chr(0x5c0f) in value:
+            value = value.rsplit(chr(0x5c0f), 1)[-1]
+        value = value[-4:].strip()
+        if value and value not in terms:
+            terms.append(value)
+    return terms[:2]
+
+
+def _traditional_unicode_issue(value: str) -> Optional[str]:
+    if "�" in value:
+        return (
+            "synthesizer result contains Unicode replacement characters; "
+            "regenerate clean Traditional Chinese text"
+        )
+    for char in value:
+        if ord(char) <= 0x7F or _is_han(char):
+            continue
+        if unicodedata.category(char).startswith("L"):
+            return (
+                "synthesizer result contains a non-Chinese writing system; "
+                "use Traditional Chinese (Taiwan) only"
+            )
+    return None
 
 
 def _default_worker_max_runtime_seconds(lane_id: Optional[str]) -> int:
@@ -274,6 +347,16 @@ def _completion_requirements(contract: dict[str, Any]) -> str:
             lines.append("  result text must not contain an internal length marker")
         if output_policy.get("require_balanced_quotes"):
             lines.append("  result text must not contain unbalanced quotes/brackets")
+        if output_policy.get("required_language") == "zh-Hant-TW":
+            lines.append(
+                "  result text must use Traditional Chinese (Taiwan) only; "
+                "do not output Simplified Chinese"
+            )
+        if contract.get("goal_anchor_terms"):
+            lines.append(
+                "  result text must reference the current goal anchor(s): "
+                + ", ".join(str(term) for term in contract["goal_anchor_terms"])
+            )
     lines.append(
         "  artifact metadata is optional; omit artifacts unless the task explicitly requests a file deliverable"
     )
@@ -305,6 +388,27 @@ def validate_swarm_output_text(
                 and 'completion metadata provided' in lower):
             return ('synthesizer result is status-only; include the exact final'
                     ' user-facing deliverable text')
+        if policy.get("required_language") == "zh-Hant-TW":
+            unicode_issue = _traditional_unicode_issue(value)
+            if unicode_issue:
+                return unicode_issue
+            if _simplified_glyphs(value):
+                return (
+                    "synthesizer result contains Simplified Chinese; use "
+                    "Traditional Chinese (Taiwan) only"
+                )
+            if not any("\u4e00" <= char <= "\u9fff" for char in value):
+                return "synthesizer result must contain Traditional Chinese text"
+            anchor_terms = [
+                str(term).strip()
+                for term in (contract.get("goal_anchor_terms") or [])
+                if str(term).strip()
+            ]
+            if anchor_terms and not any(term in value for term in anchor_terms):
+                return (
+                    "synthesizer result does not reference the current swarm "
+                    "goal; regenerate for the current request"
+                )
     if policy.get("reject_internal_length_marker") and _INTERNAL_LENGTH_MARKER_RE.search(value):
         return "swarm output contains an internal length marker"
     if policy.get("require_balanced_quotes"):
@@ -381,7 +485,7 @@ def _completion_call_example(contract: dict[str, Any]) -> str:
         }
         example = {
             "task_id": "<this task's id>",
-            "result": "<your final, non-empty deliverable text>",
+            "result": "冬天的笑話：雪人說，今天真冷。",
             "metadata": metadata,
         }
     return (
@@ -824,10 +928,14 @@ def _create_swarm_uncommitted(
         goal_mode=lane_mode,
         goal_max_turns=goal_max_turns if lane_mode else None,
         **common,
+        max_runtime_seconds=DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
     )
     synthesizer_body = (
         "Synthesize the verified worker outputs into the final deliverable. "
-        "Do not start until the verifier has passed the gate."
+        "Do not start until the verifier has passed the gate. "
+        "Return only coherent, user-facing Traditional Chinese (Taiwan) text; "
+        "do not output Simplified Chinese, status metadata, invented artifacts, "
+        "or stale task IDs."
         + context_suffix
     )
     if lane_mode:
@@ -836,7 +944,11 @@ def _create_swarm_uncommitted(
             "role": "synthesizer",
             "root_id": root,
             "verifier_id": verifier,
-            "output_policy": dict(DEFAULT_OUTPUT_CONTRACT_POLICY),
+            "output_policy": {
+                **DEFAULT_OUTPUT_CONTRACT_POLICY,
+                "required_language": "zh-Hant-TW",
+            },
+            "goal_anchor_terms": _goal_anchor_terms(goal),
         }
         synthesizer_body += "\n" + _completion_requirements(synthesizer_contract)
         synthesizer_body += "\n" + _contract_line(synthesizer_contract)
@@ -848,6 +960,7 @@ def _create_swarm_uncommitted(
         parents=[verifier],
         priority=priority,
         skills=["humanizer"],
+        max_runtime_seconds=DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
         goal_mode=lane_mode,
         goal_max_turns=goal_max_turns if lane_mode else None,
         **common,

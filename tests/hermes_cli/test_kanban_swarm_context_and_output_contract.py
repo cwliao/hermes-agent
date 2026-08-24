@@ -103,7 +103,67 @@ def test_swarm_output_validation_is_narrow_and_auditable():
     )
     assert validate_swarm_output_text(
         "Joke A: 秋天的葉子會變色。\nJoke B: 秋風一吹，笑聲就落葉。",
-        contract=synthesizer_contract,
+        contract={**synthesizer_contract, "output_policy": {
+            **synthesizer_contract["output_policy"],
+            "required_language": "zh-Hant-TW",
+        }},
+    ) is None
+    assert validate_swarm_output_text(
+        "故意写假话：冬季双关冷笑话。",
+        contract={**synthesizer_contract, "output_policy": {
+            **synthesizer_contract["output_policy"],
+            "required_language": "zh-Hant-TW",
+        }},
+    ) == (
+        "synthesizer result contains Simplified Chinese; use "
+        "Traditional Chinese (Taiwan) only"
+    )
+
+
+def test_synthesizer_rejects_corrupted_and_mixed_script_text():
+    contract = {
+        "role": "synthesizer",
+        "root_id": "t_root",
+        "output_policy": {"required_language": "zh-Hant-TW"},
+    }
+    assert validate_swarm_output_text(
+        "純貓揄竿� পরিচিত",
+        contract=contract,
+    ) == (
+        "synthesizer result contains Unicode replacement characters; "
+        "regenerate clean Traditional Chinese text"
+    )
+    assert validate_swarm_output_text(
+        "純貓揄竿 পরিচিত",
+        contract=contract,
+    ) == (
+        "synthesizer result contains a non-Chinese writing system; "
+        "use Traditional Chinese (Taiwan) only"
+    )
+
+
+def test_synthesizer_rejects_result_for_previous_goal():
+    contract = {
+        "role": "synthesizer",
+        "root_id": "t_root",
+        "goal_anchor_terms": [chr(0x72d7)],
+        "output_policy": {"required_language": "zh-Hant-TW"},
+    }
+    old_result = (
+        chr(0x665a) + chr(0x5b89) + chr(0x8ae7) + chr(0x97f3) + ": "
+        + "1. " + chr(0x96ea) + chr(0x4e4b) + chr(0x9999)
+        + chr(0x53f0) + chr(0x7063) + " 2. " + chr(0x51ac)
+        + chr(0x591c) + chr(0x88d4) + "3. " + chr(0x7236)
+        + chr(0x8a9e) + chr(0x51b0) + "4. " + chr(0x7236)
+        + chr(0x7b56) + chr(0x5177)
+    )
+    assert validate_swarm_output_text(old_result, contract=contract) == (
+        "synthesizer result does not reference the current swarm "
+        "goal; regenerate for the current request"
+    )
+    assert validate_swarm_output_text(
+        chr(0x5c0f) + chr(0x72d7) + chr(0x8ae7) + chr(0x97f3) + chr(0x6897),
+        contract=contract,
     ) is None
 
 

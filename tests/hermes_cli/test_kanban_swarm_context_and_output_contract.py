@@ -100,7 +100,7 @@ def test_completion_rejects_malformed_worker_summary_without_rewriting(tmp_path)
             "role": "worker",
             "root_id": created.root_id,
             "lane_id": "claude",
-            "preflight_skill_id": "claude-code",
+            "preflight_skill_id": contract["preflight_skill_id"],
             "outcome": "completed",
             "verified_clean": True,
         }
@@ -111,5 +111,34 @@ def test_completion_rejects_malformed_worker_summary_without_rewriting(tmp_path)
         )
         assert reason == "swarm output contains an internal length marker"
         assert contract["role"] == "worker"
+    finally:
+        conn.close()
+
+
+def test_completion_reports_all_contract_defects_in_one_retry(tmp_path):
+    """A bad first call must not make the model repair one field per turn."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Generate four bounded autumn jokes.",
+            workers=_lane_specs(),
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+        )
+        task = kb.get_task(conn, created.worker_ids[1])
+        reason = validate_completion(
+            task,
+            metadata={"role": "wrong", "lane_id": "wrong"},
+            summary="秋天的葉子很會變色（30字）",
+        )
+        assert reason is not None
+        assert reason.startswith("swarm completion rejected:")
+        assert "metadata role='worker'" in reason
+        assert "root_id does not match" in reason
+        assert "worker lane_id does not match" in reason
+        assert "preflight_skill_id" in reason
+        assert "verified_clean=true" in reason
+        assert "copy-pasteable example" in reason
     finally:
         conn.close()

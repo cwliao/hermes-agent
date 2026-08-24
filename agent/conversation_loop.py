@@ -8584,6 +8584,7 @@ def run_conversation(
                 # receipt before accepting task IDs or lane results. This is
                 # deliberately separate from the stale-answer replay guard:
                 # no prior answer is needed for a fabricated execution plan.
+                _kanban_guard_original_content = final_msg.get("content")
                 _kanban_execution_outcome = _kanban_execution_guard_try_finalization(
                     agent,
                     messages,
@@ -8592,6 +8593,17 @@ def run_conversation(
                     final_msg,
                     append_message,
                 )
+                # The execution guard mutates final_msg for fail-closed
+                # pending/blocked outcomes. final_response is a separate
+                # variable used by turn_finalizer and the gateway; leaving it
+                # unchanged would still deliver model prose (often stale
+                # history) even though the transcript contains the guarded
+                # replacement. Keep both representations aligned.
+                if (
+                    _kanban_execution_outcome != "nudge"
+                    and final_msg.get("content") != _kanban_guard_original_content
+                ):
+                    final_response = str(final_msg.get("content") or "")
                 if _kanban_execution_outcome == "nudge":
                     final_response = None
                     continue

@@ -101,6 +101,14 @@ _SESSION_UI_SESSION_ID: ContextVar = ContextVar("HERMES_UI_SESSION_ID", default=
 # private-chat topic (those lanes route only with thread id + reply anchor).
 _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", default=_UNSET)
 
+# Exact user text for the currently executing agent turn. This is deliberately
+# turn-local rather than an environment variable: Kanban mutation tools must
+# not inherit a previous chat turn's goal when a long-lived gateway agent is
+# reused for a new message.
+_CURRENT_TURN_USER_MESSAGE: ContextVar[str] = ContextVar(
+    "HERMES_CURRENT_TURN_USER_MESSAGE", default=""
+)
+
 _SESSION_PROFILE: ContextVar = ContextVar("HERMES_SESSION_PROFILE", default=_UNSET)
 _BROWSER_CONTROL_PRINCIPAL: ContextVar = ContextVar(
     "HERMES_BROWSER_CONTROL_PRINCIPAL", default=_UNSET
@@ -202,6 +210,26 @@ def set_current_session_id(session_id: str) -> None:
         pass
 
     os.environ["HERMES_SESSION_ID"] = session_id
+
+
+def set_current_turn_user_message(message: Any) -> None:
+    """Bind the authoritative user text for the current agent turn."""
+    if isinstance(message, str):
+        text = message
+    elif isinstance(message, list):
+        text = "\n".join(
+            str(item.get("text") or item.get("content") or "")
+            for item in message
+            if isinstance(item, dict)
+        )
+    else:
+        text = "" if message is None else str(message)
+    _CURRENT_TURN_USER_MESSAGE.set(text)
+
+
+def get_current_turn_user_message() -> str:
+    """Return the authoritative user text for the current agent turn."""
+    return _CURRENT_TURN_USER_MESSAGE.get()
 
 
 @contextmanager
@@ -323,6 +351,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_ID,
         _SESSION_UI_SESSION_ID,
         _SESSION_MESSAGE_ID,
+        _CURRENT_TURN_USER_MESSAGE,
         _SESSION_PROFILE,
         _BROWSER_CONTROL_PRINCIPAL,
         _BROWSER_CONTROL_TRANSPORT_FAMILY,

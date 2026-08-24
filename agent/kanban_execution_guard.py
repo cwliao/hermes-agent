@@ -40,6 +40,12 @@ KANBAN_EXECUTION_BLOCKED = (
     "board and retry after the Kanban tool is available."
 )
 
+KANBAN_EXECUTION_PENDING = (
+    "The four-lane Kanban swarm was created, but the workflow is not complete "
+    "yet. The verifier and synthesizer must finish and produce a non-empty "
+    "result before a final answer can be reported."
+)
+
 
 def _text(value: Any) -> str:
     if isinstance(value, str):
@@ -152,6 +158,45 @@ def _successful_swarm_payload(messages: Sequence[Mapping[str, Any]], current_use
     return None
 
 
+def _read_swarm_completion_state(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Read live downstream state before allowing a launch receipt to look final.
+
+    A successful kanban_swarm receipt proves graph creation only. When the
+    gateway can read the referenced board, a final user-facing response is
+    accepted as complete only after the synthesizer is done with a non-empty
+    result. Unknown test/fallback boards return None and retain the historical
+    receipt behavior.
+    """
+    try:
+        from hermes_cli import kanban_db as kb
+
+        conn = kb.connect()
+        try:
+            verifier = kb.get_task(conn, str(payload["verifier_id"]))
+            synthesizer = kb.get_task(conn, str(payload["synthesizer_id"]))
+            if verifier is None or synthesizer is None:
+                return {
+                    "complete": False,
+                    "verifier_status": "unknown",
+                    "synthesizer_status": "unknown",
+                }
+            synth_result = (synthesizer.result or "").strip()
+            return {
+                "complete": synthesizer.status == "done" and bool(synth_result),
+                "verifier_status": verifier.status,
+                "synthesizer_status": synthesizer.status,
+            }
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("kanban execution guard: downstream state probe failed", exc_info=True)
+        return {
+            "complete": False,
+            "verifier_status": "unknown",
+            "synthesizer_status": "unknown",
+        }
+
+
 def _mutation_attempted(messages: Sequence[Mapping[str, Any]], current_user_idx: int) -> bool:
     for message in messages[current_user_idx + 1 :]:
         if isinstance(message, Mapping) and any(
@@ -247,6 +292,18 @@ def try_finalization(
                 "reason=control_escape_in_final_response"
             )
             return "blocked"
+        state = _read_swarm_completion_state(payload)
+        if not state.get("complete"):
+            agent._kanban_execution_guard_phase = ""
+            final_msg["content"] = KANBAN_EXECUTION_PENDING
+            logger.info(
+                "kanban_execution_guard decision=pass_pending "
+                "reason=swarm_created_downstream_incomplete verifier_status=%s "
+                "synthesizer_status=%s",
+                state.get("verifier_status"),
+                state.get("synthesizer_status"),
+            )
+            return "pass"
         agent._kanban_execution_guard_phase = ""
         logger.info(
             "kanban_execution_guard decision=pass reason=successful_swarm_receipt "
@@ -295,6 +352,7 @@ __all__ = [
     "KANBAN_EXECUTION_BLOCKED",
     "KANBAN_EXECUTION_GUARD_SYNTHETIC",
     "KANBAN_EXECUTION_NUDGE",
+    "KANBAN_EXECUTION_PENDING",
     "request_requires_four_lane_swarm",
     "request_requires_transactional_delivery",
     "try_finalization",

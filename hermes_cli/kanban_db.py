@@ -11295,6 +11295,17 @@ def _resolve_worker_cli_toolsets(
                     ]
                 else:
                     requested = list(KANBAN_WORKER_DEFAULT_TOOLSETS)
+            # Review/finalization lanes consume an existing swarm graph. They
+            # must not receive general file/web/terminal tools that let a
+            # model invent extra work instead of closing its assigned task.
+            try:
+                from hermes_cli.kanban_swarm import extract_contract
+
+                role = (extract_contract(task_body) or {}).get("role")
+            except Exception:
+                role = None
+            if role in {"verifier", "synthesizer"}:
+                requested = ["kanban"]
             # A worker without the lifecycle tool cannot satisfy the task
             # contract. Keep it even when a malformed override omits it, but
             # never add a tool that the profile explicitly disabled.
@@ -11396,6 +11407,17 @@ def _default_spawn(
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_WORKSPACE"] = workspace
+    try:
+        from hermes_cli.kanban_swarm import extract_contract
+
+        role = (extract_contract(task.body) or {}).get("role")
+    except Exception:
+        role = None
+    if role in {"verifier", "synthesizer"}:
+        # Runtime guards use this trusted task-body contract field; models do
+        # not get to choose their own role or broaden a downstream worker's
+        # mutation scope.
+        env["HERMES_KANBAN_SWARM_ROLE"] = str(role)
     # Tag the worker's session so it lands in state.db as `kanban`, not as an
     # untitled `cli` row. A worker is a dispatcher-owned run whose transcript is
     # read on the board and in `hermes kanban log` — it is not a conversation

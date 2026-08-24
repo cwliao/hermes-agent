@@ -308,6 +308,26 @@ def _enforce_worker_task_ownership(tid: str) -> Optional[str]:
     return None
 
 
+def _reject_downstream_swarm_mutation(tool_name: str) -> Optional[str]:
+    """Reject board-expanding mutations from verifier/synthesizer workers.
+
+    Those lanes consume an existing graph and must close their own task. A
+    model that creates another card, links a new edge, or attaches an invented
+    artifact can strand the real synthesizer and produce a false completion
+    handoff. The role is stamped by the dispatcher from the task contract,
+    never from model arguments.
+    """
+    role = os.environ.get("HERMES_KANBAN_SWARM_ROLE", "").strip().lower()
+    if role in {"verifier", "synthesizer"}:
+        return tool_error(
+            f"{tool_name} refused for swarm {role}: downstream workers may only "
+            "read the graph, comment, heartbeat, complete, or block their "
+            "assigned task. Do not create child tasks, links, reviews, or "
+            "artifacts."
+        )
+    return None
+
+
 def _connect(board: Optional[str] = None):
     """Import + connect lazily so the module imports cleanly in non-kanban
     contexts (e.g. test rigs that import every tool module).
@@ -568,6 +588,35 @@ def _parse_bool_arg(args: dict, name: str, *, default: bool = False):
     if text in {"false", "0", "no"}:
         return False, None
     return default, f"{name} must be a boolean or 'true'/'false'"
+
+
+def _current_turn_four_lane_goal() -> str:
+    """Return the current user request when it is a four-lane swarm ask.
+
+    The model may emit a stale goal argument after context compaction or a
+    long-lived gateway session is reused. The live turn text is authoritative
+    for this mutation, while non-swarm/CLI calls retain their explicit goal.
+    """
+    try:
+        from gateway.session_context import get_current_turn_user_message
+        text = (get_current_turn_user_message() or "").strip()
+    except Exception:
+        return ""
+    folded = text.casefold()
+    lane_hits = sum(1 for lane in _KS.MULTI_AGENT_LANE_IDS if lane in folded)
+    if (
+        lane_hits >= 3
+        and "lane" in folded
+        and ("四條" in folded or "4" in folded)
+        and ("verifier" in folded or "synthesizer" in folded)
+        and (
+            "各自獨立" in folded
+            or "獨立產出" in folded
+            or "獨立產出" in folded
+        )
+    ):
+        return text
+    return ""
 
 
 def _require_orchestrator_tool(tool_name: str) -> Optional[str]:
@@ -1167,6 +1216,9 @@ def _handle_block(args: dict, **kw) -> str:
 
 def _handle_request_review(args: dict, **kw) -> str:
     """Move implementation into the first-class review phase."""
+    guard = _reject_downstream_swarm_mutation("kanban_request_review")
+    if guard:
+        return guard
     delegated_err = _reject_delegated_child_mutation("kanban_request_review")
     if delegated_err:
         return delegated_err
@@ -1245,6 +1297,9 @@ def _handle_request_review(args: dict, **kw) -> str:
 
 def _handle_request_changes(args: dict, **kw) -> str:
     """Return a reviewer-owned running task to its implementer."""
+    guard = _reject_downstream_swarm_mutation("kanban_request_changes")
+    if guard:
+        return guard
     delegated_err = _reject_delegated_child_mutation("kanban_request_changes")
     if delegated_err:
         return delegated_err
@@ -1393,6 +1448,9 @@ def _handle_attach(args: dict, **kw) -> str:
     attachments dir, and record the metadata row — all via
     ``kanban_db.store_attachment_bytes`` so the three surfaces stay in lockstep.
     """
+    guard = _reject_downstream_swarm_mutation("kanban_attach")
+    if guard:
+        return guard
     from hermes_cli import kanban_db as kb
 
     delegated_err = _reject_delegated_child_mutation("kanban_attach")
@@ -1515,6 +1573,9 @@ def _handle_attach_url(args: dict, **kw) -> str:
     and stores it as a real attachment. Useful when the agent has a link
     rather than the bytes. Only http/https URLs are accepted.
     """
+    guard = _reject_downstream_swarm_mutation("kanban_attach_url")
+    if guard:
+        return guard
     from hermes_cli import kanban_db as kb
 
     delegated_err = _reject_delegated_child_mutation("kanban_attach_url")
@@ -1573,6 +1634,9 @@ def _handle_attach_url(args: dict, **kw) -> str:
 
 def _handle_attachments(args: dict, **kw) -> str:
     """List a task's attachments (read-only; no ownership restriction)."""
+    guard = _reject_downstream_swarm_mutation("kanban_attachments")
+    if guard:
+        return guard
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -1616,6 +1680,9 @@ def _handle_create(args: dict, **kw) -> str:
     ``parents`` can be a list of task ids; dependency-gated promotion
     works as usual.
     """
+    guard = _reject_downstream_swarm_mutation("kanban_create")
+    if guard:
+        return guard
     delegated_err = _reject_delegated_child_mutation("kanban_create")
     if delegated_err:
         return delegated_err
@@ -2034,6 +2101,9 @@ def _handle_swarm(args: dict, **kw) -> str:
     work, not something a dispatcher-spawned single-task worker should do
     mid-task.
     """
+    guard = _reject_downstream_swarm_mutation("kanban_swarm")
+    if guard:
+        return guard
     guard = _require_orchestrator_tool("kanban_swarm")
     if guard:
         return guard
@@ -2041,6 +2111,20 @@ def _handle_swarm(args: dict, **kw) -> str:
     goal = args.get("goal")
     if not goal or not str(goal).strip():
         return tool_error("goal is required")
+
+    # The current inbound request is the only safe source of truth for a
+    # four-lane mutation. This prevents a cached/compacted model context from
+    # creating a new swarm for the previous request (for example, Winter jokes
+    # when the user just asked for cat jokes).
+    authoritative_goal = _current_turn_four_lane_goal()
+    if authoritative_goal:
+        logger.info(
+            "kanban_swarm: binding goal to current user turn "
+            "supplied_chars=%d current_chars=%d",
+            len(str(goal)),
+            len(authoritative_goal),
+        )
+        goal = authoritative_goal
 
     raw_workers = args.get("workers")
     if not isinstance(raw_workers, list) or not raw_workers:
@@ -2208,6 +2292,9 @@ def _handle_swarm(args: dict, **kw) -> str:
 
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact."""
+    guard = _reject_downstream_swarm_mutation("kanban_link")
+    if guard:
+        return guard
     delegated_err = _reject_delegated_child_mutation("kanban_link")
     if delegated_err:
         return delegated_err

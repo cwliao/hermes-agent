@@ -608,6 +608,7 @@ class GatewayKanbanWatchersMixin:
                     # "Task X completed" and re-decomposes work that already
                     # exists on the board.
                     wake_handoff = ""
+                    direct_synth_result: Optional[str] = None
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -636,7 +637,8 @@ class GatewayKanbanWatchersMixin:
                             )
                             if is_synthesizer and task and task.result:
                                 h = str(task.result).strip()[:4000]
-                                handoff = f"\n{h}"
+                                direct_synth_result = h
+                                handoff = ""
                                 wake_handoff = h
                             elif payload_summary:
                                 lines = payload_summary.strip().splitlines()
@@ -652,6 +654,11 @@ class GatewayKanbanWatchersMixin:
                                 f"✔ {board_tag}{tag}Kanban {sub['task_id']} done"
                                 f" — {title}{handoff}"
                             )
+                            if direct_synth_result is not None:
+                                # The synthesizer result is already the exact
+                                # user-facing deliverable. Do not let a wake
+                                # turn rewrite it or invent artifacts.
+                                msg = direct_synth_result
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
@@ -784,6 +791,11 @@ class GatewayKanbanWatchersMixin:
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
                                 kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
                             )
+                            if direct_synth_result is not None and kind == "completed":
+                                logger.info(
+                                    "kanban notifier: delivered exact synthesizer result for %s chars=%d",
+                                    sub["task_id"], len(direct_synth_result),
+                                )
                             # After delivering the text notification, surface
                             # any artifact paths the worker referenced in
                             # ``kanban_complete(summary=..., artifacts=[...])``
@@ -858,7 +870,15 @@ class GatewayKanbanWatchersMixin:
                         task_terminal = task and task.status == "archived"
                         _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked")
                         _wake_kinds = (
-                            {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
+                            {
+                                ev.kind
+                                for ev in d["events"]
+                                if ev.kind in _WAKE_KINDS
+                                and not (
+                                    direct_synth_result is not None
+                                    and ev.kind == "completed"
+                                )
+                            }
                             if wake_agent
                             else set()
                         )

@@ -177,16 +177,76 @@ def _check_kanban_orchestrator_mode() -> bool:
 
 def _default_task_id(arg: Optional[str]) -> Optional[str]:
     """Resolve ``task_id`` arg or fall back to the env var the dispatcher set."""
-    if arg:
-        return arg
     if _is_delegated_child_context():
         return None
+    if _is_dispatcher_owned_worker():
+        # The dispatcher-owned task is the only lifecycle target a worker may
+        # mutate. Models frequently copy the swarm root or a sibling id from
+        # the handoff text into an explicit task_id; treating that value as
+        # authoritative made an otherwise valid completion fail at the
+        # ownership gate. Canonicalize to the trusted process binding. This
+        # is safer than accepting the model's id and preserves isolation.
+        env_tid = os.environ.get("HERMES_KANBAN_TASK")
+        if env_tid:
+            if arg and arg != env_tid:
+                logger.warning(
+                    "ignoring model-supplied Kanban task_id=%s; "
+                    "worker is bound to %s",
+                    arg,
+                    env_tid,
+                )
+            return env_tid
+    if arg:
+        return arg
     if not _is_dispatcher_owned_worker():
         # A cron job fired in-process from a worker must never inherit the
         # worker's task id as an implicit default.
         return None
     env_tid = os.environ.get("HERMES_KANBAN_TASK")
     return env_tid or None
+
+
+def _canonicalize_dispatcher_swarm_metadata(
+    task: Any,
+    metadata: Optional[dict],
+    *,
+    result: Optional[str],
+) -> Optional[dict]:
+    """Bind swarm identity fields to trusted dispatcher task state.
+
+    ``HERMES_KANBAN_TASK`` and the task contract are runtime state. The model
+    should supply handoff content and verifier evidence, not repeat process
+    identifiers copied from prose. This runs only for dispatcher workers;
+    orchestrator/manual calls remain fail-closed and unchanged.
+
+    Verifier gate/count evidence is never fabricated here. A synthesizer
+    still needs a non-empty top-level result; ``result_present`` is derived
+    from that trusted tool argument.
+    """
+    if not task or not _is_dispatcher_owned_worker():
+        return metadata
+    contract = _KS.extract_contract(getattr(task, "body", None))
+    if not contract:
+        return metadata
+    bound = dict(metadata or {})
+    role = contract.get("role")
+    bound["role"] = role
+    bound["root_id"] = contract.get("root_id")
+    if role == "worker":
+        bound["lane_id"] = contract.get("expected_lane_id")
+        bound["preflight_skill_id"] = contract.get("preflight_skill_id") or ""
+        bound["outcome"] = "completed"
+        if bound.get("verified_clean") is not False:
+            bound["verified_clean"] = True
+    elif role == "verifier":
+        bound["expected_lane_count"] = contract.get("expected_lane_count")
+    elif role == "synthesizer":
+        bound["outcome"] = "completed"
+        bound["result_present"] = bool((result or "").strip())
+        if contract.get("verifier_id"):
+            bound["verifier_id"] = contract["verifier_id"]
+    bound["swarm_identity_source"] = "dispatcher_contract"
+    return bound
 
 
 def _worker_run_id(task_id: str) -> Optional[int]:
@@ -891,6 +951,14 @@ def _handle_complete(args: dict, **kw) -> str:
             from hermes_cli import kanban_swarm as _kanban_swarm
             if task:
                 contract = _kanban_swarm.extract_contract(task.body)
+                if (
+                    contract and contract.get("role") == "synthesizer"
+                    and not (result or "").strip() and (summary or "").strip()
+                ):
+                    result = summary
+                metadata = _canonicalize_dispatcher_swarm_metadata(
+                    task, metadata, result=result
+                )
                 output_text = result if (result or "").strip() else summary
                 output_meta = _kanban_swarm.swarm_output_metadata(
                     output_text,

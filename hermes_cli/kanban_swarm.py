@@ -268,6 +268,12 @@ def _completion_requirements(contract: dict[str, Any]) -> str:
         if output_policy.get("require_balanced_quotes"):
             lines.append("  result text must not contain unbalanced quotes/brackets")
     lines.append(
+        "  artifact metadata is optional; omit artifacts unless the task explicitly requests a file deliverable"
+    )
+    lines.append(
+        "  do not invent artifact paths, URLs, base64 payloads, or workspace filenames"
+    )
+    lines.append(
         "Send these as completion metadata. Do not complete with a subset."
     )
     lines.append("")

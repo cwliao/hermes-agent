@@ -389,6 +389,51 @@ def test_blocking_terminal_task_directs_new_request_to_fresh_swarm(worker_env):
     assert result.get("error")
     assert "NEW Kanban task" in result["error"]
     assert "kanban_swarm" in result["error"]
+    assert result["kanban_terminal_error"] is True
+    assert result["status"] == "done"
+
+
+def test_completion_rejects_missing_prose_file_evidence(worker_env, tmp_path):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    missing = tmp_path / "does-not-exist.txt"
+    rejected = json.loads(kt._handle_complete({
+        "summary": f"created deliverable at {missing}",
+    }))
+    assert rejected.get("error")
+    assert "missing or unreadable file" in rejected["error"]
+
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, worker_env).status == "running"
+    finally:
+        conn.close()
+
+
+def test_completion_accepts_existing_prose_file_evidence(worker_env, tmp_path):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    evidence = tmp_path / "selected.txt"
+    evidence.write_text("verified\n", encoding="utf-8")
+    completed = json.loads(kt._handle_complete({
+        "summary": f"created deliverable at {evidence}",
+    }))
+    assert completed.get("ok") is True
+
+
+def test_terminal_completion_precedes_stale_missing_prose_evidence(worker_env, tmp_path):
+    """A stale post-cleanup handoff must carry the terminal marker."""
+    from tools import kanban_tools as kt
+
+    assert json.loads(kt._handle_complete({"summary": "finished"}))["ok"] is True
+    missing = tmp_path / "scratch-cleaned.txt"
+    terminal = json.loads(kt._handle_complete({
+        "summary": f"created deliverable at {missing}",
+    }))
+    assert terminal["kanban_terminal_error"] is True
+    assert terminal["status"] == "done"
 
 
 def test_complete_happy_path(worker_env):

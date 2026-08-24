@@ -583,8 +583,11 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
     if s == "archived":
         ok = kanban_db.archive_task(conn, task_id)
     else:
-        with _map_errors(400, _StatusRejected):
-            ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
+        try:
+            with _map_errors(400, _StatusRejected):
+                ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
+        except kanban_db.CompletionEvidenceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if s == "review" and ok and review_assignee_deferred and not payload.assignee:
             ok = kanban_db.assign_task(conn, task_id, None)
     if ok:

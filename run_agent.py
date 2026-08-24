@@ -1264,12 +1264,58 @@ class AIAgent(
             "to change strategy instead of repeating the same call."
         )
 
-    def _append_guardrail_observation(self, tool_name: str, function_args: dict, function_result: str, *,
-                                      failed: bool, tool_call_id: str = "") -> str:
-        decision = self._tool_guardrails.after_call(tool_name, function_args, function_result, failed=failed)
-        # Identical-call stall guards observe the RAW result (before the per-call loop suffix) and are applied
-        # at result construction so tool results stay append-only / cache-safe.
-        stall_notice = result_stub = None
+    def _append_guardrail_observation(
+        self,
+        tool_name: str,
+        function_args: dict,
+        function_result: str,
+        *,
+        failed: bool,
+        tool_call_id: str = "",
+    ) -> str:
+        kanban_worker = False
+        if os.environ.get("HERMES_KANBAN_TASK"):
+            try:
+                from agent.delegation_context import is_dispatcher_owned_worker_context
+                kanban_worker = is_dispatcher_owned_worker_context()
+            except Exception:
+                kanban_worker = True
+        decision = self._tool_guardrails.after_call(
+            tool_name,
+            function_args,
+            function_result,
+            failed=failed,
+            kanban_worker=kanban_worker,
+        )
+        # A successful lifecycle mutation is the worker's terminal receipt.
+        # Record it after the tool has actually returned ``ok=true`` so a
+        # rejected or malformed call cannot suppress the worker's recovery
+        # turn.  conversation_loop consumes this flag after all tool results
+        # are durably appended and skips the next model request.
+        if (
+            kanban_worker
+            and tool_name in {"kanban_complete", "kanban_block"}
+            and not failed
+            and isinstance(function_result, str)
+        ):
+            try:
+                payload = json.loads(function_result)
+            except (TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("ok") is True:
+                self._kanban_terminal_success = {
+                    "tool_name": tool_name,
+                    "task_id": payload.get("task_id"),
+                    "run_id": payload.get("run_id"),
+                }
+        # Identical-call stall guards (agent.stall_guards): notice-only, no
+        # blocking. Observed on the RAW result (before the loop-warning suffix
+        # below, whose embedded count changes per call and would defeat
+        # result-identity matching). Applied here — at result construction,
+        # before the tool message is built — so it is cache-safe (tool results
+        # are append-only; nothing already sent to the provider is mutated).
+        stall_notice = None
+        result_stub = None
         if self._stall_guards_enabled():
             try:
                 observation = self._tool_guardrails.observe_call(

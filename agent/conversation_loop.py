@@ -1861,6 +1861,10 @@ def run_conversation(
     agent._model_replay_guard_claim = None
     agent._model_replay_guard_previous_answer = ""
     agent._kanban_execution_guard_phase = ""
+    # A cached gateway agent may serve another user turn after a Kanban worker
+    # completed.  The terminal receipt is turn-local and must never suppress
+    # tools on the next conversation turn.
+    agent._kanban_terminal_success = None
 
     # Per-turn agent state (the gateway caches agents across turns, so none of this may
     # leak into the next message): interim-commentary dedup spans the whole turn but not
@@ -1933,6 +1937,10 @@ def run_conversation(
             if _v.action == "break":
                 break
             if _v.action == "continue":
+                if getattr(agent, "_kanban_terminal_success", None):
+                    s._turn_exit_reason = "kanban_terminal_success"
+                    s.final_response = ""
+                    break
                 continue
         except Exception as e:
             if _run_phase(handle_outer_loop_error, agent, s, e=e).action == "break":

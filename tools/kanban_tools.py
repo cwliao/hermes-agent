@@ -668,6 +668,14 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        if task is not None and task.status in {"done", "archived"}:
+            return tool_error(
+                f"could not complete {tid}: task is terminal "
+                f"(status={task.status})",
+                kanban_terminal_error=True,
+                task_id=tid,
+                status=task.status,
+            )
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         from hermes_cli import kanban_swarm as _kanban_swarm
         contract_error = _kanban_swarm.validate_completion(
@@ -700,13 +708,22 @@ def _handle_complete(args: dict, **kw) -> str:
                 f"in-flight (no state change). Retry kanban_complete with the same "
                 f"summary/metadata and either drop these ids from created_cards, or pass "
                 f"created_cards=[] to skip the card-claim check entirely.")
+        except kb.CompletionEvidenceError as evidence_err:
+            current = kb.get_task(conn, tid)
+            if current is not None and current.status in {"done", "archived"}:
+                return tool_error(
+                    f"could not complete {tid}: task is terminal "
+                    f"(status={current.status})",
+                    kanban_terminal_error=True,
+                    task_id=tid,
+                    status=current.status,
+                )
+            return tool_error(f"kanban_complete: {evidence_err}")
         _check(ok, f"could not complete {tid} (unknown id or already terminal)")
         if ok and task is not None:
             _auto_post_swarm_handoff(conn, task, tid, summary, result)
         run = kb.latest_run(conn, tid)
         return _ok(task_id=tid, run_id=run.id if run else None)
-
-
 @_kanban_handler("kanban_block")
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
@@ -731,7 +748,10 @@ def _handle_block(args: dict, **kw) -> str:
         if task and task.status in {"done", "archived"}:
             return tool_error(
                 f"cannot block terminal task {tid} (status={task.status}); no state was changed. "
-                "This is historical work. For a new request, create a NEW Kanban task or call kanban_swarm."
+                "This is historical work. For a new request, create a NEW Kanban task or call kanban_swarm.",
+                kanban_terminal_error=True,
+                task_id=tid,
+                status=task.status,
             )
         _check(not (task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS),
                f"goal_mode tasks can only block with kind in "

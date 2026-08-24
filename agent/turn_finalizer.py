@@ -56,7 +56,6 @@ def _record_kanban_budget_exhausted(
     from multiple exit paths.
     """
     try:
-        from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
         from hermes_cli import kanban_db_dispatch as _kbd
         _conn = _kbc.connect()
@@ -157,7 +156,11 @@ def _resolve_budget_fallback(
 
     # A kanban worker must record a terminal outcome whether or not a fallback path
     # was eligible, so the dispatcher learns the worker could not complete.
-    _kanban_task = os.environ.get("HERMES_KANBAN_TASK") if budget_exhausted else None
+    _kanban_task = (
+        os.environ.get("HERMES_KANBAN_TASK")
+        if budget_exhausted and _turn_exit_reason != "kanban_terminal_success"
+        else None
+    )
     # If running as a kanban worker, signal the dispatcher that the worker could not complete (rather than
     # treating it as a protocol violation). This applies whether the user-facing fallback came from the
     # summary call or an explicitly pending continuation; both exhausted the task budget and must advance
@@ -454,7 +457,11 @@ def finalize_turn(
     completed = (
         final_response is not None
         and not failed
-        and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
+        and (
+            api_call_count < agent.max_iterations
+            or str(_turn_exit_reason).startswith("text_response(")
+            or str(_turn_exit_reason) == "kanban_terminal_success"
+        )
     )
 
     _rollback_interrupted_preflight_display(agent, interrupted)

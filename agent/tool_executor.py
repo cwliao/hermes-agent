@@ -189,6 +189,37 @@ def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str) 
         return False
 
 
+def _skip_after_kanban_terminal_success(
+    agent,
+    messages: list,
+    tool_calls,
+    effective_task_id: str,
+) -> None:
+    """Drain unexecuted calls after a worker lifecycle mutation succeeds."""
+    for tc in tool_calls:
+        name = getattr(getattr(tc, "function", None), "name", "") or "tool"
+        result = (
+            f"[Tool execution skipped — Kanban worker already completed its "
+            f"task via {name if name in {'kanban_complete', 'kanban_block'} else 'a terminal lifecycle action'}]"
+        )
+        messages.append(make_tool_result_message(name, result, getattr(tc, "id", "") or ""))
+        _emit_terminal_post_tool_call(
+            agent,
+            function_name=name,
+            function_args={},
+            result=result,
+            effective_task_id=effective_task_id,
+            tool_call_id=getattr(tc, "id", "") or "",
+            status="skipped",
+            error_type="kanban_terminal_success",
+            error_message="Kanban worker terminal handoff already succeeded",
+        )
+        if not _flush_session_db_after_tool_progress(
+            agent, messages, stage=f"skipped terminal tool result {name}"
+        ):
+            return
+
+
 def _image_generate_parallel_limit() -> int:
     """Configured image-generation parallelism cap (conservative: backend bursts hit rate limits)."""
     try:
@@ -1551,10 +1582,13 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
 
     # Registry tools: post hook is owned by this executor (inner observer suppressed).
     def _execute(next_args: dict) -> Any:
+        # Resolve through run_agent's compatibility alias at call time so
+        # legacy plugin/test patches remain effective.
+        from run_agent import handle_function_call
         import model_tools
 
         with model_tools.suppress_post_tool_call_hook():
-            return model_tools.handle_function_call(
+            return handle_function_call(
                 function_name,
                 next_args,
                 effective_task_id,
@@ -1690,7 +1724,17 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
     for i, tool_call in enumerate(tool_calls, 1):
         if getattr(agent, "_incremental_persistence_failed", False):
             return
-        # Check interrupt BEFORE each tool so a "stop" during the previous one skips the rest.
+        if getattr(agent, "_kanban_terminal_success", None):
+            _skip_after_kanban_terminal_success(
+                agent,
+                messages,
+                assistant_message.tool_calls[i - 1 :],
+                effective_task_id,
+            )
+            break
+        # SAFETY: check interrupt BEFORE starting each tool.
+        # If the user sent "stop" during a previous tool's execution,
+        # do NOT start any more tools -- skip them all immediately.
         if agent._interrupt_requested:
             if not _skip_remaining_sequential(
                 agent, messages, tool_calls[i - 1:], effective_task_id,
@@ -1750,7 +1794,17 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
         _exec_cwd = Path(_active_env.cwd) if _active_env is not None and _active_env.cwd else None
         segments = _plan_tool_batch_segments(assistant_message.tool_calls, execution_cwd=_exec_cwd)
 
-    for kind, calls in segments:
+    for segment_index, (kind, calls) in enumerate(segments):
+        if getattr(agent, "_kanban_terminal_success", None):
+            remaining = [
+                tc
+                for _, later_calls in segments[segment_index:]
+                for tc in later_calls
+            ]
+            _skip_after_kanban_terminal_success(
+                agent, messages, remaining, effective_task_id
+            )
+            break
         if getattr(agent, "_incremental_persistence_failed", False):
             return
         segment_message = SimpleNamespace(tool_calls=list(calls))

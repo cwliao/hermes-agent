@@ -2930,6 +2930,17 @@ class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
 
 
+class CompletionEvidenceError(ValueError):
+    """Raised when a completion claims a file that cannot be verified."""
+
+    def __init__(self, paths: Iterable[str]):
+        self.paths = list(paths)
+        super().__init__(
+            "completion evidence references missing or unreadable file(s): "
+            + ", ".join(self.paths)
+        )
+
+
 def complete_task(
     conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
     summary: Optional[str] = None, metadata: Optional[dict] = None,
@@ -2950,8 +2961,22 @@ def complete_task(
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
         return False
+    # Terminal retries are a lifecycle no-op. Check this before validating
+    # fresh handoff evidence: a stale worker may repeat a summary whose
+    # scratch-workspace path was removed by the first successful completion.
+    # Returning False lets the tool layer attach its structured terminal
+    # marker instead of surfacing a retryable missing-file error.
+    initial_task = get_task(conn, task_id)
+    if initial_task is None or initial_task.status in {"done", "archived"}:
+        return False
+
+    # Gate: verify created_cards BEFORE the main write txn. A rejected
+    # completion still needs an auditable event, so we emit it in a
+    # tiny dedicated txn, then raise. The caller is responsible for
+    # surfacing HallucinatedCardsError to the worker; this function
+    # never mutates task state on a phantom-card rejection.
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
-    task_for_contract = get_task(conn, task_id)
+    task_for_contract = initial_task
     if task_for_contract:
         from hermes_cli import kanban_swarm as _kanban_swarm
         contract_error = _kanban_swarm.validate_completion(
@@ -2968,6 +2993,11 @@ def complete_task(
             metadata["output_contract"] = output_meta
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
+    )
+    _validate_completion_file_evidence(
+        summary=summary,
+        result=result,
+        metadata=metadata,
     )
     handoff_summary = summary if summary is not None else result
     with write_txn(conn):
@@ -3146,6 +3176,78 @@ def _merge_completion_prose_artifacts(
             seen.add(path)
     updated["artifacts"] = merged
     return updated
+
+
+# Keep this deliberately narrower than a general shell/path parser.  A
+# completion summary is prose, so only common file-like suffixes are treated
+# as an evidence claim.  Explicit ``metadata.artifacts`` entries retain their
+# existing delivery semantics: managed scratch artifacts are preserved by the
+# existing gate, while optional external paths may still be skipped by the
+# notifier if they disappear between completion and delivery.
+_COMPLETION_FILE_SUFFIXES = frozenset({
+    ".txt", ".json", ".md", ".csv", ".tsv", ".yaml", ".yml", ".xml",
+    ".html", ".htm", ".py", ".js", ".ts", ".sh", ".sql", ".log",
+    ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".wav",
+    ".mp4", ".mov", ".zip", ".tar", ".gz",
+})
+_COMPLETION_PATH_RE = re.compile(
+    r"(?<![\w])(?:~|/|[A-Za-z]:[\\/]|\\\\)[^\s`\"'<>]+"
+)
+
+
+def _completion_path_candidates(text: Optional[str]) -> list[str]:
+    if not text:
+        return []
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for match in _COMPLETION_PATH_RE.finditer(str(text)):
+        raw = match.group(0).rstrip(".,;:!?)]}")
+        if raw.startswith("//") or "://" in raw:
+            continue
+        try:
+            path = Path(raw).expanduser()
+        except (OSError, ValueError):
+            continue
+        if path.suffix.lower() not in _COMPLETION_FILE_SUFFIXES:
+            continue
+        normalized = str(path)
+        if normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+    return candidates
+
+
+def _validate_completion_file_evidence(
+    *,
+    summary: Optional[str],
+    result: Optional[str],
+    metadata: Optional[dict],
+) -> None:
+    """Fail closed when a completion claims a non-existent file deliverable.
+
+    This gate runs before the task write transaction.  A worker may still
+    retry with corrected evidence, while a summary cannot make an unverified
+    path look like a delivered artifact.  Explicit artifact declarations are
+    checked by the pre-existing scratch-artifact preservation path; prose
+    paths use the conservative common-file-suffix scanner above.
+    """
+    paths = _completion_path_candidates(summary)
+    paths.extend(_completion_path_candidates(result))
+
+    missing: list[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        if raw in seen:
+            continue
+        seen.add(raw)
+        try:
+            path = Path(raw).expanduser()
+            if not path.is_file() or not os.access(path, os.R_OK):
+                missing.append(raw)
+        except (OSError, ValueError):
+            missing.append(raw)
+    if missing:
+        raise CompletionEvidenceError(missing)
 
 
 def _persist_scratch_completion_artifacts(
@@ -4881,6 +4983,7 @@ _PLUGIN_COMPAT_LAZY = {
     'list_notify_subs': ('hermes_cli.kanban_db_notify', 'list_notify_subs'),
     'purge_stale_done_notify_subs': ('hermes_cli.kanban_db_notify', 'purge_stale_done_notify_subs'),
     'reap_worker_zombies': ('hermes_cli.kanban_db_dispatch', 'reap_worker_zombies'),
+    '_record_task_failure': ('hermes_cli.kanban_db_dispatch', '_record_task_failure'),
     'reconcile_orphaned_running': ('hermes_cli.kanban_db_dispatch', 'reconcile_orphaned_running'),
     'remove_notify_sub': ('hermes_cli.kanban_db_notify', 'remove_notify_sub'),
     'repair_db': ('hermes_cli.kanban_db_connect', 'repair_db'),

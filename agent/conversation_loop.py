@@ -2280,6 +2280,10 @@ def run_conversation(
     agent._model_replay_guard_claim = None
     agent._model_replay_guard_previous_answer = ""
     agent._kanban_execution_guard_phase = ""
+    # A cached gateway agent may serve another user turn after a Kanban worker
+    # completed.  The terminal receipt is turn-local and must never suppress
+    # tools on the next conversation turn.
+    agent._kanban_terminal_success = None
 
     # Commentary deduplication spans all provider continuations and tool calls
     # within one user turn, but must not suppress the same phrase next turn.
@@ -7845,6 +7849,18 @@ def run_conversation(
                                 agent.stream_delta_callback(None)
                             except Exception:
                                 pass
+                    break
+
+                # A successful Kanban lifecycle mutation is already the
+                # worker's terminal handoff.  Do not ask the model for a
+                # follow-up narration: stale workers previously interpreted
+                # the completion result as another prompt and retried the
+                # same terminal mutation until the iteration budget burned
+                # out.  The tool result is already in ``messages`` and has
+                # passed the incremental persistence fence above.
+                if getattr(agent, "_kanban_terminal_success", None):
+                    _turn_exit_reason = "kanban_terminal_success"
+                    final_response = ""
                     break
 
                 # Reset per-turn retry counters after successful tool

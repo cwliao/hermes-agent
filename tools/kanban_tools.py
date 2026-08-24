@@ -874,6 +874,20 @@ def _handle_complete(args: dict, **kw) -> str:
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
             task = kb.get_task(conn, tid)
+            if task is not None and task.status in {"done", "archived"}:
+                # Check lifecycle state before parsing/validating a new
+                # handoff. A stale worker may repeat its original summary
+                # after scratch cleanup removed a referenced file; it must
+                # still receive the terminal marker so the runtime can halt
+                # instead of treating the stale evidence as a retryable
+                # completion error.
+                return tool_error(
+                    f"could not complete {tid}: task is terminal "
+                    f"(status={task.status})",
+                    kanban_terminal_error=True,
+                    task_id=tid,
+                    status=task.status,
+                )
             from hermes_cli import kanban_swarm as _kanban_swarm
             if task:
                 contract = _kanban_swarm.extract_contract(task.body)
@@ -920,6 +934,20 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"scratch workspace was kept. Fix the artifact path or "
                     f"storage error, then retry kanban_complete with the same handoff."
                 )
+            except kb.CompletionEvidenceError as evidence_err:
+                # A concurrent duplicate may pass the initial lifecycle check
+                # just before another worker completes and cleans its scratch
+                # workspace. Preserve the terminal marker in that race too.
+                current = kb.get_task(conn, tid)
+                if current is not None and current.status in {"done", "archived"}:
+                    return tool_error(
+                        f"could not complete {tid}: task is terminal "
+                        f"(status={current.status})",
+                        kanban_terminal_error=True,
+                        task_id=tid,
+                        status=current.status,
+                    )
+                return tool_error(f"kanban_complete: {evidence_err}")
             except kb.HallucinatedCardsError as hall_err:
                 # Structured rejection — surface the phantom ids so the
                 # worker can retry with a corrected list or drop the
@@ -941,6 +969,15 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
             if not ok:
+                current = kb.get_task(conn, tid)
+                if current is not None and current.status in {"done", "archived"}:
+                    return tool_error(
+                        f"could not complete {tid}: task is terminal "
+                        f"(status={current.status})",
+                        kanban_terminal_error=True,
+                        task_id=tid,
+                        status=current.status,
+                    )
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
@@ -1001,7 +1038,10 @@ def _handle_block(args: dict, **kw) -> str:
                 "Do not treat this as completion of the current user request. "
                 "If the user issued a new request, create a NEW Kanban task or "
                 "call kanban_swarm now; only inspect or resume this terminal "
-                "task when the user explicitly asks for its history."
+                "task when the user explicitly asks for its history.",
+                kanban_terminal_error=True,
+                task_id=tid,
+                status=task.status,
             )
         if (
             task

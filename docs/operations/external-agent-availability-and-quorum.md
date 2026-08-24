@@ -29,6 +29,22 @@ The candidate pool is therefore larger than five when API routes and local
 CLIs are included. The scheduler should choose from currently healthy routes,
 not hard-code the two historical MoA defaults.
 
+## Operator availability declaration
+
+On 2026-08-24 (Asia/Taipei), Keven confirmed that after the DGX Spark reboot
+the following agents are available for project review and coding work, subject
+to the probe discipline below:
+
+- Claude CLI
+- Codex CLI
+- AGY CLI
+- Grok
+- Groq
+
+This is an operator-provided capability/authorization note, not a substitute
+for a live health or authentication probe. Do not record or copy credentials
+when probing these routes.
+
 ## Quorum rule
 
 For `N` enabled external reference slots, require:

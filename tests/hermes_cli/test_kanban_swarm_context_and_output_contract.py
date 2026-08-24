@@ -43,6 +43,8 @@ def test_worker_context_aggregate_cap_preserves_swarm_contract(tmp_path):
         assert len(context) <= kb._CTX_MAX_TOTAL_CHARS
         assert "[swarm:contract]" in context
         assert "kanban_complete(" in context
+        assert "Do not invent extra deliverables" in context
+        assert "optional artifact is never a blocker" in context
         assert created.root_id in context
     finally:
         conn.close()

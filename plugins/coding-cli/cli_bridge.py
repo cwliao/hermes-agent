@@ -10,10 +10,15 @@ handlers that call into this module.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 import os
 import stat
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock
+    fcntl = None
 import shutil
 import threading
 from pathlib import Path
@@ -156,6 +161,40 @@ def _resolve_bin(configured: str) -> str:
     return found or configured
 
 
+@asynccontextmanager
+async def _codex_dispatch_slot(profile_home: str | Path):
+    """Serialize Codex turns for one external-CLI profile.
+
+    The DGX/container runtime cannot create Codex's bwrap namespaces. The
+    external pool therefore uses Codex's full-access mode and relies on this
+    profile-scoped single-flight lock for concurrency control. The existing
+    allowed_roots gate still controls which working directory a Telegram chat
+    may select; this lock only prevents overlapping Codex processes.
+    """
+    profile = resolve_profile_home(profile_home)
+    if profile is None:
+        raise CliTurnError(
+            "external_cli.profile_home must be an existing private directory"
+        )
+    lock_path = profile / ".codex-dispatch.lock"
+    lock_file = await asyncio.to_thread(lock_path.open, "a+")
+    try:
+        if fcntl is not None:
+            await asyncio.to_thread(
+                fcntl.flock, lock_file.fileno(), fcntl.LOCK_EX
+            )
+        yield
+    finally:
+        if fcntl is not None:
+            try:
+                await asyncio.to_thread(
+                    fcntl.flock, lock_file.fileno(), fcntl.LOCK_UN
+                )
+            except OSError:
+                logger.debug("failed to unlock Codex dispatch slot", exc_info=True)
+        lock_file.close()
+
+
 async def _run_subprocess(
     argv: list[str],
     *,
@@ -252,7 +291,10 @@ async def run_codex_turn(
             binary, "exec", prompt,
             "--json", "--skip-git-repo-check", "-C", cwd, "-s", sandbox,
         ]
-    stdout, _stderr = await _run_subprocess(argv, cwd=cwd, timeout=timeout, profile_home=profile_home)
+    async with _codex_dispatch_slot(profile_home):
+        stdout, _stderr = await _run_subprocess(
+            argv, cwd=cwd, timeout=timeout, profile_home=profile_home
+        )
     return _parse_codex_jsonl(stdout)
 
 

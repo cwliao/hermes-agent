@@ -271,6 +271,18 @@ def _enforce_worker_task_ownership(tid: str) -> None:
             f"to hand off information to other tasks, or kanban_create to spawn follow-up work.")
 
 
+def _reject_downstream_swarm_mutation(tool_name: str) -> Optional[str]:
+    """Reject board-expanding mutations from verifier/synthesizer workers."""
+    role = os.environ.get("HERMES_KANBAN_SWARM_ROLE", "").strip().lower()
+    if role in {"verifier", "synthesizer"}:
+        return tool_error(
+            f"{tool_name} refused for swarm {role}: downstream workers may only "
+            "read the graph, comment, heartbeat, complete, or block their "
+            "assigned task. Do not create child tasks, links, reviews, or artifacts."
+        )
+    return None
+
+
 def _worker_guard(tool_name: str, args: dict) -> str:
     """Worker mutation preamble, in order: delegate-child rejection, task id
     resolution, task-scope ownership. Returns the task id."""
@@ -621,6 +633,24 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 
 # --- Handlers ---
 
+def _current_turn_four_lane_goal() -> str:
+    """Return the current user request when it is a four-lane swarm ask."""
+    try:
+        from gateway.session_context import get_current_turn_user_message
+        text = (get_current_turn_user_message() or "").strip()
+    except Exception:
+        return ""
+    folded = text.casefold()
+    lane_hits = sum(1 for lane in _KS.MULTI_AGENT_LANE_IDS if lane in folded)
+    if (
+        lane_hits >= 3 and "lane" in folded
+        and ("四條" in folded or "4" in folded)
+        and ("verifier" in folded or "synthesizer" in folded)
+        and ("各自獨立" in folded or "獨立產出" in folded)
+    ):
+        return text
+    return ""
+
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
     """Full task state: row, parents, children, comments, runs, last 50 events."""
@@ -873,6 +903,9 @@ def _handle_block(args: dict, **kw) -> str:
 @_kanban_handler("kanban_request_review")
 def _handle_request_review(args: dict, **kw) -> str:
     """Move implementation into the first-class review phase."""
+    guard = _reject_downstream_swarm_mutation("kanban_request_review")
+    if guard:
+        return guard
     tid = _worker_guard("kanban_request_review", args)
     summary = _redact(_require_text(
         args, "summary", "summary is required — describe what was implemented and how it "
@@ -898,6 +931,9 @@ def _handle_request_review(args: dict, **kw) -> str:
 @_kanban_handler("kanban_request_changes")
 def _handle_request_changes(args: dict, **kw) -> str:
     """Return a reviewer-owned running task to its implementer."""
+    guard = _reject_downstream_swarm_mutation("kanban_request_changes")
+    if guard:
+        return guard
     tid = _worker_guard("kanban_request_changes", args)
     reason = _redact(
         _require_text(args, "reason", "reason is required — describe the changes needed"))
@@ -960,6 +996,9 @@ def _store_attachment(board, tid, filename, data, content_type) -> str:
 @_kanban_handler("kanban_attach")
 def _handle_attach(args: dict, **kw) -> str:
     """Attach an inline (base64) file to a task."""
+    guard = _reject_downstream_swarm_mutation("kanban_attach")
+    if guard:
+        return guard
     tid = _worker_guard("kanban_attach", args)
     filename = _require_text(args, "filename")
     content_b64 = _require_text(args, "content_base64")
@@ -1016,6 +1055,9 @@ def _download_url_with_cap(url: str, max_bytes: int) -> tuple[bytes, Optional[st
 @_kanban_handler("kanban_attach_url")
 def _handle_attach_url(args: dict, **kw) -> str:
     """Attach a file fetched server-side from an http(s) URL (shared size cap)."""
+    guard = _reject_downstream_swarm_mutation("kanban_attach_url")
+    if guard:
+        return guard
     from hermes_cli import kanban_db as kb
     tid = _worker_guard("kanban_attach_url", args)
     url = str(_require_text(args, "url")).strip()
@@ -1038,6 +1080,9 @@ def _handle_attach_url(args: dict, **kw) -> str:
 @_kanban_handler("kanban_attachments")
 def _handle_attachments(args: dict, **kw) -> str:
     """List a task's attachments (read-only; no ownership restriction)."""
+    guard = _reject_downstream_swarm_mutation("kanban_attachments")
+    if guard:
+        return guard
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
         _existing_task(kb, conn, tid)
@@ -1050,6 +1095,9 @@ def _handle_attachments(args: dict, **kw) -> str:
 @_kanban_handler("kanban_create")
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
+    guard = _reject_downstream_swarm_mutation("kanban_create")
+    if guard:
+        return guard
     _reject_delegated_child_mutation("kanban_create")
     title = _require_text(args, "title")
     assignee = args.get("assignee")
@@ -1303,6 +1351,9 @@ def _handle_swarm(args: dict, **kw) -> str:
     work, not something a dispatcher-spawned single-task worker should do
     mid-task.
     """
+    guard = _reject_downstream_swarm_mutation("kanban_swarm")
+    if guard:
+        return guard
     guard = _require_orchestrator_tool("kanban_swarm")
     if guard:
         return guard
@@ -1310,6 +1361,20 @@ def _handle_swarm(args: dict, **kw) -> str:
     goal = args.get("goal")
     if not goal or not str(goal).strip():
         return tool_error("goal is required")
+
+    # The current inbound request is the only safe source of truth for a
+    # four-lane mutation. This prevents a cached/compacted model context from
+    # creating a new swarm for the previous request (for example, Winter jokes
+    # when the user just asked for cat jokes).
+    authoritative_goal = _current_turn_four_lane_goal()
+    if authoritative_goal:
+        logger.info(
+            "kanban_swarm: binding goal to current user turn "
+            "supplied_chars=%d current_chars=%d",
+            len(str(goal)),
+            len(authoritative_goal),
+        )
+        goal = authoritative_goal
 
     raw_workers = args.get("workers")
     if not isinstance(raw_workers, list) or not raw_workers:
@@ -1454,6 +1519,9 @@ def _handle_swarm(args: dict, **kw) -> str:
 @_kanban_handler("kanban_link")
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact (cycles/self-links → ValueError)."""
+    guard = _reject_downstream_swarm_mutation("kanban_link")
+    if guard:
+        return guard
     _reject_delegated_child_mutation("kanban_link")
     parent_id = args.get("parent_id")
     child_id = args.get("child_id")

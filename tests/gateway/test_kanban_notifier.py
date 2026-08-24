@@ -166,11 +166,14 @@ def test_synthesizer_notifier_sends_result_not_status_summary(tmp_path, monkeypa
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
 
     assert len(adapter.sent) == 1
-    assert "Joke A: 秋天的葉子會變色。" in adapter.sent[0]["text"]
-    assert "Joke B: 秋風一吹，笑聲就落葉。" in adapter.sent[0]["text"]
+    assert adapter.sent[0]["text"].splitlines() == [
+        "Joke A: 秋天的葉子會變色。",
+        "Joke B: 秋風一吹，笑聲就落葉。",
+    ]
     assert "status only" not in adapter.sent[0]["text"]
-    assert len(adapter.handled) == 1
-    assert "Joke A: 秋天的葉子會變色。" in adapter.handled[0].text
+    # A completed synthesizer result is sent verbatim; no wake turn may
+    # rewrite it or invent artifacts/task IDs.
+    assert adapter.handled == []
 
 
 def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):

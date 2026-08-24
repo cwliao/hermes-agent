@@ -51,6 +51,9 @@ _SESSION_VARS = (
 # ``async_delivery_supported()``).  _UNSET => supported (CLI, contextvar-unaware paths); stateless
 # adapters (API server, Kanban workers) opt OUT via ``supports_async_delivery = False`` at bind.
 _SESSION_ASYNC_DELIVERY = ContextVar("HERMES_SESSION_ASYNC_DELIVERY", default=_UNSET)
+_CURRENT_TURN_USER_MESSAGE: ContextVar[str] = ContextVar(
+    "HERMES_CURRENT_TURN_USER_MESSAGE", default=""
+)
 
 # Cron auto-delivery vars, set per-job in run_job() so concurrent jobs don't clobber.
 _CRON_AUTO_DELIVER_PLATFORM = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)
@@ -86,6 +89,26 @@ def set_current_session_id(session_id: str) -> None:
     except Exception:
         pass
     os.environ["HERMES_SESSION_ID"] = session_id
+
+
+def set_current_turn_user_message(message: Any) -> None:
+    """Bind the authoritative user text for the current agent turn."""
+    if isinstance(message, str):
+        text = message
+    elif isinstance(message, list):
+        text = "\n".join(
+            str(item.get("text") or item.get("content") or "")
+            for item in message
+            if isinstance(item, dict)
+        )
+    else:
+        text = "" if message is None else str(message)
+    _CURRENT_TURN_USER_MESSAGE.set(text)
+
+
+def get_current_turn_user_message() -> str:
+    """Return the authoritative user text for the current agent turn."""
+    return _CURRENT_TURN_USER_MESSAGE.get()
 
 
 @contextmanager
@@ -131,6 +154,7 @@ def clear_session_vars(tokens: list) -> None:
     goes back to ``_UNSET``: a cleared context is default-supported, not opted-out."""
     for var in _SESSION_VARS:
         var.set("")
+    _CURRENT_TURN_USER_MESSAGE.set("")
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
     _runtime_cwd("clear_session_cwd")
 

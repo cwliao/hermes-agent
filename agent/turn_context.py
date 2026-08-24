@@ -811,6 +811,8 @@ def build_turn_context(
     append_message(messages, user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
+    from gateway.session_context import set_current_turn_user_message
+    set_current_turn_user_message(user_message)
 
     agent._user_turn_count += 1
     # Copilot x-initiator: the first API call of this user turn is user-initiated;

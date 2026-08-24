@@ -145,6 +145,32 @@ plugins:
     assert "mermaid_renderer" in resolved
 
 
+def test_downstream_swarm_toolsets_are_lifecycle_only(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "elias"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - file
+    - kanban
+    - skills
+    - terminal
+    - web
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    from hermes_cli import kanban_db as kb
+
+    body = (
+        '[swarm:contract] {"role":"synthesizer","root_id":"t_root",'
+        '"verifier_id":"t_verify"}'
+    )
+    assert kb._resolve_worker_cli_toolsets(str(profile), task_body=body) == ["kanban"]
+
+
 def test_worker_toolsets_explicit_profile_override_is_preserved(monkeypatch, tmp_path):
     root = tmp_path / ".hermes"
     profile = root / "profiles" / "elias"

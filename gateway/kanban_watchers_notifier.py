@@ -285,7 +285,10 @@ def _fmt_completed(ev, n) -> tuple:
         n.task and 'role = "synthesizer"' in (n.task.body or "")
     )
     if is_synthesizer and n.task and n.task.result:
-        wake_handoff = str(n.task.result).strip()[:4000]
+        # The synthesizer result is already the exact user-facing deliverable;
+        # do not prepend status text or send it through a wake turn that could
+        # rewrite it.
+        return str(n.task.result).strip()[:4000], None, None
     elif payload_summary:
         wake_handoff = _first_line(str(payload_summary), 200)
     elif n.task and n.task.result:

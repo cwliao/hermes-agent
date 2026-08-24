@@ -755,6 +755,19 @@ def test_comment_ignores_caller_supplied_author(worker_env):
         conn.close()
 
 
+def test_downstream_swarm_worker_cannot_create_child(monkeypatch, worker_env):
+    monkeypatch.setenv("HERMES_KANBAN_SWARM_ROLE", "synthesizer")
+    from tools import kanban_tools as kt
+
+    out = json.loads(kt._handle_create({
+        "title": "unrelated child",
+        "assignee": "peer",
+        "parents": [worker_env],
+    }))
+    assert "error" in out
+    assert "refused for swarm synthesizer" in out["error"]
+
+
 def test_create_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_create({
@@ -1914,6 +1927,44 @@ def test_swarm_happy_path_fills_in_skill_and_profile(monkeypatch, worker_env):
             "grok": "grok",
             "agy": "antigravity-cli",
         }, contract_by_lane
+    finally:
+        conn.close()
+
+
+def test_swarm_binds_goal_to_current_user_turn_not_stale_model_argument(
+    monkeypatch, worker_env,
+):
+    """A reused gateway turn must not create a new swarm for old history."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from gateway.session_context import set_current_turn_user_message
+    current = (
+        chr(0x56db) + chr(0x689d) + " lane (native_hermes / claude / grok / agy) "
+        + chr(0x5404) + chr(0x81ea) + chr(0x7368) + chr(0x7acb)
+        + chr(0x7522) + chr(0x51fa) + chr(0x4e00) + chr(0x5c0f)
+        + chr(0x8c93) + chr(0x8ae7) + chr(0x97f3) + chr(0x6897) + chr(0x3002)
+        + "Verifier " + chr(0x9a57) + chr(0x8b49) + ";Synthesizer "
+        + chr(0x6574) + chr(0x7406) + chr(0x6700) + chr(0x7d42)
+        + chr(0x7d50) + chr(0x679c) + chr(0x3002)
+    )
+    set_current_turn_user_message(current)
+    try:
+        from tools import kanban_tools as kt
+        out = json.loads(kt._handle_swarm({
+            "goal": "Winter jokes from previous request",
+            "workers": _lane_bound_workers(),
+            "verifier_assignee": "default",
+            "synthesizer_assignee": "default",
+        }))
+    finally:
+        set_current_turn_user_message("")
+    assert out["ok"] is True, out
+
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        root = kb.get_task(conn, out["root_id"])
+        assert chr(0x5c0f) + chr(0x8c93) in (root.body or "")
+        assert "Winter jokes" not in (root.body or "")
     finally:
         conn.close()
 

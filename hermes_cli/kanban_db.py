@@ -496,6 +496,9 @@ _CTX_MAX_TOTAL_CHARS    = 24 * 1024
 # ``kanban.worker_toolsets`` in the profile config is an explicit override.
 KANBAN_WORKER_DEFAULT_TOOLSETS = (
     "file", "kanban", "skills", "terminal", "web",
+    # Bounded native renderer needed for Mermaid/PNG deliverables; profiles
+    # still must explicitly expose the plugin toolset.
+    "mermaid_renderer",
 )
 
 

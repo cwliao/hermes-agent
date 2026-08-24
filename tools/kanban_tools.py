@@ -494,6 +494,31 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
     raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid))
 
 
+def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
+    """Compatibility helper for callers that need the judge reason directly."""
+    if not task or not task.goal_mode or not _goal_judge_available():
+        return None
+    try:
+        verdict, reason, _, _, transport_failed = judge_goal(
+            goal=f"{task.title}\n\n{task.body or ''}".strip(),
+            last_response=evidence.strip(),
+        )
+        if transport_failed:
+            logger.warning(
+                "goal judge transport failed; allowing lifecycle handoff: %s",
+                reason,
+            )
+            return None
+        return reason if verdict != "done" else None
+    except Exception as judge_exc:
+        logger.warning(
+            "goal judge check failed, allowing lifecycle handoff: %s",
+            judge_exc,
+            exc_info=True,
+        )
+        return None
+
+
 # --- Runtime-activity → board bridges (auto-heartbeat, live comment injection) ---
 # The dispatcher watchdog reads ``tasks.last_heartbeat_at``, not the agent's in-process
 # activity timestamp, so normal work is mirrored onto the board here (``kanban_heartbeat``

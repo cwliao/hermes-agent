@@ -85,6 +85,25 @@ replace this Telegram end-to-end test.
 | `codex_sandbox` | `"workspace-write"` | Passed as codex's own `--sandbox` flag. |
 | `claude_permission_mode` | `"acceptEdits"` | Passed as claude's own `--permission-mode` flag. |
 
+### Spark/container namespace override
+
+Some DGX/container runtimes deny the Linux user/network namespaces that Codex
+uses for workspace-write, producing bwrap: ... Operation not permitted before
+the model can run. For that environment, set the Codex pool explicitly to
+danger-full-access and keep the pool's working-directory allowlist:
+
+    external_cli:
+      codex_bin: /home/cwliao/.local/bin/codex
+      codex_sandbox: danger-full-access
+      profile_home: /home/cwliao/.hermes-coding-cli-home
+      allowed_roots:
+        - /home/cwliao/hermes-coding-cli-workspace
+
+The bridge serializes Codex turns with
+<profile_home>/.codex-dispatch.lock, so only one Codex process uses this
+full-access route at a time. This is an environment-specific escape hatch;
+the general default remains workspace-write.
+
 The sandbox/permission defaults defer destructive-action gating to each
 CLI's own built-in system rather than bypassing it — override only if you
 understand the risk.

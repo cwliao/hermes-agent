@@ -278,11 +278,13 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
 def is_terminal_kanban_failure(tool_name: str, result: str | None) -> bool:
     """Return True for a lifecycle mutation rejected because it is terminal.
 
-    A completed Kanban worker must not spend the rest of its turn retrying the
-    same ``kanban_complete``/``kanban_block`` call.  The Kanban tool surface
-    marks this deterministic state transition with a private structured flag;
-    keeping the classifier here lets the runtime guard stop it even when the
-    normal configurable hard-stop policy is disabled.
+    Once a Kanban task is already terminal, no caller can make progress by
+    retrying ``kanban_complete``/``kanban_block``.  This includes orchestrator
+    and platform sessions that have Kanban tools enabled but are not running
+    inside a dispatcher-owned worker context.  The Kanban tool surface marks
+    this deterministic state transition with a private structured flag;
+    keeping the classifier here lets the runtime stop misleading follow-up
+    narration even when the normal configurable hard-stop policy is disabled.
     """
     if tool_name not in {"kanban_complete", "kanban_block"}:
         return False
@@ -518,7 +520,12 @@ class ToolCallGuardrailController:
             self._no_progress.pop(signature, None)
             failure_class = classify_failure_class(tool_name, result)
 
-            if kanban_worker and is_terminal_kanban_failure(tool_name, result):
+            # A terminal lifecycle rejection is deterministic for every
+            # Kanban-enabled caller, not only dispatcher-owned workers. The
+            # Telegram/orchestrator path can carry HERMES_KANBAN_TASK without
+            # the worker ContextVar, and allowing it to continue lets the
+            # model narrate success after the tool explicitly failed.
+            if is_terminal_kanban_failure(tool_name, result):
                 decision = ToolGuardrailDecision(
                     action="halt",
                     code="kanban_terminal_task_halt",

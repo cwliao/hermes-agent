@@ -239,6 +239,30 @@ def test_terminal_kanban_failure_halts_even_when_soft_mode_is_enabled():
     assert agent._tool_guardrails.halt_decision is decision
 
 
+def test_terminal_kanban_failure_halts_non_worker_platform_session():
+    """A Telegram/orchestrator Kanban session must not narrate success after rejection."""
+    agent = _make_agent(
+        "kanban_complete",
+        config={"tool_loop_guardrails": {
+            "hard_stop_enabled": False,
+            "unattended_soft_mode": True,
+        }},
+    )
+    result = json.dumps({
+        "error": "could not complete t_done: task is terminal (status=done)",
+        "kanban_terminal_error": True,
+        "task_id": "t_done",
+        "status": "done",
+    })
+    decision = agent._tool_guardrails.after_call(
+        "kanban_complete", {"task_id": "t_done", "summary": "retry"},
+        result, failed=True,
+        kanban_worker=False,
+    )
+    assert decision.should_halt
+    assert decision.code == "kanban_terminal_task_halt"
+
+
 def test_successful_kanban_terminal_receipt_is_recorded_after_real_ok_result(monkeypatch):
     agent = _make_agent("kanban_complete")
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_done")

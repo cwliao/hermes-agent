@@ -25,8 +25,8 @@ The live CLI platform toolset is updated to expose the already-enabled plugin.
 
 - [x] Worker default toolset includes mermaid_renderer.
 - [x] Cross-review APPROVE; no unresolved P0/P1/P2 finding.
-- [ ] Deploy immutable release and verify a new worker command includes
-      --toolsets ... mermaid_renderer.
+- [x] Deploy immutable release v2026.8.24-kanban-mermaid-worker-toolset-bf1ba3e619;
+      deployed resolver includes --toolsets ... mermaid_renderer.
 - [ ] Real Telegram retry reaches verifier and synthesizer with a durable PNG.
 
 ## Scope boundary
@@ -34,3 +34,12 @@ The live CLI platform toolset is updated to expose the already-enabled plugin.
 This ticket does not weaken swarm completion validation or fabricate PNG
 evidence. A worker must still produce and declare a real readable artifact;
 this change only makes the installed renderer reachable.
+
+## Delivery evidence
+
+- Implementation commit: bf1ba3e619d5316608b0d03a9bff9f3905283f71
+- Pushed to origin/main.
+- Immutable release: /home/cwliao/.hermes/releases/v2026.8.24-kanban-mermaid-worker-toolset-bf1ba3e619
+- Pinned venv: /home/cwliao/.hermes/venvs/gateway-bf1ba3e619
+- Effective systemd drop-in: 88-kanban-mermaid-worker-toolset-bf1ba3e619.conf
+- Post-deploy gateway: active/running, NRestarts=0, Telegram polling healthy.

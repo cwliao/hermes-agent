@@ -132,6 +132,47 @@ def test_kanban_notifier_replays_telegram_dm_topic_delivery_metadata(tmp_path, m
     assert adapter.handled[0].source.thread_id == "20197"
 
 
+def test_synthesizer_notifier_sends_result_not_status_summary(tmp_path, monkeypatch):
+    """The final synthesizer deliverable must survive the event handoff."""
+    db_path = tmp_path / "synthesizer-result.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="synthesized jokes",
+            assignee="synthesizer",
+            body='role = "synthesizer"\n[swarm:contract]',
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat-1",
+            delivery_mode="notify+wake",
+        )
+        assert kb.complete_task(
+            conn,
+            tid,
+            result="Joke A: 秋天的葉子會變色。\nJoke B: 秋風一吹，笑聲就落葉。",
+            summary="status only",
+        )
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
+
+    assert len(adapter.sent) == 1
+    assert "Joke A: 秋天的葉子會變色。" in adapter.sent[0]["text"]
+    assert "Joke B: 秋風一吹，笑聲就落葉。" in adapter.sent[0]["text"]
+    assert "status only" not in adapter.sent[0]["text"]
+    assert len(adapter.handled) == 1
+    assert "Joke A: 秋天的葉子會變色。" in adapter.handled[0].text
+
+
 def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):
     """A sub stamped with the gateway's own named profile uses self.adapters.
 

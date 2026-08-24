@@ -83,6 +83,27 @@ def test_swarm_output_validation_is_narrow_and_auditable():
         "validation_reason": "ok",
     }
 
+    synthesizer_contract = {
+        "role": "synthesizer",
+        "root_id": "t_root",
+        "output_policy": {
+            "reject_internal_length_marker": True,
+            "require_balanced_quotes": True,
+        },
+    }
+    assert validate_swarm_output_text(
+        "Verified all four lane outputs processed; final synthesized output ready "
+        "as JSONL; file existence confirmed by read_file; completion metadata provided",
+        contract=synthesizer_contract,
+    ) == (
+        "synthesizer result is status-only; include the exact final user-facing "
+        "deliverable text"
+    )
+    assert validate_swarm_output_text(
+        "Joke A: 秋天的葉子會變色。\nJoke B: 秋風一吹，笑聲就落葉。",
+        contract=synthesizer_contract,
+    ) is None
+
 
 def test_completion_rejects_malformed_worker_summary_without_rewriting(tmp_path):
     conn = kb.connect(tmp_path / "kanban.db")

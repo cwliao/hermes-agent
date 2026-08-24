@@ -281,7 +281,12 @@ def _fmt_completed(ev, n) -> tuple:
     # Prefer the run summary from the event payload; fall back to task.result for legacy rows.
     wake_handoff = None
     payload_summary = _payload(ev, "summary")
-    if payload_summary:
+    is_synthesizer = bool(
+        n.task and 'role = "synthesizer"' in (n.task.body or "")
+    )
+    if is_synthesizer and n.task and n.task.result:
+        wake_handoff = str(n.task.result).strip()[:4000]
+    elif payload_summary:
         wake_handoff = _first_line(str(payload_summary), 200)
     elif n.task and n.task.result:
         wake_handoff = _first_line(n.task.result, 160)

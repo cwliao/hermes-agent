@@ -625,7 +625,20 @@ class GatewayKanbanWatchersMixin:
                             payload_summary = None
                             if ev.payload and ev.payload.get("summary"):
                                 payload_summary = str(ev.payload["summary"])
-                            if payload_summary:
+                            # A synthesizer's task.result is the actual
+                            # user-facing deliverable. The event summary is
+                            # intentionally a short status handoff, so using
+                            # it here made the final output disappear from
+                            # Telegram even though the task was complete.
+                            is_synthesizer = bool(
+                                task
+                                and 'role = "synthesizer"' in (task.body or "")
+                            )
+                            if is_synthesizer and task and task.result:
+                                h = str(task.result).strip()[:4000]
+                                handoff = f"\n{h}"
+                                wake_handoff = h
+                            elif payload_summary:
                                 lines = payload_summary.strip().splitlines()
                                 h = lines[0][:200] if lines else payload_summary[:200]
                                 handoff = f"\n{h}"

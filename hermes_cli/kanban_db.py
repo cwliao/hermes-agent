@@ -11257,10 +11257,17 @@ def _resolve_worker_cli_toolsets(
     try:
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         from hermes_cli.config import load_config
+        from hermes_cli.plugins import discover_plugins
         from hermes_cli.tools_config import _get_platform_tools
 
         token = set_hermes_home_override(hermes_home)
         try:
+            # The gateway imports kanban_db before plugin discovery necessarily
+            # completes. Discover in the worker's effective HERMES_HOME before
+            # resolving the bounded --toolsets pin, or plugin-provided names
+            # such as mermaid_renderer are filtered out and the child starts
+            # with an explicit toolset that its registry does not know.
+            discover_plugins()
             cfg = load_config()
             available = set(_get_platform_tools(cfg, "cli"))
             raw_override = (cfg.get("kanban") or {}).get("worker_toolsets")

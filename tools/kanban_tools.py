@@ -354,10 +354,20 @@ def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
     verdict = "done"
     reason = ""
     try:
-        verdict, reason, _, _, _ = judge_goal(
+        verdict, reason, _, _, transport_failed = judge_goal(
             goal=f"{task.title}\n\n{task.body or ''}".strip(),
             last_response=evidence.strip(),
         )
+        if transport_failed:
+            # A timeout/connection failure is not evidence that the handoff
+            # is premature. The deterministic Kanban completion contract
+            # remains the authoritative gate; do not turn an unavailable
+            # auxiliary judge into an endless worker continuation loop.
+            logger.warning(
+                "goal judge transport failed; allowing lifecycle handoff: %s",
+                reason,
+            )
+            return None
     except Exception as judge_exc:
         # Keep the existing fail-open semantics: an unavailable/broken
         # auxiliary judge must not permanently wedge goal-mode work.

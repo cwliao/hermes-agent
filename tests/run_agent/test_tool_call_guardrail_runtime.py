@@ -215,6 +215,79 @@ def test_same_tool_failure_warning_tells_model_to_recover_with_tools():
     assert "different tool" in content
 
 
+def test_terminal_kanban_failure_halts_even_when_soft_mode_is_enabled():
+    agent = _make_agent(
+        "kanban_complete",
+        config={"tool_loop_guardrails": {
+            "hard_stop_enabled": False,
+            "unattended_soft_mode": True,
+        }},
+    )
+    result = json.dumps({
+        "error": "could not complete t_done: task is terminal (status=done)",
+        "kanban_terminal_error": True,
+        "task_id": "t_done",
+        "status": "done",
+    })
+    decision = agent._tool_guardrails.after_call(
+        "kanban_complete", {"task_id": "t_done", "summary": "retry"},
+        result, failed=True,
+        kanban_worker=True,
+    )
+    assert decision.should_halt
+    assert decision.code == "kanban_terminal_task_halt"
+    assert agent._tool_guardrails.halt_decision is decision
+
+
+def test_successful_kanban_terminal_receipt_is_recorded_after_real_ok_result(monkeypatch):
+    agent = _make_agent("kanban_complete")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_done")
+    result = agent._append_guardrail_observation(
+        "kanban_complete",
+        {"task_id": "t_done", "summary": "finished"},
+        json.dumps({"ok": True, "task_id": "t_done", "run_id": 7}),
+        failed=False,
+    )
+    assert json.loads(result)["ok"] is True
+    assert agent._kanban_terminal_success == {
+        "tool_name": "kanban_complete",
+        "task_id": "t_done",
+        "run_id": 7,
+    }
+
+
+def test_worker_terminal_success_drains_later_calls_in_same_batch(monkeypatch):
+    agent = _make_agent("kanban_complete", "web_search")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_done")
+    calls = [
+        _mock_tool_call(
+            "kanban_complete",
+            json.dumps({"task_id": "t_done", "summary": "finished"}),
+            "c-complete",
+        ),
+        _mock_tool_call(
+            "web_search",
+            json.dumps({"query": "must not run"}),
+            "c-late",
+        ),
+    ]
+    executed = []
+
+    def fake_handle(name, args, task_id, **kwargs):
+        executed.append(name)
+        return json.dumps({"ok": True, "task_id": "t_done", "run_id": 7})
+
+    messages = []
+    with patch("run_agent.handle_function_call", side_effect=fake_handle):
+        agent._execute_tool_calls(
+            SimpleNamespace(content="", tool_calls=calls), messages, "t_done"
+        )
+
+    assert executed == ["kanban_complete"]
+    assert len(messages) == 2
+    assert messages[1]["tool_call_id"] == "c-late"
+
+
 def test_config_enabled_hard_stop_concurrent_path_does_not_submit_blocked_calls_and_preserves_result_order():
     agent = _make_agent("web_search", config=_hard_stop_config())
     blocked_args = {"query": "blocked"}

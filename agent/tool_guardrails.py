@@ -222,6 +222,63 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
     return (True, " [error]") if '"error"' in lower or '"failed"' in lower or result.startswith("Error") else (False, "")
 
 
+def is_terminal_kanban_failure(tool_name: str, result: str | None) -> bool:
+    """Return True for a lifecycle mutation rejected because it is terminal.
+
+    A completed Kanban worker must not spend the rest of its turn retrying the
+    same ``kanban_complete``/``kanban_block`` call.  The Kanban tool surface
+    marks this deterministic state transition with a private structured flag;
+    keeping the classifier here lets the runtime guard stop it even when the
+    normal configurable hard-stop policy is disabled.
+    """
+    if tool_name not in {"kanban_complete", "kanban_block"}:
+        return False
+    data = safe_json_loads(result) if result else None
+    return isinstance(data, Mapping) and data.get("kanban_terminal_error") is True
+
+
+def classify_failure_class(tool_name: str, result: str | None) -> str:
+    """Classify deterministic blockers without retaining their raw text."""
+    if not result:
+        return "unknown"
+    parsed = safe_json_loads(result)
+    fragments: list[str] = []
+    if isinstance(parsed, Mapping):
+        for key in ("error", "stderr", "stdout", "message", "reason"):
+            value = parsed.get(key)
+            if value:
+                fragments.append(str(value))
+        exit_code = parsed.get("exit_code")
+        if exit_code not in (None, 0) and not fragments:
+            fragments.append(f"exit code {exit_code}")
+    fragments.append(str(result)[:1200])
+    text = " ".join(fragments).lower()
+    if any(token in text for token in ("permission denied", "access denied", "approval denied", "not approved")):
+        return "permission"
+    if any(token in text for token in ("working directory", "workdir", "cwd", "directory does not exist")):
+        return "invalid_workdir"
+    if any(token in text for token in ("no such file", "file not found", "path not found", "does not exist", "missing target")):
+        return "missing_target"
+    if any(token in text for token in ("syntaxerror", "parse error", "invalid json", "malformed", "schema validation", "invalid syntax")):
+        return "malformed_input"
+    return "unknown"
+
+
+def _target_identity(tool_name: str, args: Mapping[str, Any]) -> str:
+    """Return a private target identity that never leaves the controller."""
+    targets: list[str] = []
+    for key, value in args.items():
+        if str(key).lower() in _TARGET_KEYS:
+            targets.append(f"{str(key).lower()}={value}")
+    if not targets and tool_name == "terminal":
+        command = str(args.get("command", ""))
+        targets.extend(re.findall(r"(?:/[^\s'\"]+|[A-Za-z]:[\\/][^\s'\"]+)", command)[:4])
+    if not targets:
+        targets.append(tool_name)
+    canonical = json.dumps(sorted(targets), ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"{tool_name}:{_sha256(canonical)}"
+
+
 # Guardrail verdict text injected into the conversation, keyed by decision code.
 # ``same_tool_failure_warning`` is built by _tool_failure_recovery_hint (tool-specific).
 _DECISION_MESSAGES: dict[str, str] = {
@@ -324,6 +381,12 @@ class ToolCallGuardrailController:
         signature = ToolCallSignature.from_call(tool_name, args)
         allow = ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
+        if (
+            self._halt_decision is not None
+            and self._halt_decision.code == "kanban_terminal_task_halt"
+        ):
+            return self._halt_decision
+
         # Loop caps apply regardless of hard_stop_enabled (which only governs the detector).
         cap_block = self._check_loop_cap(tool_name, args, signature)
         if cap_block is not None or not self.config.hard_stop_enabled:
@@ -339,7 +402,9 @@ class ToolCallGuardrailController:
 
     def after_call(
         self, tool_name: str, args: Mapping[str, Any] | None, result: str | None,
-        *, failed: bool | None = None,
+        *,
+        failed: bool | None = None,
+        kanban_worker: bool = False,
     ) -> ToolGuardrailDecision:
         args = _coerce_args(args)
         signature = ToolCallSignature.from_call(tool_name, args)
@@ -355,6 +420,24 @@ class ToolCallGuardrailController:
             exact_count = self._exact_failure_counts[signature] = self._exact_failure_counts.get(signature, 0) + 1
             same_count = self._same_tool_failure_counts[tool_name] = self._same_tool_failure_counts.get(tool_name, 0) + 1
             self._no_progress.pop(signature, None)
+            failure_class = classify_failure_class(tool_name, result)
+
+            if kanban_worker and is_terminal_kanban_failure(tool_name, result):
+                decision = ToolGuardrailDecision(
+                    action="halt",
+                    code="kanban_terminal_task_halt",
+                    message=(
+                        f"Stopped {tool_name}: the Kanban task is already terminal. "
+                        "Do not retry the lifecycle mutation; end this worker turn."
+                    ),
+                    tool_name=tool_name,
+                    count=1,
+                    signature=signature,
+                )
+                self._halt_decision = decision
+                return decision
+            if failure_class in DETERMINISTIC_BLOCKER_CLASSES:
+                self._record_cross_turn_failure(_target_identity(tool_name, args), failure_class)
             # same_tool_failure counts DIFFERENT args on one tool; for failure-tolerant
             # tools a run of distinct red commands is diagnosis, not a loop — warn, never halt.
             if (

@@ -89,8 +89,53 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
+# Typed block reasons. Distinguishes the two fundamentally different things a
+# worker (or human) means by "blocked", so each can be routed differently
+# instead of all landing in one undifferentiated ``blocked`` bucket that a cron
+# unblocks → worker re-blocks → cron unblocks … forever.
+#
+#   * ``dependency``   — can't proceed until another task finishes. Routed to
+#                        ``todo`` (NOT ``blocked``) so the existing
+#                        parent-gating / ``recompute_ready`` machinery promotes
+#                        it automatically once parents are done. No human, no
+#                        cron, no retry storm.
+#   * ``needs_input``  — needs a human decision/answer it cannot derive.
+#   * ``capability``   — hit a hard wall (no access, missing creds, an action no
+#                        AI agent can perform). Genuinely human-only.
+#   * ``transient``    — a flaky/temporary failure that may clear on retry.
+#
+# ``needs_input`` and ``capability`` are "truly blocked": they go to ``blocked``
+# for a human, and the unblock-loop breaker (see ``block_task`` /
+# ``BLOCK_RECURRENCE_LIMIT``) escalates them to ``triage`` if a cron keeps
+# unblocking them only to have the worker re-block for the same reason.
+# ``None`` = legacy/un-typed block (treated as a generic human blocker).
+#
+# KANBAN-SWARM-002: two terminal-recovery kinds for the synthesizer attempt
+# lifecycle. Neither is a "truly blocked, needs a human to unstick it right
+# now" case in the ``needs_input``/``capability`` sense above -- they're
+# recorded so the swarm's own consumers (notifier, dashboard, execution
+# guard) can tell "retried the budgeted number of times and gave up" apart
+# from "a human needs to answer a question" -- but they still route through
+# the same generic ``blocked`` lane/UI, no new lifecycle state was added.
+#
+# ``synthesizer_retry_exhausted``: the synthesizer role's bounded retry
+# budget (max_retries=1, i.e. max_attempts=2) or its 660s overall deadline
+# was exhausted. Terminal -- no later dispatcher tick may spawn another
+# attempt for this task (enforced by ``retry_not_before``/deadline checks
+# in ``enforce_max_runtime``, not by this constant alone).
+#
+# ``termination_pending``: a timed-out worker's process did not confirm
+# dead after SIGTERM+SIGKILL. Distinct from a normal timeout retry: this
+# task is intentionally NOT re-queued to ``ready`` automatically, because
+# doing so risks a second worker running concurrently with a old worker
+# that might still be alive. Requires an operator (or a later, more
+# thorough reconciliation pass) to confirm the old PID is actually gone
+# before manually unblocking.
 # Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
-VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
+VALID_BLOCK_KINDS = {
+    "dependency", "needs_input", "capability", "transient",
+    "synthesizer_retry_exhausted", "termination_pending",
+}
 
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
@@ -733,6 +778,10 @@ class Task:
     session_id: Optional[str] = None         # originating HERMES_SESSION_ID; NULL from CLI/dashboard
     # VALID_BLOCK_KINDS or None (legacy); kept across unblock so a same-kind re-block reads as a loop.
     block_kind: Optional[str] = None
+    # KANBAN-SWARM-002 retry backoff deadline. NULL means the ready task is
+    # claimable immediately; a future timestamp keeps it out of the dispatcher
+    # until the synthesizer retry cooldown has elapsed.
+    retry_not_before: Optional[int] = None
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
@@ -762,6 +811,7 @@ class Task:
             last_failure_error=g("last_failure_error", g("last_spawn_error")),
             skills=skills_value,
             goal_mode=bool(g("goal_mode")),
+            retry_not_before=g("retry_not_before"),
             block_recurrences=int(g("block_recurrences") or 0),
             origin_platform=g("origin_platform"),
             origin_chat_id=g("origin_chat_id"),
@@ -972,6 +1022,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- to ``blocked`` for a human. Preserved across unblock so a re-block for
     -- the SAME kind can be recognised as a loop.
     block_kind           TEXT,
+    -- KANBAN-SWARM-002 retry backoff: NULL means claimable immediately.
+    -- claim_task refuses a ready row while this is in the future.
+    retry_not_before     INTEGER,
     -- Unblock-loop counter. Incremented each time a task is re-blocked for the
     -- same truly-blocked reason after having been unblocked. When it reaches
     -- BLOCK_RECURRENCE_LIMIT the task is routed to ``triage`` instead of
@@ -1117,7 +1170,6 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 """
 
 
-# --- ID generation ---
 
 def _new_task_id() -> str:
     """``t_`` + 4 hex bytes (collision ~1e-3 at 100k tasks; 2 bytes would hit 50%
@@ -2519,8 +2571,9 @@ def _claim_and_open_run(
          WHERE id = ?
            AND status = '{source_status}'
            AND claim_lock IS NULL
+           AND (retry_not_before IS NULL OR retry_not_before <= ?)
         """,
-        (lock, expires, now, task_id),
+        (lock, expires, now, task_id, now),
     )
     if cur.rowcount != 1:
         return None
@@ -4252,7 +4305,6 @@ def schedule_task(
         )
         _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
         return True
-
 
 
 def _mandatory_worker_contract_text(task_body: Optional[str]) -> str:

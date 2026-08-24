@@ -418,14 +418,18 @@ def heartbeat_worker(
     return True
 
 
-def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:
-    """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
+def _is_synthesizer_role(body: Optional[str]) -> bool:
+    """Return whether a task body identifies the synthesizer swarm role."""
+    return bool(body) and 'role = "synthesizer"' in body
 
-    SIGTERM, short grace, then SIGKILL. Emits ``timed_out`` and restores the
-    task's source phase so the next tick re-spawns the same kind of worker —
-    unless the circuit breaker already gave up, leaving it blocked. Host-local
-    only (same reasoning as ``detect_crashed_workers``). ``signal_fn`` is a test hook.
-    """
+
+_SYNTHESIZER_TERMINATION_GRACE_SECONDS = 15
+_SYNTHESIZER_RETRY_BACKOFF_SECONDS = 30
+_SYNTHESIZER_OVERALL_DEADLINE_SECONDS = 660
+
+
+def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:
+    """Terminate timed-out workers, with bounded synthesizer recovery."""
     timed_out: list[str] = []
     now = int(time.time())
     host_prefix = _kb._host_prefix()
@@ -433,7 +437,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       t.max_runtime_seconds, t.claim_lock, t.body, t.started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
@@ -444,8 +448,6 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         lock = row["claim_lock"] or ""
         if not lock.startswith(host_prefix):
             continue
-        # Runtime is per attempt: ``tasks.started_at`` records the FIRST start,
-        # so retries must be measured from the active task_runs row.
         elapsed = now - int(row["active_started_at"])
         limit = int(row["max_runtime_seconds"])
         if elapsed < limit:
@@ -453,35 +455,78 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
 
         pid = int(row["worker_pid"])
         tid = row["id"]
-        # SIGTERM then SIGKILL after 5 s grace; workers wanting a cleaner
-        # shutdown install their own SIGTERM handler.
+        is_synth = _is_synthesizer_role(row["body"] if "body" in row.keys() else None)
+        grace_seconds = _SYNTHESIZER_TERMINATION_GRACE_SECONDS if is_synth else 5
         killed = False
         kill = _kill_fn(signal_fn)
         if kill is not None:
             with contextlib.suppress(ProcessLookupError, OSError):
                 kill(pid, signal.SIGTERM)
-            # Short polling wait — no time.sleep on the write txn.
-            _poll_worker_exit(pid)
+            poll_iterations = max(1, int(grace_seconds / 0.5))
+            for _ in range(poll_iterations):
+                if not _kb._pid_alive(pid):
+                    break
+                time.sleep(0.5)
             if _kb._pid_alive(pid):
                 killed = _sigkill(kill, pid)
+                if is_synth:
+                    for _ in range(poll_iterations):
+                        if not _kb._pid_alive(pid):
+                            break
+                        time.sleep(0.5)
+
+        termination_confirmed = not is_synth or not _kb._pid_alive(pid)
+        if is_synth and not termination_confirmed:
+            with _kb.write_txn(conn):
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'blocked', "
+                    "block_kind = 'termination_pending', "
+                    "claim_lock = NULL, claim_expires = NULL, "
+                    "worker_pid = NULL, last_heartbeat_at = NULL "
+                    "WHERE id = ? AND status = 'running' "
+                    "  AND worker_pid = ? AND claim_lock IS ?",
+                    (tid, pid, row["claim_lock"]),
+                )
+                if cur.rowcount == 1:
+                    payload = {
+                        "pid": pid, "elapsed_seconds": int(elapsed),
+                        "limit_seconds": limit, "sigkill": killed,
+                        "termination_confirmed": False,
+                        "block_kind": "termination_pending",
+                    }
+                    run_id = _kb._end_run(
+                        conn, tid, outcome="timed_out", status="timed_out",
+                        error=f"elapsed {int(elapsed)}s > limit {limit}s; "
+                              "termination not confirmed after SIGKILL",
+                        metadata=payload,
+                    )
+                    _kb._append_event(conn, tid, "timed_out", payload, run_id=run_id)
+                    timed_out.append(tid)
+            continue
 
         error = f"elapsed {int(elapsed)}s > limit {limit}s"
         with _kb.write_txn(conn):
             retry_status = _kb._retry_status_for_run(conn, tid)
+            fields = (
+                "status = ?, claim_lock = NULL, claim_expires = NULL, "
+                "worker_pid = NULL, last_heartbeat_at = NULL"
+            )
+            params: list[Any] = [retry_status]
+            if is_synth:
+                fields += ", retry_not_before = ?"
+                params.append(now + _SYNTHESIZER_RETRY_BACKOFF_SECONDS)
+            params.extend([tid, pid, row["claim_lock"]])
             cur = conn.execute(
-                "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL, "
-                "last_heartbeat_at = NULL "
+                f"UPDATE tasks SET {fields} "
                 "WHERE id = ? AND status = 'running' "
                 "  AND worker_pid = ? AND claim_lock IS ?",
-                (retry_status, tid, pid, row["claim_lock"]),
+                params,
             )
             if cur.rowcount == 1:
                 payload = {
-                    "pid": pid,
-                    "elapsed_seconds": int(elapsed),
-                    "limit_seconds": limit,
-                    "sigkill": killed,
+                    "pid": pid, "elapsed_seconds": int(elapsed),
+                    "limit_seconds": limit, "sigkill": killed,
+                    "termination_confirmed": termination_confirmed,
                     "retry_status": retry_status,
                 }
                 run_id = _kb._end_run(
@@ -490,17 +535,24 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
                 )
                 _kb._append_event(conn, tid, "timed_out", payload, run_id=run_id)
                 timed_out.append(tid)
-        # Outside the write_txn above because ``_record_task_failure`` opens its
-        # own. If the breaker trips this flips the task to ``blocked`` and emits
-        # ``gave_up`` on top of the ``timed_out`` already emitted.
+
         if cur.rowcount == 1:
+            deadline_exceeded = (
+                is_synth
+                and row["started_at"] is not None
+                and (int(time.time()) - int(row["started_at"]))
+                >= _SYNTHESIZER_OVERALL_DEADLINE_SECONDS
+            )
             _record_task_failure(
-                conn, tid,
-                error=error,
-                outcome="timed_out",
-                release_claim=False,
-                end_run=False,
-                event_payload_extra={"pid": pid, "sigkill": killed, "retry_status": retry_status},
+                conn, tid, error=error, outcome="timed_out",
+                release_claim=False, end_run=False,
+                force_trip=deadline_exceeded,
+                block_kind=("synthesizer_retry_exhausted" if is_synth else None),
+                event_payload_extra={
+                    "pid": pid, "sigkill": killed,
+                    "retry_status": retry_status,
+                    "deadline_exceeded": deadline_exceeded,
+                },
             )
     return timed_out
 
@@ -998,6 +1050,7 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
+    block_kind: Optional[str] = None,
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
@@ -1070,9 +1123,10 @@ def _record_task_failure(
             "UPDATE tasks SET status = 'blocked', "
             + ("claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
                if release_claim else "")
-            + "consecutive_failures = ?, last_failure_error = ? "
+            + "consecutive_failures = ?, last_failure_error = ?, "
+            + "block_kind = COALESCE(?, block_kind) "
             "WHERE id = ? AND status IN ('running', 'ready', 'review')",
-            (failures, error, task_id),
+            (failures, error, block_kind, task_id),
         )
         payload = {
             "failures": failures,

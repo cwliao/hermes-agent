@@ -782,7 +782,7 @@ def test_lane_bound_completion_is_fail_closed_and_synth_requires_verifier_gate(t
         )
         assert kb.get_task(conn, created.synthesizer_id).status == "ready"
         assert kb.complete_task(
-            conn, created.synthesizer_id, result="The synthesized joke.",
+            conn, created.synthesizer_id, result="冬天的笑話。",
             metadata={
                 "role": "synthesizer", "root_id": created.root_id,
                 "outcome": "completed", "result_present": True,
@@ -864,7 +864,7 @@ def test_completion_requirements_satisfy_validate_completion(tmp_path):
             assert metadata, f"{contract['role']} body states no completion metadata"
             # The synthesizer additionally requires a non-empty task result;
             # every other role is metadata-only.
-            result = "final deliverable" if contract["role"] == "synthesizer" else None
+            result = "最終交付內容：冬天的笑話。" if contract["role"] == "synthesizer" else None
             reason = validate_completion(task, metadata=metadata, result=result)
             assert reason is None, f"{contract['role']}: {reason}"
     finally:
@@ -938,7 +938,7 @@ def test_completion_call_example_distinguishes_top_level_from_metadata_fields():
     assert '"summary"' not in worker_example.split('"metadata"')[1]
 
     synth_example = _completion_call_example({"role": "synthesizer", "root_id": "t_root"})
-    assert '"result": "<your final, non-empty deliverable text>"' in synth_example
+    assert '"result": "冬天的笑話：雪人說，今天真冷。"' in synth_example
     assert '"result"' not in synth_example.split('"metadata"')[1]
 
 
@@ -975,7 +975,7 @@ def test_completion_requirements_reject_a_subset(tmp_path):
             task = kb.get_task(conn, task_id)
             role = extract_contract(task.body)["role"]
             full = _metadata_from_body(task.body)
-            result = "final deliverable" if role == "synthesizer" else None
+            result = "最終交付內容：冬天的笑話。" if role == "synthesizer" else None
             for dropped in full:
                 partial = {k: v for k, v in full.items() if k != dropped}
                 reason = validate_completion(task, metadata=partial, result=result)

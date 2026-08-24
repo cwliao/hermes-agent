@@ -44,7 +44,7 @@ binary is /home/cwliao/.local/bin/codex.
 - [x] Codex bridge serializes external Codex turns per profile.
 - [x] Regression test covers lock creation.
 - [x] Live config uses the installed Codex binary and danger-full-access.
-- [ ] A DGX smoke task reaches Codex model execution without bwrap namespace
+- [x] A DGX smoke task reached Codex model execution without bwrap namespace
       errors.
 - [ ] Claude external-cli behavior remains unchanged.
 

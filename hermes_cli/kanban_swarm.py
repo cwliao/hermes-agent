@@ -262,6 +262,8 @@ def _completion_requirements(contract: dict[str, Any]) -> str:
             '  outcome = "completed"',
             "  result_present = true",
             "  and the task result itself must be non-empty",
+            "  result must be the exact final user-facing deliverable, not a progress/status report",
+            "  if an artifact is used, inline its complete human-readable contents in result; do not rely on attachment-only delivery",
         ]
         if output_policy.get("reject_internal_length_marker"):
             lines.append("  result text must not contain an internal length marker")
@@ -291,6 +293,13 @@ def validate_swarm_output_text(
     if not value:
         return "swarm output text is empty"
     policy = contract.get("output_policy") or {}
+    if contract.get('role') == 'synthesizer':
+        lower = value.lower()
+        if ('verified' in lower and 'processed' in lower
+                and 'final synthesized output ready' in lower
+                and 'completion metadata provided' in lower):
+            return ('synthesizer result is status-only; include the exact final'
+                    ' user-facing deliverable text')
     if policy.get("reject_internal_length_marker") and _INTERNAL_LENGTH_MARKER_RE.search(value):
         return "swarm output contains an internal length marker"
     if policy.get("require_balanced_quotes"):

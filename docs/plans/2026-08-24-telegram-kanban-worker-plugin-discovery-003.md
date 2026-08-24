@@ -1,6 +1,6 @@
 # TELEGRAM-KANBAN-WORKER-PLUGIN-DISCOVERY-003
 
-Status: REVIEW_APPROVED_PENDING_DEPLOY
+Status: FOLLOWUP_REVIEW_APPROVED_PENDING_DEPLOY
 Date: 2026-08-24
 Type: ticket
 Target repo: hermes-agent
@@ -77,3 +77,32 @@ endpoint availability remains a separate vLLM configuration decision.
   `discover_plugins()`, which joins the in-flight discovery thread before
   `_get_platform_tools()` reads plugin keys.
 - Related tests: 82 passed.
+
+## Follow-up live E2E finding
+
+After the first immutable release was deployed, Telegram transport recovered:
+the inbound update was accepted, four workers were spawned, progress and final
+messages were delivered, and the gateway stayed healthy. However, all four
+fresh worker logs still reported:
+
+`Warning: Unknown toolsets: mermaid_renderer`
+
+The remaining root cause was in the child CLI: `HermesCLI` validated the
+explicit bounded `--toolsets` list before the child plugin registry had run
+discovery. The gateway resolver was therefore correct, but a cold-started
+worker still rejected the plugin-backed toolset.
+
+## Follow-up fix
+
+`cli.py` now runs the public synchronous `discover_plugins()` path before
+toolset validation for Kanban workers. The `HERMES_DEFER_AGENT_STARTUP=1`
+interactive Termux path remains deferred unless the Kanban task marker is
+present, so ordinary prompt-first startup semantics are preserved.
+
+Regression coverage uses a real temporary Hermes home with the Mermaid plugin
+enabled and also verifies that deferred non-Kanban startup does not discover
+eagerly.
+
+Follow-up validation: 134 passed, 1 skipped; final cross-review found no
+actionable defect in the patch. A fresh post-deploy Telegram E2E remains the
+release acceptance gate.

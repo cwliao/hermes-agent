@@ -312,6 +312,25 @@ _CTX_MAX_BODY_BYTES     = 8 * 1024   # per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
 _CTX_MAX_TOTAL_CHARS    = 24 * 1024  # aggregate worker context cap
 
+# Per-field caps do not bound the aggregate: 30 comments plus 10 attempts and
+# several parent handoffs can still produce a prompt large enough to consume a
+# worker's context before it reaches kanban_complete. Keep this conservative
+# character cap below the common 64K-token window while preserving mandatory
+# contract facts separately in build_worker_context().
+
+# A worker needs the Kanban lifecycle surface, file/terminal access for normal
+# task work, skills for its explicit task skills, and web for the common
+# research lane. The profile's full CLI surface is intentionally not inherited
+# by default: memory/browser/computer-use/image/code-execution tool schemas can
+# add tens of thousands of prompt characters before the worker does any work.
+# ``kanban.worker_toolsets`` in the profile config is an explicit override.
+KANBAN_WORKER_DEFAULT_TOOLSETS = (
+    "file", "kanban", "skills", "terminal", "web",
+    # Bounded native renderer needed for Mermaid/PNG deliverables; profiles
+    # still must explicitly expose the plugin toolset.
+    "mermaid_renderer",
+)
+
 
 def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
     """``just now`` / ``18h ago`` / ``3d ago``; "" for a missing/invalid ts. An LLM

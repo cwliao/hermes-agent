@@ -122,7 +122,32 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 # ``BLOCK_RECURRENCE_LIMIT``) escalates them to ``triage`` if a cron keeps
 # unblocking them only to have the worker re-block for the same reason.
 # ``None`` = legacy/un-typed block (treated as a generic human blocker).
-VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
+#
+# KANBAN-SWARM-002: two terminal-recovery kinds for the synthesizer attempt
+# lifecycle. Neither is a "truly blocked, needs a human to unstick it right
+# now" case in the ``needs_input``/``capability`` sense above -- they're
+# recorded so the swarm's own consumers (notifier, dashboard, execution
+# guard) can tell "retried the budgeted number of times and gave up" apart
+# from "a human needs to answer a question" -- but they still route through
+# the same generic ``blocked`` lane/UI, no new lifecycle state was added.
+#
+# ``synthesizer_retry_exhausted``: the synthesizer role's bounded retry
+# budget (max_retries=1, i.e. max_attempts=2) or its 660s overall deadline
+# was exhausted. Terminal -- no later dispatcher tick may spawn another
+# attempt for this task (enforced by ``retry_not_before``/deadline checks
+# in ``enforce_max_runtime``, not by this constant alone).
+#
+# ``termination_pending``: a timed-out worker's process did not confirm
+# dead after SIGTERM+SIGKILL. Distinct from a normal timeout retry: this
+# task is intentionally NOT re-queued to ``ready`` automatically, because
+# doing so risks a second worker running concurrently with a old worker
+# that might still be alive. Requires an operator (or a later, more
+# thorough reconciliation pass) to confirm the old PID is actually gone
+# before manually unblocking.
+VALID_BLOCK_KINDS = {
+    "dependency", "needs_input", "capability", "transient",
+    "synthesizer_retry_exhausted", "termination_pending",
+}
 
 # After a task has been blocked, unblocked, and re-blocked this many times for
 # the same (truly-blocked) reason, the unblock-loop breaker stops trusting the
@@ -1157,6 +1182,10 @@ class Task:
     # blocks. Set by ``block_task``; preserved across unblock so a re-block for
     # the same kind is recognisable as an unblock↔re-block loop.
     block_kind: Optional[str] = None
+    # KANBAN-SWARM-002 retry backoff deadline. NULL means the ready task is
+    # claimable immediately; a future timestamp keeps it out of the dispatcher
+    # until the synthesizer retry cooldown has elapsed.
+    retry_not_before: Optional[int] = None
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
@@ -1258,6 +1287,11 @@ class Task:
             ),
             block_kind=(
                 row["block_kind"] if "block_kind" in keys and row["block_kind"] else None
+            ),
+            retry_not_before=(
+                row["retry_not_before"]
+                if "retry_not_before" in keys and row["retry_not_before"] is not None
+                else None
             ),
             block_recurrences=(
                 int(row["block_recurrences"])
@@ -1463,6 +1497,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- to ``blocked`` for a human. Preserved across unblock so a re-block for
     -- the SAME kind can be recognised as a loop.
     block_kind           TEXT,
+    -- KANBAN-SWARM-002 retry backoff: NULL means claimable immediately.
+    -- claim_task refuses a ready row while this is in the future.
+    retry_not_before     INTEGER,
     -- Unblock-loop counter. Incremented each time a task is re-blocked for the
     -- same truly-blocked reason after having been unblocked. When it reaches
     -- BLOCK_RECURRENCE_LIMIT the task is routed to ``triage`` instead of
@@ -2749,6 +2786,19 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # blocks. Existing blocked rows get NULL, which is treated as a
         # generic human blocker — same behaviour they had before the column.
         _add_column_if_missing(conn, "tasks", "block_kind", "block_kind TEXT")
+
+    if "retry_not_before" not in cols:
+        # KANBAN-SWARM-002: backoff/cooldown after a timeout-triggered retry
+        # (currently only set on the synthesizer role's timeout path in
+        # ``enforce_max_runtime``). NULL means "no backoff in effect" —
+        # claimable immediately, same as every row before this migration.
+        # ``claim_task`` refuses to claim a ``ready`` row while
+        # ``retry_not_before`` is in the future, which is what guarantees a
+        # retry cannot be claimed in the same dispatcher tick as the timeout
+        # that produced it.
+        _add_column_if_missing(
+            conn, "tasks", "retry_not_before", "retry_not_before INTEGER"
+        )
 
     if "block_recurrences" not in cols:
         # Unblock-loop counter. Existing rows start at 0, so the loop breaker
@@ -5115,8 +5165,9 @@ def claim_task(
              WHERE id = ?
                AND status = 'ready'
                AND claim_lock IS NULL
+               AND (retry_not_before IS NULL OR retry_not_before <= ?)
             """,
-            (lock, expires, now, task_id),
+            (lock, expires, now, task_id, now),
         )
         if cur.rowcount != 1:
             return None
@@ -8974,6 +9025,25 @@ def heartbeat_worker(
     return True
 
 
+def _is_synthesizer_role(body: Optional[str]) -> bool:
+    """Same substring check ``gateway/kanban_watchers.py`` already uses to
+    tell a synthesizer card apart from other roles, kept as one shared
+    predicate so the two call sites can't drift.
+    """
+    return bool(body) and 'role = "synthesizer"' in body
+
+
+# KANBAN-SWARM-002 approved defaults (docs/plans/2026-08-24-kanban-swarm-
+# result-delivery-001.md, "consensus-final revision" section). These apply
+# ONLY to the synthesizer role via ``_is_synthesizer_role`` above — every
+# other role keeps the pre-existing 5s grace / immediate-retry behaviour
+# unchanged, matching the cross-review consensus that this ticket must not
+# touch the generic timeout path or the swarm root's own lifecycle.
+_SYNTHESIZER_TERMINATION_GRACE_SECONDS = 15
+_SYNTHESIZER_RETRY_BACKOFF_SECONDS = 30
+_SYNTHESIZER_OVERALL_DEADLINE_SECONDS = 660
+
+
 def enforce_max_runtime(
     conn: sqlite3.Connection,
     *,
@@ -8981,11 +9051,30 @@ def enforce_max_runtime(
 ) -> list[str]:
     """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
 
-    Sends SIGTERM, waits a short grace window, then SIGKILL. Emits a
+    Sends SIGTERM, waits a grace window, then SIGKILL. Emits a
     ``timed_out`` event and restores the task's source phase so the next
     dispatcher tick re-spawns the same kind of worker — unless the circuit
     breaker has already given up, in which case the task stays blocked
-    where ``_record_spawn_failure`` parked it.
+    where ``_record_task_failure`` parked it.
+
+    KANBAN-SWARM-002: for the synthesizer role specifically (see
+    ``_is_synthesizer_role``), three additional invariants apply that do
+    NOT apply to any other role:
+
+    1. If SIGKILL does not confirm the old process is actually gone, the
+       task is NOT re-queued to ``ready`` — it goes ``blocked`` with
+       ``block_kind="termination_pending"`` instead, and this function
+       does not touch ``consecutive_failures`` for it. Spawning a
+       successor beside a worker whose death we couldn't confirm would
+       risk two live synthesizers racing on the same root/generation.
+    2. A retry is never claimable in the same dispatcher tick as the
+       timeout that produced it — ``retry_not_before`` is set 30s out,
+       enforced by ``claim_task``'s CAS (see its WHERE clause).
+    3. The overall attempt budget is bounded by wall-clock time, not just
+       attempt count: if 660s have elapsed since ``tasks.started_at``
+       (the first-ever attempt start — see its column comment), the
+       breaker trips immediately regardless of ``consecutive_failures``,
+       with ``block_kind="synthesizer_retry_exhausted"``.
 
     Runs host-local: only tasks claimed by this host are candidates
     (same reasoning as ``detect_crashed_workers``). ``signal_fn`` is a
@@ -8999,7 +9088,7 @@ def enforce_max_runtime(
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       t.max_runtime_seconds, t.claim_lock, t.body, t.started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
@@ -9019,7 +9108,12 @@ def enforce_max_runtime(
 
         pid = int(row["worker_pid"])
         tid = row["id"]
-        # SIGTERM then SIGKILL. Keep it simple: 5 s grace. Workers that
+        is_synth = _is_synthesizer_role(row["body"] if "body" in row.keys() else None)
+        grace_seconds = (
+            _SYNTHESIZER_TERMINATION_GRACE_SECONDS if is_synth else 5
+        )
+        # SIGTERM then SIGKILL, waiting up to ``grace_seconds`` total across
+        # both polling loops before giving up on a clean exit. Workers that
         # want a cleaner shutdown can install their own SIGTERM handler
         # before the grace expires.
         killed = False
@@ -9032,7 +9126,8 @@ def enforce_max_runtime(
             except (ProcessLookupError, OSError):
                 pass
             # Short polling wait — no time.sleep on the write txn.
-            for _ in range(10):
+            poll_iterations = max(1, int(grace_seconds / 0.5))
+            for _ in range(poll_iterations):
                 if not _pid_alive(pid):
                     break
                 time.sleep(0.5)
@@ -9044,16 +9139,86 @@ def enforce_max_runtime(
                     killed = True
                 except (ProcessLookupError, OSError):
                     pass
+                if is_synth:
+                    # Confirm the kill actually landed before treating this
+                    # as a normal, retryable timeout. A defunct/zombie
+                    # process or a signal-delivery failure (e.g. permission)
+                    # can leave the PID technically alive even after SIGKILL
+                    # — proceeding as if it were dead risks a second worker
+                    # spawning beside it. Non-synthesizer roles retain the
+                    # pre-KANBAN-SWARM-002 immediate post-SIGKILL behavior.
+                    for _ in range(poll_iterations):
+                        if not _pid_alive(pid):
+                            break
+                        time.sleep(0.5)
+
+        # Only synthesizer termination is fenced by a post-SIGKILL liveness
+        # confirmation. The generic role path must keep its old behavior.
+        termination_confirmed = not is_synth or not _pid_alive(pid)
+
+        if is_synth and not termination_confirmed:
+            # Do not restore to a retryable status and do not touch
+            # consecutive_failures — this is not a counted failure attempt,
+            # it's an unresolved termination that needs operator attention
+            # (or a future, more thorough PID-death reconciliation pass)
+            # before any successor may run.
+            with write_txn(conn):
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'blocked', "
+                    "block_kind = 'termination_pending', "
+                    "claim_lock = NULL, claim_expires = NULL, "
+                    "worker_pid = NULL, last_heartbeat_at = NULL "
+                    "WHERE id = ? AND status = 'running' "
+                    "  AND worker_pid = ? AND claim_lock IS ?",
+                    (tid, pid, row["claim_lock"]),
+                )
+                if cur.rowcount == 1:
+                    payload = {
+                        "pid": pid,
+                        "elapsed_seconds": int(elapsed),
+                        "limit_seconds": int(row["max_runtime_seconds"]),
+                        "sigkill": killed,
+                        "termination_confirmed": False,
+                        "block_kind": "termination_pending",
+                    }
+                    run_id = _end_run(
+                        conn, tid,
+                        outcome="timed_out", status="timed_out",
+                        error=(
+                            f"elapsed {int(elapsed)}s > limit "
+                            f"{int(row['max_runtime_seconds'])}s; "
+                            "termination not confirmed after SIGKILL"
+                        ),
+                        metadata=payload,
+                    )
+                    _append_event(
+                        conn, tid, "timed_out", payload, run_id=run_id,
+                    )
+                    timed_out.append(tid)
+            continue
 
         with write_txn(conn):
             retry_status = _retry_status_for_run(conn, tid)
-            cur = conn.execute(
-                "UPDATE tasks SET status = ?, claim_lock = NULL, "
+            update_fields = (
+                "status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, "
-                "last_heartbeat_at = NULL "
+                "last_heartbeat_at = NULL"
+            )
+            params: list[Any] = [retry_status]
+            if is_synth:
+                # Backoff applies only on the branch that actually restores
+                # a claimable status; a task about to be force-blocked below
+                # (deadline exceeded) doesn't need it, but setting it
+                # unconditionally here is harmless — a blocked task isn't
+                # claimable regardless of retry_not_before.
+                update_fields += ", retry_not_before = ?"
+                params.append(now + _SYNTHESIZER_RETRY_BACKOFF_SECONDS)
+            params.extend([tid, pid, row["claim_lock"]])
+            cur = conn.execute(
+                f"UPDATE tasks SET {update_fields} "
                 "WHERE id = ? AND status = 'running' "
                 "  AND worker_pid = ? AND claim_lock IS ?",
-                (retry_status, tid, pid, row["claim_lock"]),
+                params,
             )
             if cur.rowcount == 1:
                 payload = {
@@ -9061,6 +9226,7 @@ def enforce_max_runtime(
                     "elapsed_seconds": int(elapsed),
                     "limit_seconds": int(row["max_runtime_seconds"]),
                     "sigkill": killed,
+                    "termination_confirmed": termination_confirmed,
                     "retry_status": retry_status,
                 }
                 run_id = _end_run(
@@ -9079,16 +9245,28 @@ def enforce_max_runtime(
         # emits a ``gave_up`` event on top of the ``timed_out`` we
         # already emitted.
         if cur.rowcount == 1:
+            deadline_check_now = int(time.time())
+            deadline_exceeded = (
+                is_synth
+                and row["started_at"] is not None
+                and (deadline_check_now - int(row["started_at"]))
+                >= _SYNTHESIZER_OVERALL_DEADLINE_SECONDS
+            )
             _record_task_failure(
                 conn, tid,
                 error=f"elapsed {int(elapsed)}s > limit {int(row['max_runtime_seconds'])}s",
                 outcome="timed_out",
                 release_claim=False,
                 end_run=False,
+                force_trip=deadline_exceeded,
+                block_kind=(
+                    "synthesizer_retry_exhausted" if is_synth else None
+                ),
                 event_payload_extra={
                     "pid": pid,
                     "sigkill": killed,
                     "retry_status": retry_status,
+                    "deadline_exceeded": deadline_exceeded,
                 },
             )
     return timed_out
@@ -9714,6 +9892,7 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
+    block_kind: Optional[str] = None,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -9742,6 +9921,14 @@ def _record_task_failure(
     ``event_payload_extra`` merges into the ``gave_up`` event payload
     when the breaker trips, so callers can include outcome-specific
     context (e.g. pid on crash, elapsed on timeout).
+
+    ``block_kind`` (must be in ``VALID_BLOCK_KINDS`` or ``None``) is
+    written onto the task's ``block_kind`` column ONLY when the breaker
+    actually trips this call (``force_trip=True`` or the counter reaches
+    the effective limit). Ignored on the below-threshold path — a task
+    that's still within its retry budget isn't blocked, so it has no
+    block reason to record. ``None`` (the default) preserves the
+    pre-KANBAN-SWARM-002 behaviour of leaving ``block_kind`` untouched.
 
     Resolution order for the effective threshold:
       1. per-task ``max_retries`` if set (nothing else overrides)
@@ -9794,9 +9981,10 @@ def _record_task_failure(
                 conn.execute(
                     "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, "
-                    "consecutive_failures = ?, last_failure_error = ? "
+                    "consecutive_failures = ?, last_failure_error = ?, "
+                    "block_kind = COALESCE(?, block_kind) "
                     "WHERE id = ? AND status IN ('running', 'ready', 'review')",
-                    (failures, error[:500], task_id),
+                    (failures, error[:500], block_kind, task_id),
                 )
             else:
                 # Timeout/crash path: source phase already restored with claim
@@ -9804,9 +9992,10 @@ def _record_task_failure(
                 # counter fields.
                 conn.execute(
                     "UPDATE tasks SET status = 'blocked', "
-                    "consecutive_failures = ?, last_failure_error = ? "
+                    "consecutive_failures = ?, last_failure_error = ?, "
+                    "block_kind = COALESCE(?, block_kind) "
                     "WHERE id = ? AND status IN ('ready', 'review', 'running')",
-                    (failures, error[:500], task_id),
+                    (failures, error[:500], block_kind, task_id),
                 )
             run_id = None
             if end_run:
@@ -10627,7 +10816,9 @@ def _dispatch_once_locked(
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
-        "ORDER BY priority DESC, created_at ASC"
+        "  AND (retry_not_before IS NULL OR retry_not_before <= ?) "
+        "ORDER BY priority DESC, created_at ASC",
+        (int(time.time()),),
     ).fetchall()
     # Review rows are enumerated up front (not after the ready loop) so the
     # budget split below can see whether review work exists at all.

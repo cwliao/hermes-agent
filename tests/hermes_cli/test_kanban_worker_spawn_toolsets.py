@@ -91,6 +91,37 @@ agent:
         assert required in pinned
 
 
+def test_default_worker_toolsets_include_mermaid_renderer_when_enabled(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "native_hermes"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        """
+platform_toolsets:
+  cli:
+    - file
+    - kanban
+    - skills
+    - terminal
+    - web
+    - mermaid_renderer
+plugins:
+  enabled:
+    - mermaid_renderer
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    from hermes_cli import kanban_db as kb
+
+    resolved = kb._resolve_worker_cli_toolsets(str(profile))
+
+    assert resolved is not None
+    assert "mermaid_renderer" in resolved
+
+
 def test_worker_toolsets_explicit_profile_override_is_preserved(monkeypatch, tmp_path):
     root = tmp_path / ".hermes"
     profile = root / "profiles" / "elias"

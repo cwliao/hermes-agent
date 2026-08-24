@@ -269,6 +269,7 @@ class TestRunCodexTurn:
         assert text == "ok" and thread_id == "t-1"
         assert "resume" not in seen["argv"]
         assert "hi" in seen["argv"]
+        assert (tmp_path / ".codex-dispatch.lock").exists()
 
     def test_builds_resume_argv_when_resume_id_present(self, monkeypatch, tmp_path):
         cb = _load_lib()

@@ -2094,6 +2094,13 @@ def _resolve_worker_cli_toolsets(
                     if isinstance(raw_override, list) and raw_override
                     else list(_kb.KANBAN_WORKER_DEFAULT_TOOLSETS)
                 )
+            try:
+                from hermes_cli.kanban_swarm import extract_contract
+                role = (extract_contract(task_body) or {}).get("role")
+            except Exception:
+                role = None
+            if role in {"verifier", "synthesizer"}:
+                requested = ["kanban"]
             toolsets = [name for name in requested if name in available]
             if "kanban" in available and "kanban" not in toolsets:
                 toolsets.insert(0, "kanban")
@@ -2255,6 +2262,13 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_WORKSPACE"] = workspace
+    try:
+        from hermes_cli.kanban_swarm import extract_contract
+        role = (extract_contract(task.body) or {}).get("role")
+    except Exception:
+        role = None
+    if role in {"verifier", "synthesizer"}:
+        env["HERMES_KANBAN_SWARM_ROLE"] = str(role)
     # Tag the session `kanban` so session-browsing surfaces filter it out by
     # source instead of rendering one sidebar row per attempt.
     env["HERMES_SESSION_SOURCE"] = "kanban"

@@ -167,11 +167,21 @@ def _reject_delegated_child_mutation(tool_name: str) -> None:
 
 
 def _default_task_id(arg: Optional[str]) -> Optional[str]:
-    """``task_id`` arg or the dispatcher's env var. A delegate child or an
-    in-process cron job must never inherit the worker's task id implicitly."""
+    """Resolve ``task_id`` while binding dispatcher workers to their task."""
+    if _is_delegated_child_context():
+        return None
+    if _is_dispatcher_owned_worker():
+        env_tid = os.environ.get("HERMES_KANBAN_TASK")
+        if env_tid:
+            if arg and arg != env_tid:
+                logger.warning(
+                    "ignoring model-supplied Kanban task_id=%s; worker is bound to %s",
+                    arg, env_tid,
+                )
+            return env_tid
     if arg:
         return arg
-    if _is_delegated_child_context() or not _is_dispatcher_owned_worker():
+    if not _is_dispatcher_owned_worker():
         return None
     return os.environ.get("HERMES_KANBAN_TASK") or None
 
@@ -185,6 +195,49 @@ def _require_task_id(args: dict) -> str:
 def _own_task_env(task_id: str, var: str) -> Optional[str]:
     """``$var`` only when this worker is scoped to ``task_id``; else None."""
     return os.environ.get(var) if os.environ.get("HERMES_KANBAN_TASK") == task_id else None
+
+
+def _canonicalize_dispatcher_swarm_metadata(
+    task: Any,
+    metadata: Optional[dict],
+    *,
+    result: Optional[str],
+) -> Optional[dict]:
+    """Bind swarm identity fields to trusted dispatcher task state.
+
+    ``HERMES_KANBAN_TASK`` and the task contract are runtime state. The model
+    should supply handoff content and verifier evidence, not repeat process
+    identifiers copied from prose. This runs only for dispatcher workers;
+    orchestrator/manual calls remain fail-closed and unchanged.
+
+    Verifier gate/count evidence is never fabricated here. A synthesizer
+    still needs a non-empty top-level result; ``result_present`` is derived
+    from that trusted tool argument.
+    """
+    if not task or not _is_dispatcher_owned_worker():
+        return metadata
+    contract = _KS.extract_contract(getattr(task, "body", None))
+    if not contract:
+        return metadata
+    bound = dict(metadata or {})
+    role = contract.get("role")
+    bound["role"] = role
+    bound["root_id"] = contract.get("root_id")
+    if role == "worker":
+        bound["lane_id"] = contract.get("expected_lane_id")
+        bound["preflight_skill_id"] = contract.get("preflight_skill_id") or ""
+        bound["outcome"] = "completed"
+        if bound.get("verified_clean") is not False:
+            bound["verified_clean"] = True
+    elif role == "verifier":
+        bound["expected_lane_count"] = contract.get("expected_lane_count")
+    elif role == "synthesizer":
+        bound["outcome"] = "completed"
+        bound["result_present"] = bool((result or "").strip())
+        if contract.get("verifier_id"):
+            bound["verifier_id"] = contract["verifier_id"]
+    bound["swarm_identity_source"] = "dispatcher_contract"
+    return bound
 
 
 def _worker_run_id(task_id: str) -> Optional[int]:
@@ -678,6 +731,23 @@ def _handle_complete(args: dict, **kw) -> str:
             )
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         from hermes_cli import kanban_swarm as _kanban_swarm
+        contract = _kanban_swarm.extract_contract(task.body) if task else None
+        if (
+            contract and contract.get("role") == "synthesizer"
+            and not (result or "").strip() and (summary or "").strip()
+        ):
+            result = summary
+        metadata = _canonicalize_dispatcher_swarm_metadata(
+            task, metadata, result=result,
+        )
+        if task:
+            output_text = result if (result or "").strip() else summary
+            output_meta = _kanban_swarm.swarm_output_metadata(
+                output_text, contract=contract,
+            )
+            if output_meta:
+                metadata = dict(metadata or {})
+                metadata["output_contract"] = output_meta
         contract_error = _kanban_swarm.validate_completion(
             task, metadata=metadata, result=result, summary=summary,
         )

@@ -1024,20 +1024,18 @@ def test_kanban_guidance_orchestrator_decision_ownership():
 # ---------------------------------------------------------------------------
 #
 # A worker process has HERMES_KANBAN_TASK set to its own task id. The
-# destructive tools (kanban_complete, kanban_block, kanban_heartbeat,
-# kanban_unblock) must refuse to operate
-# on any OTHER task id, even if the caller supplies an explicit `task_id`
-# argument. Workers legitimately call kanban_show / kanban_list /
-# kanban_comment / kanban_create / kanban_link on other tasks, so those
-# are unrestricted.
+# destructive tools must always resolve lifecycle mutations to that trusted
+# task, even when a model supplies a copied sibling/root task_id. Workers
+# legitimately call kanban_show / kanban_list / kanban_comment /
+# kanban_create / kanban_link on other tasks, so those remain unrestricted.
 #
 # Orchestrator profiles (no HERMES_KANBAN_TASK in env) are intentionally
 # exempt — their job is routing, and they sometimes close out child
 # tasks on behalf of the child.
 
 
-def test_worker_complete_rejects_foreign_task_id(worker_env):
-    """A worker cannot complete a task that isn't its own (#19534)."""
+def test_worker_complete_canonicalizes_foreign_task_id(worker_env):
+    """A worker's trusted env task wins over a copied explicit task_id."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     conn = kbc.connect()
@@ -1049,15 +1047,107 @@ def test_worker_complete_rejects_foreign_task_id(worker_env):
         conn.close()
 
     from tools import kanban_tools as kt
-    out = kt._handle_complete({"task_id": other, "summary": "HIJACK"})
+    out = kt._handle_complete({"task_id": other, "summary": "worker handoff"})
     d = json.loads(out)
-    assert d.get("ok") is not True
-    assert "refusing to mutate" in d.get("error", "")
+    assert d.get("ok") is True
+    assert d["task_id"] == worker_env
 
     # Sibling task must be untouched.
     conn = kbc.connect()
     try:
+        assert kb.get_task(conn, worker_env).status == "done"
         assert kb.get_task(conn, other).status == "ready"
+    finally:
+        conn.close()
+
+
+def test_dispatcher_worker_completion_canonicalizes_swarm_contract(worker_env):
+    """Wrong role/root/lane/skill fields cannot defeat trusted contract state."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    contract = {
+        "version": 1,
+        "role": "worker",
+        "root_id": "t_swarm_root",
+        "expected_lane_id": "claude",
+        "preflight_skill_id": "claude-code",
+    }
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE tasks SET body = ? WHERE id = ?",
+            ("[swarm:contract] " + json.dumps(contract), worker_env),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    out = kt._handle_complete({
+        "task_id": "t_swarm_root",
+        "summary": "worker output",
+        "metadata": {
+            "role": "wrong",
+            "root_id": "wrong",
+            "lane_id": "wrong",
+            "preflight_skill_id": "wrong",
+        },
+    })
+    d = json.loads(out)
+    assert d.get("ok") is True
+    assert d["task_id"] == worker_env
+
+    conn = kb.connect()
+    try:
+        run = kb.latest_run(conn, worker_env)
+        assert run.metadata["role"] == "worker"
+        assert run.metadata["root_id"] == "t_swarm_root"
+        assert run.metadata["lane_id"] == "claude"
+        assert run.metadata["preflight_skill_id"] == "claude-code"
+        assert run.metadata["swarm_identity_source"] == "dispatcher_contract"
+    finally:
+        conn.close()
+
+
+def test_dispatcher_synthesizer_promotes_summary_to_result(worker_env):
+    """The public summary-preferred schema must satisfy the synth contract."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    contract = {
+        "version": 1,
+        "role": "synthesizer",
+        "root_id": "t_swarm_root",
+        "verifier_id": "t_verifier",
+    }
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE tasks SET body = ? WHERE id = ?",
+            ("[swarm:contract] " + json.dumps(contract), worker_env),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    out = kt._handle_complete({
+        "task_id": "t_wrong",
+        "summary": "final synthesized deliverable",
+        "metadata": {"role": "wrong", "root_id": "wrong"},
+    })
+    d = json.loads(out)
+    assert d.get("ok") is True
+    assert d["task_id"] == worker_env
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        run = kb.latest_run(conn, worker_env)
+        assert task.result == "final synthesized deliverable"
+        assert run.metadata["role"] == "synthesizer"
+        assert run.metadata["root_id"] == "t_swarm_root"
+        assert run.metadata["result_present"] is True
+        assert run.metadata["verifier_id"] == "t_verifier"
     finally:
         conn.close()
 

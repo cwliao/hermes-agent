@@ -59,7 +59,6 @@ def _record_kanban_budget_exhausted(
     from multiple exit paths.
     """
     try:
-        from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
         from hermes_cli import kanban_db_dispatch as _kbd
         _conn = _kbc.connect()
@@ -163,10 +162,16 @@ def _resolve_budget_fallback(
     # was eligible, so the dispatcher learns the worker could not complete. Only the
     # dispatcher-owned worker owns the task: an in-process delegate_task child or cron run
     # inherits ``HERMES_KANBAN_TASK`` via os.environ but exhausting ITS budget must not
-    # close the parent's run and release its claim (#112817).
+    # close the parent's run and release its claim (#112817). A turn that already exited
+    # via ``kanban_terminal_success`` must not be re-flagged as budget-exhausted here.
     _kanban_task = (
         os.environ.get("HERMES_KANBAN_TASK")
-        if budget_exhausted and is_dispatcher_owned_worker_context() else None
+        if (
+            budget_exhausted
+            and is_dispatcher_owned_worker_context()
+            and _turn_exit_reason != "kanban_terminal_success"
+        )
+        else None
     )
     # If running as a kanban worker, signal the dispatcher that the worker could not complete (rather than
     # treating it as a protocol violation). This applies whether the user-facing fallback came from the
@@ -480,7 +485,11 @@ def finalize_turn(
         final_response is not None
         and not failed
         and not interrupted
-        and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
+        and (
+            api_call_count < agent.max_iterations
+            or str(_turn_exit_reason).startswith("text_response(")
+            or str(_turn_exit_reason) == "kanban_terminal_success"
+        )
     )
 
     _rollback_interrupted_preflight_display(agent, interrupted)

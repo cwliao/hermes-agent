@@ -2602,6 +2602,7 @@ def _resolve_worker_cli_toolsets(
             build_profile_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope)
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         from hermes_cli.config import load_config
+        from hermes_cli.plugins import discover_plugins
         from hermes_cli.tools_config import _get_platform_tools
 
         token = set_hermes_home_override(hermes_home)
@@ -2611,6 +2612,9 @@ def _resolve_worker_cli_toolsets(
             set_secret_scope(build_profile_secret_scope(Path(hermes_home)))
             if is_multiplex_active() else None)
         try:
+            # Discover plugins inside the worker's effective HERMES_HOME
+            # before filtering the bounded toolset pin.
+            discover_plugins()
             cfg = load_config()
             available = set(_get_platform_tools(cfg, "cli"))
             raw_override = (cfg.get("kanban") or {}).get("worker_toolsets")
@@ -2630,7 +2634,7 @@ def _resolve_worker_cli_toolsets(
                 requested = (
                     [str(name).strip() for name in raw_override if str(name).strip()]
                     if isinstance(raw_override, list) and raw_override
-                    else ["file", "kanban", "skills", "terminal", "web"]
+                    else list(_kb.KANBAN_WORKER_DEFAULT_TOOLSETS)
                 )
             toolsets = [name for name in requested if name in available]
             if "kanban" in available and "kanban" not in toolsets:

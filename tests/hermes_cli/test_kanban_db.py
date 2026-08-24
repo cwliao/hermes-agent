@@ -581,6 +581,22 @@ def test_worktree_workspace_explicit_target_materializes_linked_worktree(kanban_
 
 
 
+def test_complete_task_rejects_missing_declared_artifact(kanban_home, tmp_path):
+    """A declared deliverable must exist before the task can become done."""
+    missing = tmp_path / "missing-deliverable.png"
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="missing artifact")
+        with pytest.raises(kb.CompletionEvidenceError) as exc_info:
+            kb.complete_task(
+                conn,
+                task_id,
+                summary="generated the requested image",
+                metadata={"artifacts": [str(missing)]},
+            )
+        assert exc_info.value.paths == [str(missing)]
+        assert kb.get_task(conn, task_id).status != "done"
+
+
 def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
     """Completion artifacts from scratch workspaces survive workspace cleanup."""
     with kbc.connect() as conn:

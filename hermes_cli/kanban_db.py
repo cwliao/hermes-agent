@@ -3180,10 +3180,10 @@ def _merge_completion_prose_artifacts(
 
 # Keep this deliberately narrower than a general shell/path parser.  A
 # completion summary is prose, so only common file-like suffixes are treated
-# as an evidence claim.  Explicit ``metadata.artifacts`` entries retain their
-# existing delivery semantics: managed scratch artifacts are preserved by the
-# existing gate, while optional external paths may still be skipped by the
-# notifier if they disappear between completion and delivery.
+# as an evidence claim. Explicit ``metadata.artifacts`` entries are also
+# checked here because they are the contract's authoritative deliverables;
+# otherwise a worker could be marked done while handing downstream consumers
+# a path that never existed.
 _COMPLETION_FILE_SUFFIXES = frozenset({
     ".txt", ".json", ".md", ".csv", ".tsv", ".yaml", ".yml", ".xml",
     ".html", ".htm", ".py", ".js", ".ts", ".sh", ".sql", ".log",
@@ -3227,12 +3227,20 @@ def _validate_completion_file_evidence(
 
     This gate runs before the task write transaction.  A worker may still
     retry with corrected evidence, while a summary cannot make an unverified
-    path look like a delivered artifact.  Explicit artifact declarations are
-    checked by the pre-existing scratch-artifact preservation path; prose
-    paths use the conservative common-file-suffix scanner above.
+    path look like a delivered artifact. Explicit artifact declarations are
+    checked directly, while prose paths use the conservative common-file-suffix
+    scanner above. Scratch artifacts are still copied to durable task
+    attachments by the existing preservation path after this validation
+    succeeds.
     """
     paths = _completion_path_candidates(summary)
     paths.extend(_completion_path_candidates(result))
+    if isinstance(metadata, dict):
+        declared = metadata.get("artifacts")
+        if isinstance(declared, (list, tuple)):
+            for item in declared:
+                if isinstance(item, str) and item.strip():
+                    paths.append(item.strip())
 
     missing: list[str] = []
     seen: set[str] = set()

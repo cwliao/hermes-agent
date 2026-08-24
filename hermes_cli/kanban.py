@@ -1399,19 +1399,25 @@ def _cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
-def _maybe_auto_subscribe_swarm(conn: Any, synthesizer_id: str) -> bool:
-    """Auto-subscribe the calling session to the swarm's final result.
+def _maybe_auto_subscribe_swarm(
+    conn: Any,
+    synthesizer_id: str,
+    *,
+    verifier_id: str | None = None,
+) -> bool:
+    """Auto-subscribe the calling session to the swarm's gate and final result.
 
     GATE8-SWARM-COMPLETED-VERIFIER-RECOVERY-AND-DELIVERY-GAP-001. Unlike
     ``kanban_create`` (``tools/kanban_tools.py::_maybe_auto_subscribe``),
     ``hermes kanban swarm`` never registered a notification subscription for
     any card in the graph it built -- confirmed live: a completed four-lane
     swarm's synthesizer result never reached the Telegram session that asked
-    for it, and ``kanban_notify_subs`` held zero rows for that run. This
-    subscribes only the synthesizer (the card carrying gate 8's own
-    acceptance evidence -- "a synthesizer card in done with a ... result"),
-    not the whole graph, so a chatty swarm doesn't produce one notification
-    per worker.
+    for it, and ``kanban_notify_subs`` held zero rows for that run. The
+    verifier is subscribed as well as the synthesizer: a failed gate is a
+    terminal user-visible outcome, and must reach the originating chat even
+    when the synthesizer never becomes ready. Workers are deliberately not
+    subscribed, so a chatty swarm still does not produce one notification per
+    worker.
 
     This mirrors ``_maybe_auto_subscribe`` in full, not just its ContextVar
     resolution -- an earlier version of this function copied only the
@@ -1466,18 +1472,32 @@ def _maybe_auto_subscribe_swarm(conn: Any, synthesizer_id: str) -> bool:
             get_session_env("HERMES_SESSION_PROFILE", "")
             or os.environ.get("HERMES_PROFILE")
         )
-        kb.add_notify_sub(
-            conn, task_id=synthesizer_id,
-            platform=platform, chat_id=chat_id,
-            thread_id=thread_id, user_id=user_id,
-            notifier_profile=notifier_profile,
-        )
-        return True
+        task_ids = list(dict.fromkeys(
+            task_id for task_id in (verifier_id, synthesizer_id) if task_id
+        ))
+        subscribed = False
+        for task_id in task_ids:
+            try:
+                kb.add_notify_sub(
+                    conn, task_id=task_id,
+                    platform=platform, chat_id=chat_id,
+                    thread_id=thread_id, user_id=user_id,
+                    notifier_profile=notifier_profile,
+                )
+                subscribed = True
+            except Exception:
+                # A single row must not prevent the other terminal lane from
+                # being delivered. Swarm creation itself is already durable.
+                logging.getLogger(__name__).warning(
+                    "swarm auto-subscribe failed for task %s (platform=%r "
+                    "key_set=%r, non-fatal)", task_id, platform, bool(chat_id),
+                    exc_info=True,
+                )
+        return subscribed
     except Exception:
         logging.getLogger(__name__).warning(
-            "swarm auto-subscribe failed for synthesizer %s (platform=%r "
-            "key_set=%r, non-fatal)", synthesizer_id, platform, bool(chat_id),
-            exc_info=True,
+            "swarm auto-subscribe setup failed (platform=%r key_set=%r, "
+            "non-fatal)", platform, bool(chat_id), exc_info=True,
         )
         return False
 
@@ -1507,7 +1527,11 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
             worker_max_runtime_seconds=getattr(args, "worker_max_runtime", None),
             worker_quorum=getattr(args, "worker_quorum", None),
         )
-        _maybe_auto_subscribe_swarm(conn, created.synthesizer_id)
+        _maybe_auto_subscribe_swarm(
+            conn,
+            created.synthesizer_id,
+            verifier_id=created.verifier_id,
+        )
     if getattr(args, "json", False):
         _print_json(created.as_dict())
     else:

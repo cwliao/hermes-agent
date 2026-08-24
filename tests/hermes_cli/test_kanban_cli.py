@@ -266,7 +266,7 @@ def _swarm_args(**overrides):
     return argparse.Namespace(**base)
 
 
-def test_cmd_swarm_subscribes_synthesizer_when_session_context_present(
+def test_cmd_swarm_subscribes_terminal_lanes_when_session_context_present(
     kanban_home, monkeypatch, capsys,
 ):
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
@@ -279,17 +279,18 @@ def test_cmd_swarm_subscribes_synthesizer_when_session_context_present(
     conn = kb.connect()
     try:
         subs = kb.list_notify_subs(conn, created["synthesizer_id"])
-    finally:
-        conn.close()
-    assert len(subs) == 1, subs
-    assert subs[0]["platform"] == "telegram"
-    assert subs[0]["chat_id"] == "chat-gate8"
-    # Only the synthesizer is subscribed -- not every card in the graph,
-    # which would turn one swarm into one notification per worker.
-    conn = kb.connect()
-    try:
+        assert len(subs) == 1, subs
+        assert subs[0]["platform"] == "telegram"
+        assert subs[0]["chat_id"] == "chat-gate8"
+        verifier_subs = kb.list_notify_subs(conn, created["verifier_id"])
+        assert len(verifier_subs) == 1, verifier_subs
+        assert verifier_subs[0]["platform"] == "telegram"
+        assert verifier_subs[0]["chat_id"] == "chat-gate8"
+        # The verifier and synthesizer are subscribed, but not every card in
+        # the graph; worker-level subscriptions would turn one swarm into a
+        # burst before the gate has produced a user-visible outcome.
         assert kb.list_notify_subs(conn, created["root_id"]) == []
-        assert kb.list_notify_subs(conn, created["verifier_id"]) == []
+        assert len(kb.list_notify_subs(conn, created["worker_ids"][0])) == 0
     finally:
         conn.close()
 

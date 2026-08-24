@@ -219,6 +219,14 @@ Hermes cron resolves relative script names under `~/.hermes/scripts/` and
 rejects scripts outside that directory. It also does not pass arbitrary trailing
 arguments to `--script`, so wrapper scripts are used for the three report modes.
 
+The custom runtime scripts are canonically tracked under `scripts/` in this
+repo. After checking out or deploying a new commit, sync them with:
+
+```bash
+/home/cwliao/.hermes/hermes-agent/scripts/install_local_cron_scripts.sh
+```
+
+
 Active jobs:
 
 ```text

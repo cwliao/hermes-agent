@@ -55,6 +55,28 @@ def test_request_classifier_is_narrow():
     )
 
 
+def test_launch_receipt_cannot_claim_completion_while_downstream_is_pending(monkeypatch):
+    import agent.kanban_execution_guard as guard
+
+    monkeypatch.setattr(
+        guard,
+        "_read_swarm_completion_state",
+        lambda _payload: {
+            "complete": False,
+            "verifier_status": "todo",
+            "synthesizer_status": "todo",
+        },
+    )
+    agent = _agent()
+    messages = _receipt_messages()
+    final_msg = {"role": "assistant", "content": "full workflow complete"}
+    outcome = guard.try_finalization(
+        agent, messages, 0, final_msg["content"], final_msg, list.append
+    )
+    assert outcome == "pass"
+    assert "not complete yet" in final_msg["content"]
+
+
 def test_success_requires_current_turn_swarm_receipt():
     agent = _agent()
     messages = _receipt_messages()

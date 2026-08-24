@@ -395,39 +395,53 @@ def validate_completion(
         return None
     metadata = metadata if isinstance(metadata, dict) else {}
     role = contract.get("role")
+    errors: list[str] = []
     if metadata.get("role") != role:
-        return f"swarm {role} completion requires metadata role={role!r}"
+        errors.append(f"swarm {role} completion requires metadata role={role!r}")
     if metadata.get("root_id") != contract.get("root_id"):
-        return "swarm completion root_id does not match the task contract"
+        errors.append("swarm completion root_id does not match the task contract")
     output_text = result if (result or "").strip() else summary
     if (output_text or "").strip():
         output_reason = validate_swarm_output_text(output_text, contract=contract)
         if output_reason:
-            return output_reason
+            errors.append(output_reason)
     if role == "worker":
         if metadata.get("lane_id") != contract.get("expected_lane_id"):
-            return "worker lane_id does not match the expected lane"
+            errors.append("worker lane_id does not match the expected lane")
         expected_skill = contract.get("preflight_skill_id") or ""
         if metadata.get("preflight_skill_id", "") != expected_skill:
-            return "worker preflight_skill_id does not match the expected skill"
+            errors.append("worker preflight_skill_id does not match the expected skill")
         if metadata.get("outcome") != "completed":
-            return "worker completion requires outcome='completed'"
+            errors.append("worker completion requires outcome='completed'")
         if metadata.get("verified_clean") is not True:
-            return "worker completion requires verified_clean=true"
+            errors.append("worker completion requires verified_clean=true")
     elif role == "verifier":
         if metadata.get("gate") != "pass":
-            return "verifier completion requires gate='pass'"
+            errors.append("verifier completion requires gate='pass'")
         expected = contract.get("expected_lane_count")
         if metadata.get("expected_lane_count") != expected:
-            return "verifier completion requires the expected lane count"
+            errors.append("verifier completion requires the expected lane count")
         if metadata.get("verified_lane_count") != expected:
-            return "verifier completion requires all expected lanes verified"
+            errors.append("verifier completion requires all expected lanes verified")
     elif role == "synthesizer":
         if metadata.get("outcome") != "completed":
-            return "synthesizer completion requires outcome='completed'"
+            errors.append("synthesizer completion requires outcome='completed'")
         if metadata.get("result_present") is not True or not (result or "").strip():
-            return "synthesizer completion requires result_present=true and a result"
-    return None
+            errors.append("synthesizer completion requires result_present=true and a result")
+    if not errors:
+        return None
+    # Returning only the first failure forced an inefficient one-field-at-a-
+    # time repair loop. Keep the legacy message for a single defect, but
+    # report every defect together when more than one is present so the model
+    # can correct one complete call without weakening the fail-closed gate.
+    if len(errors) == 1:
+        return errors[0]
+    return (
+        "swarm completion rejected: " + "; ".join(errors) + ". "
+        "Retry one kanban_complete call using the copy-pasteable example in "
+        "the task body; task_id/result/summary are top-level parameters and "
+        "the contract fields belong inside metadata."
+    )
 
 
 def _activate_root_inline(

@@ -10,6 +10,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.kanban_swarm import (
+    _WORKER_RESPONSE_DEADLINE_SECONDS,
     MULTI_AGENT_LANE_IDS,
     SwarmWorkerSpec,
     create_swarm,
@@ -63,7 +64,7 @@ def _make_deadline_worker(conn, *, status="ready", overdue=True):
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET created_at = ? WHERE id = ?",
-                (int(time.time()) - 661, root_id),
+                (int(time.time()) - (_WORKER_RESPONSE_DEADLINE_SECONDS + 1), root_id),
             )
     if status == "running":
         assert kb.claim_task(

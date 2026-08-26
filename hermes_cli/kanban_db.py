@@ -132,7 +132,7 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 # the same generic ``blocked`` lane/UI, no new lifecycle state was added.
 #
 # ``synthesizer_retry_exhausted``: the synthesizer role's bounded retry
-# budget (max_retries=1, i.e. max_attempts=2) or its 660s overall deadline
+# budget (max_retries=1, i.e. max_attempts=2) or its 2700s overall deadline
 # was exhausted. Terminal -- no later dispatcher tick may spawn another
 # attempt for this task (enforced by ``retry_not_before``/deadline checks
 # in ``enforce_max_runtime``, not by this constant alone).
@@ -9085,9 +9085,13 @@ def _is_synthesizer_role(body: Optional[str]) -> bool:
 # other role keeps the pre-existing 5s grace / immediate-retry behaviour
 # unchanged, matching the cross-review consensus that this ticket must not
 # touch the generic timeout path or the swarm root's own lifecycle.
+# _SYNTHESIZER_OVERALL_DEADLINE_SECONDS was raised from 660s to 2700s after
+# worker/synthesizer max runtime was raised to 1200s, giving room for roughly
+# two full attempts plus backoff so the overall deadline spans retries rather
+# than tripping on the first attempt's timeout.
 _SYNTHESIZER_TERMINATION_GRACE_SECONDS = 15
 _SYNTHESIZER_RETRY_BACKOFF_SECONDS = 30
-_SYNTHESIZER_OVERALL_DEADLINE_SECONDS = 660
+_SYNTHESIZER_OVERALL_DEADLINE_SECONDS = 2700
 
 
 def enforce_max_runtime(
@@ -9117,7 +9121,7 @@ def enforce_max_runtime(
        timeout that produced it — ``retry_not_before`` is set 30s out,
        enforced by ``claim_task``'s CAS (see its WHERE clause).
     3. The overall attempt budget is bounded by wall-clock time, not just
-       attempt count: if 660s have elapsed since ``tasks.started_at``
+       attempt count: if 2700s have elapsed since ``tasks.started_at``
        (the first-ever attempt start — see its column comment), the
        breaker trips immediately regardless of ``consecutive_failures``,
        with ``block_kind="synthesizer_retry_exhausted"``.

@@ -339,7 +339,7 @@ def test_default_worker_max_runtime_seconds_is_lane_aware():
             _default_worker_max_runtime_seconds(lane)
             == DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS
         )
-    assert DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS > DEFAULT_WORKER_MAX_RUNTIME_SECONDS
+    assert DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS == DEFAULT_WORKER_MAX_RUNTIME_SECONDS
 
 
 def test_explicit_worker_max_runtime_seconds_applies_uniformly_across_lanes(tmp_path):

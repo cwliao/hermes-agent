@@ -206,6 +206,15 @@ def _mutation_attempted(messages: Sequence[Mapping[str, Any]], current_user_idx:
     return False
 
 
+def _swarm_attempted(messages: Sequence[Mapping[str, Any]], current_user_idx: int) -> bool:
+    for message in messages[current_user_idx + 1 :]:
+        if isinstance(message, Mapping) and any(
+            _call_name(call) == KANBAN_SWARM_TOOL for call in _calls(message)
+        ):
+            return True
+    return False
+
+
 def _failed_mutation_tools(
     messages: Sequence[Mapping[str, Any]], current_user_idx: int
 ) -> list[str]:
@@ -266,7 +275,10 @@ def try_finalization(
 ) -> str:
     """Return ``pass``, ``nudge`` or ``blocked`` at the finalization choke point."""
     current_user = messages[current_user_idx] if 0 <= current_user_idx < len(messages) else {}
-    if not isinstance(current_user, Mapping) or not request_requires_four_lane_swarm(current_user.get("content")):
+    valid_current_user = 0 <= current_user_idx < len(messages) and isinstance(current_user, Mapping)
+    prose_trigger = valid_current_user and request_requires_four_lane_swarm(current_user.get("content"))
+    swarm_trigger = valid_current_user and _swarm_attempted(messages, current_user_idx)
+    if not prose_trigger and not swarm_trigger:
         agent._kanban_execution_guard_phase = ""
         return "pass"
 

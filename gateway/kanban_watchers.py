@@ -19,11 +19,82 @@ from contextvars import Context
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from agent.auxiliary_client import async_call_llm
 from agent.i18n import t
+from hermes_cli.config import cfg_get
 
 # Match the logger run.py uses (logging.getLogger(__name__) where __name__ ==
 # "gateway.run") so extracted log records keep their original logger name.
 logger = logging.getLogger("gateway.run")
+
+_KANBAN_NOTIFIER_LLM_TIMEOUT_SECONDS = 8.0
+
+
+def _build_notifier_format_prompt(raw_msg: str, *, kind: str) -> str:
+    """Build the narrowly-scoped prompt used for user-facing notifications."""
+    return (
+        "Rewrite the following Kanban notification into concise, natural "
+        "Traditional Chinese suitable for a Telegram notification.\n\n"
+        "Rules:\n"
+        "- Preserve every concrete fact exactly; do not paraphrase, drop, or "
+        "invent facts.\n"
+        "- Keep task IDs (for example, t_xxxxxxxx), lane names, skill names, "
+        "counts, error text, and URLs exactly as written.\n"
+        "- Translate and reformat prose only; do not translate identifiers, "
+        "names, error text, or URLs.\n"
+        "- Keep any emoji prefix already present in the raw notification (such "
+        "as ⚠, ✖, or ✅).\n"
+        "- Return only the finished notification text, with no explanation or "
+        "commentary.\n\n"
+        f"Event kind: {kind}\n"
+        f"Raw notification:\n{raw_msg}"
+    )
+
+
+def _notifier_llm_text(response: Any) -> str:
+    """Extract text from the response shape returned by ``async_call_llm``."""
+    if isinstance(response, str):
+        return response.strip()
+    try:
+        return str(response.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
+
+
+async def _format_notifier_message_zh(raw_msg: str, *, kind: str) -> str:
+    """Format one raw notifier message in Traditional Chinese.
+
+    This is deliberately best-effort: a notification must still be delivered
+    if the auxiliary LLM is unavailable, slow, or returns no usable content.
+    """
+    try:
+        response = await asyncio.wait_for(
+            async_call_llm(
+                task="kanban_notifier_formatter",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": _build_notifier_format_prompt(raw_msg, kind=kind),
+                    },
+                ],
+                temperature=0.2,
+                max_tokens=500,
+                timeout=_KANBAN_NOTIFIER_LLM_TIMEOUT_SECONDS,
+            ),
+            timeout=_KANBAN_NOTIFIER_LLM_TIMEOUT_SECONDS,
+        )
+        formatted = _notifier_llm_text(response)
+        if not formatted:
+            raise ValueError("empty formatter response")
+        return formatted
+    except Exception as exc:
+        logger.warning(
+            "kanban notifier: LLM formatting failed for kind %s (%s); "
+            "sending raw message",
+            kind,
+            type(exc).__name__,
+        )
+        return raw_msg
 
 
 
@@ -279,6 +350,17 @@ class GatewayKanbanWatchersMixin:
                 "kanban notifier: disabled via config kanban.dispatch_in_gateway=false"
             )
             return
+        try:
+            notifier_llm_format = bool(
+                cfg_get(cfg, "kanban", "notifier_llm_format", default=True)
+            )
+        except Exception as exc:
+            logger.warning(
+                "kanban notifier: cannot read kanban.notifier_llm_format (%s); "
+                "keeping LLM formatting enabled",
+                type(exc).__name__,
+            )
+            notifier_llm_format = True
         from gateway.config import Platform as _Platform
         try:
             from hermes_cli import kanban_db as _kb
@@ -642,6 +724,7 @@ class GatewayKanbanWatchersMixin:
                     direct_synth_result: Optional[str] = None
                     for ev in d["events"]:
                         kind = ev.kind
+                        used_direct_synth_result = False
                         # Identity prefix: attribute terminal pings to the
                         # worker that did the work. Makes fleets (where one
                         # chat subscribes to many tasks) legible at a glance.
@@ -690,6 +773,7 @@ class GatewayKanbanWatchersMixin:
                                 # user-facing deliverable. Do not let a wake
                                 # turn rewrite it or invent artifacts.
                                 msg = direct_synth_result
+                                used_direct_synth_result = True
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
@@ -820,6 +904,19 @@ class GatewayKanbanWatchersMixin:
                             # is resolved (reset or bumped) by the wake
                             # outcome there, not by skipping the send here.
                             continue
+                        if notifier_llm_format and not used_direct_synth_result:
+                            raw_msg = msg
+                            formatted = await _format_notifier_message_zh(msg, kind=kind)
+                            if sub["task_id"] not in formatted:
+                                logger.warning(
+                                    "kanban notifier: LLM formatting dropped task id %s "
+                                    "for kind %s; sending raw message",
+                                    sub["task_id"],
+                                    kind,
+                                )
+                                msg = raw_msg
+                            else:
+                                msg = formatted
                         try:
                             _send_res = await adapter.send(
                                 sub["chat_id"], msg, metadata=metadata,

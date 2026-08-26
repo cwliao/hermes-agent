@@ -1,10 +1,28 @@
 ---
 title: "Kanban execution guard: the real completion-state check is gated behind a brittle prose classifier on the user's own request text, and never runs when phrasing doesn't match"
-status: DESIGN_REVISED
+status: DONE
 date: 2026-08-26
 type: design-proposal
 target_repo: hermes-agent
 ---
+
+## Implementation record (2026-08-26)
+
+Implemented and committed as `f6c26dfa66`. 4 total cross-review rounds:
+design round 1 (CHANGES-NEEDED, ordinary-kanban_create-over-block found by
+all 4 engines), design round 2 (CHANGES-NEEDED, no-receipt-block swap
+found unnecessary and regressive by 3/4 engines), design round 3
+(APPROVE from claude/agy, CHANGES-NEEDED from codex on a narrow
+`current_user_idx == -1` bounds-check gap), implementation round
+(APPROVE from claude/codex/agy after the bounds-check fix was applied and
+independently re-verified with the full test suite -- the bounds bug was
+caught by actually running the tests, not by review, since the first
+implementation attempt had 15/16 passing with the exact edge case codex
+flagged failing).
+
+16 targeted tests pass; codex additionally ran a broader regression
+suite (63 passed). All independently re-run and verified outside the
+dispatched agents' own reports before commit.
 
 ## Revision note (post cross-review, 2026-08-26)
 

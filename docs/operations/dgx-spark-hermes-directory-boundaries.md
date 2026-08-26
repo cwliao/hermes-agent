@@ -108,12 +108,60 @@ Their presence does not mean the development repo is the production runtime.
 
 ## Known boundary debt
 
-Kanban ticket `t_44c44870` tracks the migration of auxiliary systemd
-services/timers that still reference the mutable development checkout. Until
-that ticket is implemented and explicitly approved:
+Kanban ticket `t_51218e56` (recreated 2026-08-27 after the original
+`t_44c44870` was accidentally archived during an unrelated bulk
+kanban-board cleanup — see the addendum below) tracks the migration of
+auxiliary systemd services/timers that still reference the mutable
+development checkout. Until that ticket is implemented and explicitly
+approved:
 
 - treat those references as known technical debt, not the desired topology;
 - do not restart or rewrite production-facing units opportunistically;
 - avoid changing the checkout while a directly coupled timer/service is
   executing;
 - retain backups and cross-review every migration.
+
+## Addendum (2026-08-27): `hermes update` can silently no-op after a direct local commit
+
+A same-host session committed fixes directly to this development checkout
+(via a dispatched agent working in-place, then `git commit`/`git push` from
+this checkout), then ran `hermes update --yes` expecting it to rebuild the
+release and restart the gateway. It printed `✓ Already up to date! [main @
+<sha>]` and did nothing — no new release snapshot, no restart. Two
+subsequent `systemctl --user restart hermes-gateway.service` calls both
+restarted the *same stale release*, and this went undetected for a while
+because "service active (running)" was checked without also checking
+`WorkingDirectory`/`HERMES_RELEASE_SHA` against the intended commit.
+
+**Why**: `hermes update`'s up-to-date check is based on its own `git
+fetch` finding no new commits to pull — not on comparing the currently
+running release's SHA to the checkout's HEAD. A commit made directly in
+this checkout (not pulled in by `hermes update` itself) is invisible to
+that check. `hermes update --plan` (read-only) correctly analyzes the
+target SHA and affected services; the false negative is specific to the
+real `--yes` run's fetch-delta shortcut.
+
+**If you land a fix directly in this checkout, do not trust `hermes
+update` to deploy it. Rebuild the release manually:**
+
+```bash
+cd /home/cwliao/.hermes/hermes-agent
+FULL_SHA=$(git rev-parse HEAD)
+NEW_RELEASE="/home/cwliao/.hermes/releases/v$(date -u +%Y.%-m.%-d)-<slug>-${FULL_SHA:0:10}"
+venv/bin/python3 scripts/release_snapshot.py /home/cwliao/.hermes/hermes-agent "$NEW_RELEASE" "$FULL_SHA"
+grep -n "<marker unique to your fix>" "$NEW_RELEASE/<path/to/changed_file.py>"   # confirm the fix landed in the snapshot BEFORE switching traffic to it
+
+# New systemd drop-in, sorted to win: copy the current highest-sorting file in
+# ~/.config/systemd/user/hermes-gateway.service.d/ (this repo's convention
+# uses an increasing run of leading z's, e.g. zzzzzzzzzzzz-<slug>-<sha10>.conf),
+# change only WorkingDirectory / Environment=PYTHONPATH / Environment=HERMES_RELEASE_SHA
+# to $NEW_RELEASE / $FULL_SHA, then:
+systemctl --user daemon-reload
+systemctl --user restart hermes-gateway.service
+systemctl --user show hermes-gateway.service -p WorkingDirectory -p Environment --no-pager \
+  | grep -E "WorkingDirectory|HERMES_RELEASE_SHA"   # verify against the intended sha -- "active (running)" alone is not proof
+```
+
+Cross-reference: [[GLOBAL-conventions-deployment-directory-boundaries-2026Q3-final]]
+in the AgentMemory global layer carries the same addendum with the full
+incident narrative.

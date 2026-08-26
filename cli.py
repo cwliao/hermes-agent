@@ -20795,8 +20795,14 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     if task is None:
         return
 
+    from hermes_cli import kanban_swarm as _ks
+
+    contract = _ks.extract_contract(task.body)
+    acceptance = (contract or {}).get("acceptance")
     goal_parts = [task.title or ""]
-    if task.body:
+    if isinstance(acceptance, str) and acceptance.strip():
+        goal_parts.append(acceptance)
+    elif task.body:
         goal_parts.append(task.body)
     goal_text = "\n\n".join(p for p in goal_parts if p).strip()
     if not goal_text:

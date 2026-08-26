@@ -371,11 +371,18 @@ def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
     """Return a rejection reason when a goal-mode terminal handoff is premature."""
     if not task or not task.goal_mode or not _goal_judge_available():
         return None
+    contract = _KS.extract_contract(getattr(task, "body", None))
+    acceptance = (contract or {}).get("acceptance")
+    goal = (
+        f"{task.title}\n\n{acceptance}".strip()
+        if isinstance(acceptance, str) and acceptance.strip()
+        else f"{task.title}\n\n{task.body or ''}".strip()
+    )
     verdict = "done"
     reason = ""
     try:
         verdict, reason, _, _, transport_failed = judge_goal(
-            goal=f"{task.title}\n\n{task.body or ''}".strip(),
+            goal=goal,
             last_response=evidence.strip(),
         )
         if transport_failed:
@@ -2191,11 +2198,13 @@ def _handle_swarm(args: dict, **kw) -> str:
                 return tool_error(
                     f"workers[{i}].max_runtime_seconds must be an integer"
                 )
+        acceptance = w.get("acceptance")
         specs.append(ks.SwarmWorkerSpec(
             profile=str(profile), title=str(title), body=str(body),
             skills=list(skills) if skills else [], lane_id=lane_id,
             preflight_skill_id=preflight_skill_id,
             max_runtime_seconds=max_runtime,
+            acceptance=str(acceptance).strip() if acceptance else "",
         ))
 
     # Preserve the swarm topology validation error before routing preflight:
@@ -3027,6 +3036,18 @@ KANBAN_SWARM_SCHEMA = {
                         "body": {
                             "type": "string",
                             "description": "Task instructions. Defaults to title if omitted.",
+                        },
+                        "acceptance": {
+                            "type": "string",
+                            "description": (
+                                "This worker's own deliverable/acceptance criteria, "
+                                "distinct from the swarm-wide goal. The completion "
+                                "judge evaluates this worker's handoff against this "
+                                "text instead of the full swarm goal, so a worker "
+                                "who does its own narrow job isn't rejected for not "
+                                "having done every other worker's job too. Defaults "
+                                "to title if omitted."
+                            ),
                         },
                         "profile": {
                             "type": "string",

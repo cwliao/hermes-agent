@@ -187,6 +187,13 @@ class SwarmWorkerSpec:
     # Optional task-scoped runtime toolset override. The dispatcher filters it
     # against the assignee profile's available toolsets before spawning.
     toolsets: list[str] = field(default_factory=list)
+    # Optional worker-specific deliverable/acceptance description, distinct
+    # from the swarm-wide goal appended by ``_swarm_context``. Threaded into
+    # the worker's contract so the goal-mode judge can evaluate a worker's
+    # completion against its own job instead of the entire swarm's goal
+    # (KANBAN-SWARM-WORKER-GOAL-JUDGE-SCOPE-001). Defaults to the worker's
+    # title when not given.
+    acceptance: str = ""
 
 
 @dataclass(frozen=True)
@@ -784,10 +791,14 @@ def _create_swarm_uncommitted(
        swarm-specific logic into ``_record_task_failure``'s generic,
        every-task-type failure-counting path.
 
-    Swarms created without ``worker_quorum`` (``None``, the default)
-    are completely unaffected -- ``excuse_blocked_workers_below_quorum``
-    is a no-op for them, and the verifier's contract still requires
-    every lane, exactly as before this parameter existed.
+    Swarms created without ``worker_quorum`` (``None``, the default) are
+    unaffected by *this* mechanism -- ``excuse_blocked_workers_below_quorum``
+    is a no-op for them, and the verifier's contract still requires every
+    lane, exactly as before this parameter existed. This does not mean such
+    swarms have no graceful degradation at all: a separate, unconditional
+    response-deadline excusal mechanism (see the worker response-deadline
+    handling feeding ``_effective_expected_lane_count``) still applies
+    regardless of ``worker_quorum``.
 
     ``origin`` (WORKER-SUBPROCESS-SESSION-ENV-001), when given, is a dict of
     ``origin_platform``/``origin_chat_id``/``origin_thread_id``/
@@ -912,6 +923,11 @@ def _create_swarm_uncommitted(
         worker_lane = str(spec.lane_id).strip() if lane_mode else None
         contract = None
         if lane_mode:
+            title = (spec.title or "").strip()
+            body = (spec.body or "").strip()
+            acceptance = (spec.acceptance or "").strip() or (
+                body if body and body != title else title
+            )
             contract = {
                 "version": 1,
                 "role": "worker",
@@ -919,6 +935,7 @@ def _create_swarm_uncommitted(
                 "expected_lane_id": worker_lane,
                 "preflight_skill_id": expected_skill,
                 "output_policy": dict(DEFAULT_OUTPUT_CONTRACT_POLICY),
+                "acceptance": acceptance,
             }
         worker_body = (spec.body or "") + context_suffix
         if contract:
@@ -1381,14 +1398,21 @@ def latest_blackboard(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
 
 
 def parse_worker_arg(raw: str) -> SwarmWorkerSpec:
-    """Parse CLI ``--worker profile:title[:skill,skill]`` values."""
+    """Parse CLI ``--worker profile:title[:skill,skill[:acceptance]]`` values."""
 
-    parts = [p.strip() for p in raw.split(":", 2)]
+    parts = [p.strip() for p in raw.split(":", 3)]
     if len(parts) < 2:
-        raise ValueError("worker must be profile:title or profile:title:skill,skill")
+        raise ValueError(
+            "worker must be profile:title, profile:title:skill,skill, or "
+            "profile:title:skill,skill:acceptance"
+        )
     skills: list[str] = []
-    if len(parts) == 3 and parts[2]:
+    if len(parts) >= 3 and parts[2]:
         skills = [s.strip() for s in parts[2].split(",") if s.strip()]
     # The optional third segment is a comma-separated skill list only.  Bounded
     # worker instructions belong in the title/body, never in a skill token.
-    return SwarmWorkerSpec(profile=parts[0], title=parts[1], body=parts[1], skills=skills)
+    acceptance = parts[3].strip() if len(parts) == 4 else ""
+    return SwarmWorkerSpec(
+        profile=parts[0], title=parts[1], body=parts[1], skills=skills,
+        acceptance=acceptance,
+    )

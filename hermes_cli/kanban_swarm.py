@@ -32,6 +32,8 @@ MULTI_AGENT_LANE_IDS = ("native_hermes", "claude", "grok", "agy")
 REQUIRED_LANE_ID = "native_hermes"
 EXTERNAL_LANE_IDS = ("claude", "grok", "agy")
 MIN_EXTERNAL_LANES = 2
+_WORKER_RESPONSE_DEADLINE_SECONDS = 660
+_WORKER_EXCUSED_EVENT_KIND = "worker_excused_needs_input"
 
 # GATE8-SWARM-CREATION-TOOL-001: the skill each external lane needs to reach
 # its actual CLI. Before this table existed, nothing in the codebase
@@ -333,7 +335,12 @@ def _completion_requirements(contract: dict[str, Any]) -> str:
             '  gate = "pass"',
             f"  expected_lane_count = {expected}",
             f"  verified_lane_count = {expected}",
-            "  (every expected lane must be verified; a smaller count is rejected)",
+            (
+                "  (effective expected_lane_count is reduced by each excused "
+                "worker in the root blackboard, with a minimum of 1)"
+                if contract.get("dynamic_expected_lane_count")
+                else "  (every expected lane must be verified; a smaller count is rejected)"
+            ),
         ]
     elif role == "synthesizer":
         lines += [
@@ -509,8 +516,40 @@ def extract_contract(body: Optional[str]) -> Optional[dict[str, Any]]:
     return None
 
 
+def _effective_expected_lane_count(
+    contract: dict[str, Any], conn: Optional[sqlite3.Connection] = None,
+) -> Any:
+    """Resolve a verifier's live lane count without weakening old contracts."""
+
+    expected = contract.get("expected_lane_count")
+    if not isinstance(expected, int) or isinstance(expected, bool):
+        return expected
+    if conn is None or not contract.get("dynamic_expected_lane_count"):
+        return expected
+    root_id = contract.get("root_id")
+    if not root_id:
+        return expected
+    board = latest_blackboard(conn, str(root_id))
+    topology = board.get("topology")
+    worker_ids = {
+        str(worker_id)
+        for worker_id in (topology or {}).get("worker_ids", [])
+        if worker_id
+    } if isinstance(topology, dict) else set()
+    excused = {
+        str(worker_id)
+        for worker_id in (board.get("excused_worker_ids") or [])
+        if str(worker_id) in worker_ids
+    }
+    return max(1, expected - len(excused))
+
+
 def validate_completion(
-    task: Any, *, metadata: Optional[dict[str, Any]], result: Optional[str] = None,
+    task: Any,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    metadata: Optional[dict[str, Any]],
+    result: Optional[str] = None,
     summary: Optional[str] = None,
 ) -> Optional[str]:
     """Return a rejection reason for a contract-bound task, else ``None``."""
@@ -542,7 +581,7 @@ def validate_completion(
     elif role == "verifier":
         if metadata.get("gate") != "pass":
             errors.append("verifier completion requires gate='pass'")
-        expected = contract.get("expected_lane_count")
+        expected = _effective_expected_lane_count(contract, conn)
         if metadata.get("expected_lane_count") != expected:
             errors.append("verifier completion requires the expected lane count")
         if metadata.get("verified_lane_count") != expected:
@@ -628,6 +667,7 @@ def create_swarm(
     """Atomically create a durable, immediately dispatchable Kanban swarm."""
     activation_summary = "Swarm topology planned; root remains the shared blackboard."
     activated = False
+    root_to_subscribe: Optional[str] = None
     with kb.write_txn(conn):
         created = _create_swarm_uncommitted(
             conn,
@@ -662,7 +702,13 @@ def create_swarm(
                 },
             ):
                 raise RuntimeError("could not activate the completed swarm topology")
+            # Subscribe after the outer transaction commits. The underlying
+            # add_notify_sub primitive opens its own write transaction, and
+            # its creation cursor then skips this t=0 synthetic completion.
+            root_to_subscribe = created.root_id
             activated = True
+    if root_to_subscribe:
+        _auto_subscribe_swarm_root(conn, root_to_subscribe)
     if activated:
         # After commit: recompute_ready opens its own txn and must never run
         # under an open write_txn.
@@ -911,6 +957,7 @@ def _create_swarm_uncommitted(
             "version": 1,
             "role": "verifier",
             "root_id": root,
+            "dynamic_expected_lane_count": True,
             "expected_lane_count": (
                 worker_quorum if worker_quorum is not None else len(worker_specs)
             ),
@@ -1054,6 +1101,206 @@ def excuse_blocked_workers_below_quorum(conn: sqlite3.Connection) -> int:
             if still_blocked is None or still_blocked["status"] != "blocked":
                 continue
             if kb.archive_task(conn, row["id"]):
+                excused += 1
+    return excused
+
+
+def _auto_subscribe_swarm_root(
+    conn: sqlite3.Connection, root_id: str,
+) -> bool:
+    """Subscribe the originating channel to deadline-excuse events on root_id.
+
+    This deliberately calls the DB primitive used by the tool-layer
+    _maybe_auto_subscribe directly. The swarm builder runs below the
+    gateway's session ContextVars, but the root already carries the durable
+    origin fields needed for delivery. The event-kind marker keeps this
+    narrowly scoped subscription from turning the root's lifecycle events
+    into user notifications.
+    """
+    try:
+        from hermes_cli.config import cfg_get, load_config
+
+        if not cfg_get(
+            load_config(), "kanban", "auto_subscribe_on_create", default=True,
+        ):
+            return False
+    except Exception:
+        # Match _maybe_auto_subscribe: a config-read failure must not make
+        # swarm creation fail or silently disable the default behavior.
+        pass
+
+    root = kb.get_task(conn, root_id)
+    if root is None or not root.origin_platform or not root.origin_chat_id:
+        return False
+    platform = str(root.origin_platform)
+    delivery_mode = "notify+wake" if platform != "tui" else None
+    try:
+        kb.add_notify_sub(
+            conn,
+            task_id=root_id,
+            platform=platform,
+            chat_id=str(root.origin_chat_id),
+            thread_id=root.origin_thread_id,
+            user_id=root.origin_user_id,
+            notifier_profile=root.origin_profile,
+            delivery_mode=delivery_mode,
+            delivery_metadata={
+                "event_kind_allowlist": _WORKER_EXCUSED_EVENT_KIND,
+            },
+        )
+        return True
+    except Exception:
+        # A notification bookkeeping failure must not turn an already-created
+        # swarm into a failed creation call; the operator can still inspect or
+        # explicitly subscribe later.
+        return False
+
+
+def synthesizer_blackboard_context(
+    conn: sqlite3.Connection, root_id: str,
+) -> str:
+    """Render live deadline state for a synthesizer's worker context."""
+    board = latest_blackboard(conn, str(root_id))
+    raw_ids = board.get("excused_worker_ids")
+    worker_ids = [str(worker_id) for worker_id in raw_ids if worker_id] \
+        if isinstance(raw_ids, list) else []
+    if not worker_ids:
+        return (
+            "\n## Swarm deadline status\n"
+            "- Excused worker lanes: none.\n"
+        )
+
+    labels: list[str] = []
+    for worker_id in worker_ids:
+        task = kb.get_task(conn, worker_id)
+        contract = extract_contract(task.body) if task else None
+        lane_id = (contract or {}).get("expected_lane_id") or "unknown lane"
+        skill_id = (contract or {}).get("preflight_skill_id") or "unknown skill"
+        labels.append(f"{lane_id} (skill {skill_id}; task {worker_id})")
+    return (
+        "\n## Swarm deadline status\n"
+        "- Excused worker lanes (from root blackboard `excused_worker_ids`): "
+        + ", ".join(labels)
+        + ".\n"
+        "- These lanes asked a question and the swarm is proceeding WITHOUT "
+        "their input. Do not treat their partial artifacts as complete or "
+        "trustworthy.\n"
+    )
+
+
+def _sticky_block_reason(conn: sqlite3.Connection, task_id: str) -> str:
+    """Return the latest explicit block reason, bounded for a user event."""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    try:
+        payload = json.loads(row["payload"]) if row and row["payload"] else {}
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    return str(reason or "")[:400]
+
+
+def excuse_overdue_workers(conn: sqlite3.Connection) -> int:
+    """Excuse swarm workers that outlived the root-based response deadline.
+
+    The deadline is measured from the swarm root's created_at. A running
+    worker is only excused after the same confirmed-termination sequence used
+    by release_stale_claims; a worker that survives is deferred for a later
+    tick. The blackboard update and archive are one transaction so a verifier
+    cannot observe an excused id without the corresponding archived task (or
+    vice versa).
+    """
+    now = int(time.time())
+    excused = 0
+    rows = conn.execute(
+        "SELECT id, body, status, worker_pid, claim_lock "
+        "FROM tasks WHERE status IN ('running', 'ready', 'todo', 'blocked')"
+    ).fetchall()
+    for row in rows:
+        worker_id = str(row["id"])
+        contract = extract_contract(row["body"])
+        if not contract or contract.get("role") != "worker":
+            continue
+        root_id = contract.get("root_id")
+        if not root_id:
+            continue
+        board = latest_blackboard(conn, str(root_id))
+        topology = board.get("topology")
+        if not isinstance(topology, dict):
+            continue
+        worker_ids = {str(w) for w in topology.get("worker_ids", []) if w}
+        if worker_id not in worker_ids:
+            continue
+        root = conn.execute(
+            "SELECT created_at FROM tasks WHERE id = ?", (str(root_id),)
+        ).fetchone()
+        if root is None or root["created_at"] is None:
+            continue
+        if now - int(root["created_at"]) < _WORKER_RESPONSE_DEADLINE_SECONDS:
+            continue
+
+        if row["status"] == "running":
+            termination = kb._terminate_reclaimed_worker(
+                row["worker_pid"], row["claim_lock"],
+            )
+            if kb._worker_survived_termination(termination):
+                kb._defer_reclaim_for_live_worker(
+                    conn,
+                    worker_id,
+                    row["claim_lock"],
+                    now,
+                    termination,
+                    reason="swarm_worker_deadline_worker_alive",
+                )
+                continue
+
+        sticky = (
+            row["status"] == "blocked"
+            and kb._has_sticky_block(conn, worker_id)
+        )
+        payload = {
+            "task_id": worker_id,
+            "lane_id": contract.get("expected_lane_id"),
+            "skill_id": contract.get("preflight_skill_id"),
+            "reason": _sticky_block_reason(conn, worker_id),
+        }
+        allowed_statuses = (str(row["status"]),)
+        with kb.write_txn(conn):
+            current = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (worker_id,)
+            ).fetchone()
+            if current is None or current["status"] != row["status"]:
+                continue
+            if sticky:
+                kb._append_event(
+                    conn,
+                    str(root_id),
+                    _WORKER_EXCUSED_EVENT_KIND,
+                    payload,
+                )
+            current_board = latest_blackboard(conn, str(root_id))
+            existing = current_board.get("excused_worker_ids")
+            excused_ids = list(existing) if isinstance(existing, list) else []
+            if worker_id in {str(item) for item in excused_ids}:
+                continue
+            excused_ids.append(worker_id)
+            post_blackboard_update(
+                conn,
+                str(root_id),
+                author="swarm-deadline",
+                key="excused_worker_ids",
+                value=excused_ids,
+            )
+            archived = kb.archive_task(
+                conn,
+                worker_id,
+                _within_transaction=True,
+                _allowed_statuses=allowed_statuses,
+            )
+            if archived:
                 excused += 1
     return excused
 

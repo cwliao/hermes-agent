@@ -6,6 +6,7 @@ from hermes_cli.kanban_swarm import (
     SwarmWorkerSpec,
     create_swarm,
     extract_contract,
+    post_blackboard_update,
     swarm_output_metadata,
     validate_completion,
     validate_swarm_output_text,
@@ -46,6 +47,38 @@ def test_worker_context_aggregate_cap_preserves_swarm_contract(tmp_path):
         assert "Do not invent extra deliverables" in context
         assert "optional artifact is never a blocker" in context
         assert created.root_id in context
+    finally:
+        conn.close()
+
+
+def test_synthesizer_context_renders_live_excused_lanes(tmp_path):
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Generate four bounded autumn jokes.",
+            workers=_lane_specs(),
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+        )
+
+        empty_context = kb.build_worker_context(conn, created.synthesizer_id)
+        assert "Excused worker lanes: none." in empty_context
+
+        excused_worker_id = created.worker_ids[1]
+        post_blackboard_update(
+            conn,
+            created.root_id,
+            author="swarm-deadline",
+            key="excused_worker_ids",
+            value=[excused_worker_id],
+        )
+        context = kb.build_worker_context(conn, created.synthesizer_id)
+        assert "excused_worker_ids" in context
+        assert "claude" in context
+        assert "kanban-worker" in context
+        assert "WITHOUT their input" in context
+        assert "partial artifacts as complete or trustworthy" in context
     finally:
         conn.close()
 

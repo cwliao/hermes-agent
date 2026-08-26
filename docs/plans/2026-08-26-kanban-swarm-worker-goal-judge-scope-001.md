@@ -1,10 +1,28 @@
 ---
 title: "Kanban swarm: goal-mode judge evaluates worker completions against the whole swarm's goal, not the worker's own deliverable"
-status: DESIGN_REVISED
+status: DONE
 date: 2026-08-26
 type: design-proposal
 target_repo: hermes-agent
 ---
+
+## Implementation record (2026-08-26)
+
+Implemented and committed as `91aef7c7b8`. 3 rounds of cross-review
+(claude/codex/agy, grok mostly busy/unreachable across rounds):
+
+- Round 1: CHANGES-NEEDED (minor) -- acceptance fallback should prefer
+  `body` over `title` for the tool path; zero test coverage.
+- Round 2: both gaps fixed; CHANGES-NEEDED (minor) persisted on one
+  remaining item -- `cli.py`'s `_run_kanban_goal_loop_q` (4th call
+  site) had no test coverage; agy already APPROVEd.
+- Round 3 (final): gap closed with 2 new tests; claude and agy both
+  APPROVE, no remaining objections from any round.
+
+116 targeted tests pass (`tests/hermes_cli/test_kanban_swarm.py`,
+`tests/hermes_cli/test_kanban_goal_mode.py`,
+`tests/tools/test_kanban_tools.py`), independently re-run and verified
+outside the dispatched agents' own reports before commit.
 
 ## Revision note (post cross-review, 2026-08-26)
 

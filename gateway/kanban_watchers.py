@@ -30,11 +30,93 @@ from gateway.kanban_watchers_dispatcher import (
     _log_spawn_results,
     _resolve_dispatcher_settings,
 )
+from agent.auxiliary_client import async_call_llm
+from agent.i18n import t
+from hermes_cli.config import cfg_get
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
 _GC_INTERVAL_SECONDS = 3600.0
 _HEALTH_WINDOW = 6
+
+_KANBAN_NOTIFIER_LLM_TIMEOUT_SECONDS = 8.0
+
+
+def _build_notifier_format_prompt(raw_msg: str, *, kind: str) -> str:
+    """Build the narrowly-scoped prompt used for user-facing notifications."""
+    return (
+        "Rewrite the following Kanban notification into concise, natural "
+        "Traditional Chinese suitable for a Telegram notification.\n\n"
+        "Rules:\n"
+        "- Preserve every concrete fact exactly; do not paraphrase, drop, or "
+        "invent facts.\n"
+        "- Keep task IDs (for example, t_xxxxxxxx), lane names, skill names, "
+        "counts, error text, and URLs exactly as written.\n"
+        "- Translate and reformat prose only; do not translate identifiers, "
+        "names, error text, or URLs.\n"
+        "- Keep any emoji prefix already present in the raw notification (such "
+        "as ⚠, ✖, or ✅).\n"
+        "- Return only the finished notification text, with no explanation or "
+        "commentary.\n\n"
+        f"Event kind: {kind}\n"
+        f"Raw notification:\n{raw_msg}"
+    )
+
+
+def _notifier_llm_text(response: Any) -> str:
+    """Extract text from the response shape returned by ``async_call_llm``."""
+    if isinstance(response, str):
+        return response.strip()
+    try:
+        return str(response.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
+
+
+async def _format_notifier_message_zh(raw_msg: str, *, kind: str) -> str:
+    """Format one raw notifier message in Traditional Chinese.
+
+    This is deliberately best-effort: a notification must still be delivered
+    if the auxiliary LLM is unavailable, slow, or returns no usable content.
+    """
+    try:
+        response = await asyncio.wait_for(
+            async_call_llm(
+                task="kanban_notifier_formatter",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": _build_notifier_format_prompt(raw_msg, kind=kind),
+                    },
+                ],
+                temperature=0.2,
+                max_tokens=500,
+                timeout=_KANBAN_NOTIFIER_LLM_TIMEOUT_SECONDS,
+            ),
+            timeout=_KANBAN_NOTIFIER_LLM_TIMEOUT_SECONDS,
+        )
+        formatted = _notifier_llm_text(response)
+        if not formatted:
+            raise ValueError("empty formatter response")
+        return formatted
+    except Exception as exc:
+        logger.warning(
+            "kanban notifier: LLM formatting failed for kind %s (%s); "
+            "sending raw message",
+            kind,
+            type(exc).__name__,
+        )
+        return raw_msg
+
+
+def _notifier_llm_enabled() -> bool:
+    """Read the opt-out gate; formatter failures always fail open."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        return bool(cfg_get(cfg, "kanban", "notifier_llm_format", default=True))
+    except Exception:
+        return True
 
 
 def _resolve_gateway_max_in_progress(kanban_cfg: dict, kb: Any):

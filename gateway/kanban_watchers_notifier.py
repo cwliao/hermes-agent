@@ -561,6 +561,35 @@ class _KanbanNotification:
             msg = self.format_event(ev)
             if msg is None:
                 continue
+            # The watcher owns the feature gate and formatter so deployments
+            # can monkeypatch/configure it without coupling this split module
+            # to the GatewayRunner mixin. Never rewrite the exact synthesizer
+            # deliverable.
+            if not (
+                ev.kind == "completed"
+                and self.task is not None
+                and 'role = "synthesizer"' in (self.task.body or "")
+                and self.task.result
+            ):
+                try:
+                    from gateway.kanban_watchers import (
+                        _format_notifier_message_zh,
+                        _notifier_llm_enabled,
+                    )
+                    if _notifier_llm_enabled():
+                        formatted = await _format_notifier_message_zh(msg, kind=ev.kind)
+                        if self.task_id in formatted:
+                            msg = formatted
+                        else:
+                            logger.warning(
+                                "kanban notifier: LLM formatting dropped task id %s for kind %s; sending raw message",
+                                self.task_id, ev.kind,
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "kanban notifier: formatter integration failed for %s (%s); sending raw message",
+                        ev.kind, type(exc).__name__,
+                    )
             # Non-push adapters (api_server) always report SendResult(success=False)
             # from send(); treating that as failure would drop the sub forever and
             # make the wake path unreachable. Skip the doomed send; the self-post

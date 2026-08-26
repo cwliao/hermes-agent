@@ -2,9 +2,11 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
+import pytest
 
 from gateway.config import Platform
-from gateway.kanban_watchers_common import (
+import gateway.kanban_watchers as kanban_watchers
+from gateway.kanban_watchers import (
     _acquire_singleton_lock,
     _release_singleton_lock,
 )
@@ -13,6 +15,12 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_swarm as ks
+
+
+@pytest.fixture(autouse=True)
+def _disable_notifier_llm_format_for_legacy_tests(monkeypatch):
+    """Keep pre-feature notifier assertions deterministic and offline."""
+    monkeypatch.setattr(kanban_watchers, "cfg_get", lambda *args, **kwargs: False)
 
 
 class RecordingAdapter:
@@ -154,23 +162,35 @@ def test_synthesizer_notifier_sends_result_not_status_summary(tmp_path, monkeypa
             chat_id="chat-1",
             delivery_mode="notify+wake",
         )
+        direct_synth_result = (
+            "Joke A: 秋天的葉子會變色。\n"
+            + "Joke B: 秋風一吹，笑聲就落葉。\n" * 79
+            + "Joke B: 秋風一吹，笑聲就落葉。"
+        )
+        assert len(direct_synth_result) > 500
         assert kb.complete_task(
             conn,
             tid,
-            result="Joke A: 秋天的葉子會變色。\nJoke B: 秋風一吹，笑聲就落葉。",
+            result=direct_synth_result,
             summary="status only",
         )
     finally:
         conn.close()
 
+    monkeypatch.setattr(kanban_watchers, "cfg_get", lambda *args, **kwargs: True)
+    formatter_calls = []
+
+    async def fake_async_call_llm(**kwargs):
+        formatter_calls.append(kwargs)
+        return "THIS MUST NEVER REPLACE THE SYNTHESIZER DELIVERABLE"
+
+    monkeypatch.setattr(kanban_watchers, "async_call_llm", fake_async_call_llm)
     adapter = RecordingAdapter()
     asyncio.run(_run_one_notifier_tick(monkeypatch, _make_runner(adapter)))
 
     assert len(adapter.sent) == 1
-    assert adapter.sent[0]["text"].splitlines() == [
-        "Joke A: 秋天的葉子會變色。",
-        "Joke B: 秋風一吹，笑聲就落葉。",
-    ]
+    assert adapter.sent[0]["text"] == direct_synth_result
+    assert formatter_calls == []
     assert "status only" not in adapter.sent[0]["text"]
     # A completed synthesizer result is sent verbatim; no wake turn may
     # rewrite it or invent artifacts/task IDs.

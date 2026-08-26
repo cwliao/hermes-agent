@@ -436,8 +436,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--worker",
         action="append",
         default=[],
-        metavar="PROFILE:TITLE[:SKILL,SKILL]",
-        help="Parallel worker card (repeatable)",
+        metavar="PROFILE:TITLE[:SKILL,SKILL[:ACCEPTANCE]]",
+        help=(
+            "Parallel worker card (repeatable). Optional 4th segment is this "
+            "worker's own deliverable/acceptance text, judged instead of the "
+            "full swarm goal; defaults to TITLE if omitted."
+        ),
     )
     p_swarm.add_argument(
         "--worker-lane",
@@ -2079,6 +2083,14 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
 
     from hermes_cli.goals import judge_goal
 
+    contract = ks.extract_contract(task.body)
+    acceptance = (contract or {}).get("acceptance")
+    goal = (
+        f"{task.title}\n\n{acceptance}".strip()
+        if isinstance(acceptance, str) and acceptance.strip()
+        else f"{task.title}\n\n{task.body or ''}".strip()
+    )
+
     verdict, reason, transport_failed = "done", "", False
     try:
         # Headless handoff checks run outside any agent turn: bind the per-task relay-affinity
@@ -2087,7 +2099,7 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{task.id}")
         try:
             verdict, reason, _, _, transport_failed = judge_goal(
-                goal=f"{task.title}\n\n{task.body or ''}".strip(),
+                goal=goal,
                 last_response=evidence.strip())
         finally:
             if affinity_token is not None:

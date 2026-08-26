@@ -119,7 +119,7 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 # the same generic ``blocked`` lane/UI, no new lifecycle state was added.
 #
 # ``synthesizer_retry_exhausted``: the synthesizer role's bounded retry
-# budget (max_retries=1, i.e. max_attempts=2) or its 660s overall deadline
+# budget (max_retries=1, i.e. max_attempts=2) or its 2700s overall deadline
 # was exhausted. Terminal -- no later dispatcher tick may spawn another
 # attempt for this task (enforced by ``retry_not_before``/deadline checks
 # in ``enforce_max_runtime``, not by this constant alone).

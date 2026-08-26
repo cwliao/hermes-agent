@@ -37,6 +37,25 @@ from hermes_cli.config import cfg_get, load_config
 from hermes_cli.profiles import get_active_profile_name
 
 
+_GC_ALERT_DEDUP_SECONDS = 30 * 60
+_GC_ALERT_DEDUP_FILENAME = "kanban_gc.last_alert"
+
+
+# ---------------------------------------------------------------------------
+# Small formatting helpers
+# ---------------------------------------------------------------------------
+
+_STATUS_ICONS = {
+    "todo":     "◻",
+    "ready":    "▶",
+    "running":  "●",
+    "scheduled":"⏱",
+    "blocked":  "⊘",
+    "done":     "✓",
+    "archived": "—",
+}
+
+
 def _resolve_max_in_progress(configured):
     """Shared resolver seam for CLI/gateway concurrency semantics."""
     return kb.resolve_max_in_progress(configured)
@@ -103,11 +122,88 @@ def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     return branch
 
 
-def _check_dispatcher_presence(hermes_home: Optional[Path] = None) -> tuple[bool, str]:
-    """``(running, message)`` for the "will anything dispatch this?" warning: True when a gateway is
-    alive for this HERMES_HOME with ``kanban.dispatch_in_gateway`` on, else False + human guidance.
-    Fails OPEN (probe/config errors -> ``(True, "")``) — a missed warning beats crying wolf.
-    ``hermes_home`` scopes the probe to a profile dir (dashboard backend); CLI callers pass None.
+def _parse_nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
+def _send_gc_alert(text: str) -> bool:
+    """Best-effort, time-deduplicated Telegram alert for dead-graph GC.
+
+    The actual Telegram Bot API send is deliberately shared with the existing
+    Python healthcheck notifier. This wrapper adds the same short-lived
+    deduplication behavior as the host shell healthchecks; notification
+    failure, malformed state, or a read-only Hermes home never fails GC.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        from hermes_cli.failed_unit_allowlist_repair import _send_telegram
+
+        now = int(time.time())
+        dedup_path = get_hermes_home() / "gateway" / _GC_ALERT_DEDUP_FILENAME
+        try:
+            last = int(dedup_path.read_text(encoding="utf-8").strip() or "0")
+        except (OSError, ValueError):
+            last = 0
+        if now - last < _GC_ALERT_DEDUP_SECONDS:
+            logging.getLogger(__name__).info(
+                "kanban dead-graph GC alert suppressed by dedup window"
+            )
+            return True
+        if not _send_telegram(text):
+            return False
+        try:
+            dedup_path.parent.mkdir(parents=True, exist_ok=True)
+            dedup_path.write_text(str(now), encoding="utf-8")
+        except OSError:
+            logging.getLogger(__name__).warning(
+                "kanban dead-graph GC alert sent but dedup state could not be saved"
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001 -- alerts are strictly best-effort
+        logging.getLogger(__name__).warning(
+            "kanban dead-graph GC Telegram alert failed: %s", exc
+        )
+        return False
+
+
+def _dead_graph_root_labels(
+    conn, ordered_ids: list[str],
+) -> list[str]:
+    """Return root task labels before ``archive_graph`` removes the links."""
+    if not ordered_ids:
+        return []
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"SELECT id, title FROM tasks WHERE id IN ({placeholders})",
+        ordered_ids,
+    ).fetchall()
+    titles = {row["id"]: row["title"] for row in rows}
+    child_rows = conn.execute(
+        f"SELECT child_id FROM task_links WHERE parent_id IN ({placeholders}) "
+        f"AND child_id IN ({placeholders})",
+        [*ordered_ids, *ordered_ids],
+    ).fetchall()
+    child_ids = {row["child_id"] for row in child_rows}
+    root_ids = [task_id for task_id in ordered_ids if task_id not in child_ids]
+    if not root_ids:
+        # A malformed cyclic component should still produce a useful alert.
+        root_ids = ordered_ids[-1:]
+    return [
+        f"{titles.get(task_id, '(deleted)')} ({task_id})"
+        for task_id in root_ids[:10]
+    ]
+
+
+def _check_dispatcher_presence(
+    hermes_home: Optional[Path] = None,
+) -> tuple[bool, str]:
+    """Return ``(running, message)``.
 
     The dashboard plugin API passes it because the dashboard backend process can be running under a
     different HERMES_HOME than the profile the request targets, which otherwise produced a "no gateway is
@@ -995,11 +1091,17 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_gc.add_argument("--dead-graph-days", type=int, default=7,
                       help="A graph is abandoned after N days with no event on any "
                            "of its cards (default: 7)")
-    p_gc.add_argument("--tenant", default=None,
-                      help="Required with --dead-graphs: only sweep graphs whose "
-                           "cards all belong to this tenant. There is no marker "
-                           "distinguishing a disposable graph from a parked one, "
-                           "so the operator names the scope")
+    gc_scope = p_gc.add_mutually_exclusive_group()
+    gc_scope.add_argument("--tenant", default=None,
+                          help="With --dead-graphs, sweep only graphs whose "
+                               "cards all belong to this tenant")
+    gc_scope.add_argument("--include-untenanted", action="store_true",
+                          help="With --dead-graphs, sweep only multi-card graphs "
+                               "whose cards all have no tenant")
+    p_gc.add_argument("--max-dead-graphs", type=_parse_nonnegative_int,
+                      default=kb.DEFAULT_DEAD_GRAPH_ARCHIVE_CAP,
+                      help="Refuse to archive any dead graphs when more than N "
+                           "candidates are found (default: 20)")
     p_gc.add_argument("--dry-run", action="store_true",
                       help="With --dead-graphs, print what would be archived and "
                            "change nothing at all")
@@ -2363,19 +2465,17 @@ def _cmd_gc(args: argparse.Namespace) -> int:
 
     dead_graphs = getattr(args, "dead_graphs", False)
     dry = getattr(args, "dry_run", False)
-    scope = (getattr(args, "tenant", "") or "").strip()
+    tenant = getattr(args, "tenant", None)
+    tenant = tenant.strip() if isinstance(tenant, str) else tenant
+    include_untenanted = bool(getattr(args, "include_untenanted", False))
+    scope_label = f"tenant {tenant!r}" if tenant else "untenanted graphs"
 
     if dry and not dead_graphs:
         print("--dry-run only applies to --dead-graphs; nothing to preview")
         return 0
-    if dead_graphs and not scope:
-        # Option A of KANBAN-CARD-GC-001 (marking graphs disposable at
-        # creation) is not implemented, so there is nothing that
-        # distinguishes a test graph from a parked one. Without that, an
-        # unscoped sweep would archive a backlog deliberately left idle --
-        # waiting on a vendor, a decision, a season. Requiring a tenant makes
-        # the operator name what is disposable instead of the tool guessing.
-        print("--dead-graphs requires --tenant: refusing to sweep the whole board",
+    if dead_graphs and not tenant and not include_untenanted:
+        print("--dead-graphs requires either --tenant <name> or "
+              "--include-untenanted: refusing to sweep the whole board",
               file=sys.stderr)
         return 2
     if dry:
@@ -2386,12 +2486,13 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             graphs = kb.find_dead_graphs(
                 conn,
                 older_than_seconds=getattr(args, "dead_graph_days", 7) * 24 * 3600,
-                tenant=scope,
+                tenant=tenant,
+                include_untenanted=include_untenanted,
             )
         for ordered in graphs:
             print(f"would archive graph of {len(ordered)}: " + " ".join(ordered))
-        print(f"GC dry run: {len(graphs)} abandoned graph(s) in tenant "
-              f"{scope!r} would be archived; nothing was changed")
+        print(f"GC dry run: {len(graphs)} abandoned graph(s) in {scope_label} "
+              "would be archived; nothing was changed")
         return 0
 
     scratch_root = kb.workspaces_root()
@@ -2438,24 +2539,92 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         older_than_seconds=log_days * 24 * 3600,
     )
     archived_graphs = archived_cards = 0
+    partial_graphs = partial_cards = 0
+    partial_graph_ids: list[list[str]] = []
+    cap_hit = False
+    archived_root_labels: list[str] = []
     if dead_graphs:
+        status_snapshot: dict[str, str] = {}
+        max_dead_graphs = getattr(
+            args, "max_dead_graphs", kb.DEFAULT_DEAD_GRAPH_ARCHIVE_CAP,
+        )
+        try:
+            max_dead_graphs = int(max_dead_graphs)
+        except (TypeError, ValueError):
+            print("--max-dead-graphs must be a non-negative integer", file=sys.stderr)
+            return 2
+        if max_dead_graphs < 0:
+            print("--max-dead-graphs must be a non-negative integer", file=sys.stderr)
+            return 2
         with kb.connect_closing() as conn:
             graphs = kb.find_dead_graphs(
                 conn,
                 older_than_seconds=getattr(args, "dead_graph_days", 7) * 24 * 3600,
-                tenant=scope,
+                tenant=tenant,
+                include_untenanted=include_untenanted,
+                _status_snapshot=status_snapshot,
             )
-            for ordered in graphs:
-                # Children first. An archived parent satisfies a dependency,
-                # so archiving upward promotes a dependent against a graph
-                # that produced nothing.
-                archived_cards += kb.archive_graph(conn, ordered)
-                archived_graphs += 1
+            if len(graphs) > max_dead_graphs:
+                cap_hit = True
+                print(
+                    f"Dead-graph archive cap hit: found {len(graphs)} candidate "
+                    f"graph(s), maximum is {max_dead_graphs}; archived none",
+                    file=sys.stderr,
+                )
+            else:
+                for ordered in graphs:
+                    # Capture roots before archive_graph removes task_links.
+                    roots = _dead_graph_root_labels(conn, ordered)
+                    # Children first. An archived parent satisfies a dependency,
+                    # so archiving upward promotes a dependent against a graph
+                    # that produced nothing.
+                    graph_archived = kb.archive_graph(
+                        conn, ordered, allowed_statuses=status_snapshot,
+                    )
+                    archived_cards += graph_archived
+                    if graph_archived == len(ordered):
+                        archived_graphs += 1
+                        archived_root_labels.extend(roots)
+                    elif graph_archived:
+                        partial_graphs += 1
+                        partial_cards += graph_archived
+                        partial_graph_ids.append(ordered)
+        if cap_hit:
+            _send_gc_alert(
+                "🚨 Hermes Kanban dead-graph GC cap hit: found "
+                f"{len(graphs)} candidate graph(s) in {scope_label}, "
+                f"exceeding the cap of {max_dead_graphs}; archived none. "
+                "Review: journalctl --user -u hermes-kanban-gc"
+            )
+        elif archived_graphs:
+            roots = ", ".join(archived_root_labels[:10]) or "(root details unavailable)"
+            _send_gc_alert(
+                "⚠️ Hermes Kanban dead-graph GC archived "
+                f"{archived_graphs} graph(s) / {archived_cards} card(s) in "
+                f"{scope_label}. Roots: {roots}. "
+                "Full details: journalctl --user -u hermes-kanban-gc"
+            )
+        if partial_graphs:
+            graph_ids = "; ".join(
+                " ".join(graph) for graph in partial_graph_ids[:10]
+            )
+            _send_gc_alert(
+                "⚠️ Hermes Kanban dead-graph GC partially archived "
+                f"{partial_graphs} graph(s) / {partial_cards} card(s) in "
+                f"{scope_label}; CAS rejected the remaining cards. Graphs: "
+                f"{graph_ids}. Full details: journalctl --user -u "
+                "hermes-kanban-gc"
+            )
     summary = (f"GC complete: {removed_ws} workspace(s), "
                f"{removed_events} event row(s), {removed_logs} log file(s) removed")
     if dead_graphs:
         summary += (f", {archived_cards} card(s) in "
                     f"{archived_graphs} abandoned graph(s) archived")
+        if cap_hit:
+            summary += "; archive cap hit, no dead graphs archived"
+        if partial_graphs:
+            summary += (f"; {partial_cards} card(s) in {partial_graphs} "
+                        "graph(s) partially archived")
     print(summary)
     return 0
 

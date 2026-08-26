@@ -24,7 +24,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
 from toolsets import get_toolset_names
 
@@ -4234,10 +4234,15 @@ def _archive_task_in_txn(
     conn: sqlite3.Connection,
     task_id: str,
     *,
-    allowed_statuses: Optional[Iterable[str]] = None,
+    allowed_statuses: Optional[Union[str, Iterable[str]]] = None,
 ) -> bool:
     """Archive a task while the caller owns the current write transaction."""
-    statuses = tuple(allowed_statuses) if allowed_statuses is not None else None
+    if allowed_statuses is None:
+        statuses = None
+    elif isinstance(allowed_statuses, str):
+        statuses = (allowed_statuses,)
+    else:
+        statuses = tuple(allowed_statuses)
     if statuses:
         placeholders = ",".join("?" for _ in statuses)
         where = f"status IN ({placeholders})"
@@ -4270,8 +4275,14 @@ def archive_task(
     task_id: str,
     *,
     _within_transaction: bool = False,
-    _allowed_statuses: Optional[Iterable[str]] = None,
+    _allowed_statuses: Optional[Union[str, Iterable[str]]] = None,
 ) -> bool:
+    """Archive one task, optionally guarded by its observed status.
+
+    ``_allowed_statuses`` accepts either an iterable of statuses or a bare
+    status string. A bare string is treated as one status value, rather than
+    being iterated character-by-character.
+    """
     if _within_transaction:
         return _archive_task_in_txn(
             conn, task_id, allowed_statuses=_allowed_statuses,
@@ -4697,10 +4708,13 @@ def task_age(task: Task) -> dict:
 
 LIVE_STATUSES = ("running", "ready")
 TERMINAL_STATUSES = ("done", "archived")
+DEFAULT_DEAD_GRAPH_ARCHIVE_CAP = 20
 
 def find_dead_graphs(
     conn: sqlite3.Connection, *, older_than_seconds: int,
     tenant: Optional[str] = None,
+    include_untenanted: bool = False,
+    _status_snapshot: Optional[dict[str, str]] = None,
 ) -> list[list[str]]:
     """Return dead task graphs, each ordered children-before-parents.
 
@@ -4720,10 +4734,15 @@ def find_dead_graphs(
     The age test is deliberately over the *whole graph*: one live card keeps
     its siblings alive, because a graph is abandoned together or not at all.
 
-    ``tenant`` scopes the sweep and is not optional in practice: the caller
-    must name what is disposable, because nothing on a card distinguishes a
-    test graph from a backlog somebody parked on purpose. A graph is
-    considered only when every card in it carries that tenant.
+    ``tenant`` scopes the named-tenant sweep and ``include_untenanted`` is a
+    separate, explicit scope for graphs whose cards all have ``tenant IS
+    NULL``. Nothing is swept when neither scope is selected. A graph is
+    considered only when every card in it belongs to the requested scope;
+    mixed-tenant components are excluded as a whole.
+
+    ``_status_snapshot`` is an internal caller hook used by the GC command to
+    carry the status observed by this function into the archive CAS guard.
+    It does not change the returned shape for existing callers.
 
     **Ordering is not cosmetic.** ``archive_task`` runs ``recompute_ready``
     after each call, and an ``archived`` parent satisfies a dependency exactly
@@ -4755,14 +4774,24 @@ def find_dead_graphs(
       guaranteed to be.
     """
 
+    if tenant is not None:
+        if not isinstance(tenant, str) or not tenant.strip():
+            raise ValueError("tenant must be a non-empty string")
+        tenant = tenant.strip()
+    if tenant is not None and include_untenanted:
+        raise ValueError("tenant and include_untenanted are mutually exclusive")
+    if tenant is None and not include_untenanted:
+        if _status_snapshot is not None:
+            _status_snapshot.clear()
+        return []
+
     cutoff = int(time.time()) - int(older_than_seconds)
-    if tenant:
-        rows = conn.execute(
-            "SELECT id, status FROM tasks WHERE tenant = ?", (tenant,)
-        ).fetchall()
-    else:
-        rows = conn.execute("SELECT id, status FROM tasks").fetchall()
+    rows = conn.execute("SELECT id, status, tenant FROM tasks").fetchall()
     status_of = {r["id"]: r["status"] for r in rows}
+    tenant_of = {r["id"]: r["tenant"] for r in rows}
+    if _status_snapshot is not None:
+        _status_snapshot.clear()
+        _status_snapshot.update(status_of)
     if not status_of:
         return []
 
@@ -4775,10 +4804,9 @@ def find_dead_graphs(
             children.setdefault(pid, []).append(cid)
             parents.setdefault(cid, []).append(pid)
 
-    # Connected components over the undirected link graph. A swarm root, its
-    # workers, verifier and synthesizer form one component; a standalone card
-    # forms a component of one and is skipped below unless it is itself stale
-    # and non-terminal.
+    # Connected components over the undirected link graph. This walk is over
+    # the full board before tenant filtering: otherwise a cross-tenant graph
+    # would be silently truncated into a sweepable-looking sub-component.
     seen: set[str] = set()
     components: list[list[str]] = []
     for task_id in status_of:
@@ -4803,6 +4831,17 @@ def find_dead_graphs(
 
     dead: list[list[str]] = []
     for comp in components:
+        if tenant is not None:
+            if any(tenant_of[i] != tenant for i in comp):
+                continue
+        else:
+            if any(tenant_of[i] is not None for i in comp):
+                continue
+            # An untenanted standalone card is commonly a deliberately parked
+            # backlog item. The automated untenanted path only sweeps graph
+            # shapes with at least one link.
+            if len(comp) <= 1:
+                continue
         statuses = [status_of[i] for i in comp]
         if all(st in TERMINAL_STATUSES for st in statuses):
             continue
@@ -4842,16 +4881,36 @@ def _children_before_parents(
     return sorted(comp, key=lambda n: (-depth[n], n))
 
 
-def archive_graph(conn: sqlite3.Connection, ordered_ids: list[str]) -> int:
+def archive_graph(
+    conn: sqlite3.Connection,
+    ordered_ids: list[str],
+    *,
+    allowed_statuses: Optional[
+        Mapping[str, Union[str, Iterable[str]]]
+    ] = None,
+) -> int:
     """Archive a graph in the order given. Returns the number archived.
 
     Takes an ordering rather than computing one so the caller -- and the
-    tests -- can be explicit about the property that matters.
+    tests -- can be explicit about the property that matters. When
+    ``allowed_statuses`` is provided, each value is the status observed when
+    the graph was found; values may be either a single status string or an
+    iterable of statuses. Passing it through to ``archive_task`` prevents a
+    card that became live in the meantime from being archived.
     """
 
     archived = 0
     for task_id in ordered_ids:
-        if archive_task(conn, task_id):
+        if allowed_statuses is None:
+            allowed = None
+        else:
+            allowed = allowed_statuses.get(task_id)
+            if allowed is None:
+                # A missing snapshot is fail-closed. ``archive_task`` treats
+                # an empty iterable like no guard, so use an impossible status
+                # rather than an empty tuple here.
+                allowed = ("__missing_dead_graph_status_snapshot__",)
+        if archive_task(conn, task_id, _allowed_statuses=allowed):
             archived += 1
     return archived
 

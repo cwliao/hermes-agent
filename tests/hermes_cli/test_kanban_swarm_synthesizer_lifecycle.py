@@ -187,7 +187,7 @@ def test_synthesizer_unconfirmed_termination_blocks_without_retry(
 
 
 # ---------------------------------------------------------------------------
-# Scenario 4: overall 660s deadline trips the breaker even with budget left
+# Scenario 4: overall 2700s deadline trips the breaker even with budget left
 # ---------------------------------------------------------------------------
 
 
@@ -196,10 +196,10 @@ def test_synthesizer_overall_deadline_forces_exhaustion(kanban_home, monkeypatch
     conn = kb.connect()
     try:
         # max_retries=5 -- plenty of budget by count, but the first-ever
-        # attempt started 700s ago (> the 660s deadline), so this single
+        # attempt started 2800s ago (> the 2700s deadline), so this single
         # timeout must trip the breaker immediately.
         tid = _make_synth_task(conn, max_retries=5)
-        _backdate_run_start(conn, tid, seconds_ago=700)
+        _backdate_run_start(conn, tid, seconds_ago=2800)
 
         kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
 
@@ -224,7 +224,7 @@ def test_synthesizer_deadline_checked_after_termination_polling(
     try:
         tid = _make_synth_task(conn, max_retries=5)
         loop_start = int(time.time())
-        started_at = loop_start - 659
+        started_at = loop_start - 2699
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET started_at = ? WHERE id = ?",

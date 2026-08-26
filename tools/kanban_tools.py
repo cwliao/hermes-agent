@@ -1028,6 +1028,7 @@ def _handle_complete(args: dict, **kw) -> str:
                     metadata["output_contract"] = output_meta
             contract_error = _kanban_swarm.validate_completion(
                 task,
+                conn=conn,
                 metadata=metadata,
                 result=result,
                 summary=summary,

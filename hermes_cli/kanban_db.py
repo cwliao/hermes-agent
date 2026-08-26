@@ -5933,7 +5933,7 @@ def complete_task(
         try:
             from hermes_cli import kanban_swarm as _kanban_swarm
             contract_error = _kanban_swarm.validate_completion(
-                task_for_contract, metadata=metadata, result=result,
+                task_for_contract, conn=conn, metadata=metadata, result=result,
             )
         except ImportError:
             contract_error = None
@@ -8110,25 +8110,58 @@ def decompose_triage_task(
     return child_ids
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def _archive_task_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    allowed_statuses: Optional[Iterable[str]] = None,
+) -> bool:
+    """Archive a task while the caller owns the current write transaction."""
+    statuses = tuple(allowed_statuses) if allowed_statuses is not None else None
+    if statuses:
+        placeholders = ",".join("?" for _ in statuses)
+        where = f"status IN ({placeholders})"
+        params: tuple[Any, ...] = (task_id, *statuses)
+    else:
+        where = "status != 'archived'"
+        params = (task_id,)
+    cur = conn.execute(
+        "UPDATE tasks SET status = 'archived', "
+        "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+        f"WHERE id = ? AND {where}",
+        params,
+    )
+    if cur.rowcount != 1:
+        return False
+    # If archive happened while a run was still in flight (e.g. user
+    # archived a running task from the dashboard), close that run with
+    # outcome='reclaimed' so attempt history isn't orphaned.
+    run_id = _end_run(
+        conn, task_id,
+        outcome="reclaimed", status="reclaimed",
+        summary="task archived with run still active",
+    )
+    _append_event(conn, task_id, "archived", None, run_id=run_id)
+    return True
+
+
+def archive_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    _within_transaction: bool = False,
+    _allowed_statuses: Optional[Iterable[str]] = None,
+) -> bool:
+    if _within_transaction:
+        return _archive_task_in_txn(
+            conn, task_id, allowed_statuses=_allowed_statuses,
+        )
     with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'archived', "
-            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status != 'archived'",
-            (task_id,),
+        archived = _archive_task_in_txn(
+            conn, task_id, allowed_statuses=_allowed_statuses,
         )
-        if cur.rowcount != 1:
+        if not archived:
             return False
-        # If archive happened while a run was still in flight (e.g. user
-        # archived a running task from the dashboard), close that run with
-        # outcome='reclaimed' so attempt history isn't orphaned.
-        run_id = _end_run(
-            conn, task_id,
-            outcome="reclaimed", status="reclaimed",
-            summary="task archived with run still active",
-        )
-        _append_event(conn, task_id, "archived", None, run_id=run_id)
     # ``archived`` parents no longer block children, same as ``done``.
     # Promote newly-unblocked dependents immediately instead of waiting
     # for a later dispatcher tick.
@@ -8658,6 +8691,8 @@ class DispatchResult:
     already reached 'done' to satisfy the swarm's worker_quorum (see
     kanban_swarm.excuse_blocked_workers_below_quorum). 0 for boards with
     no quorum-configured swarms -- SWARM-PARTIAL-QUORUM-001."""
+    overdue_excused: int = 0
+    """Swarm workers archived after the root-based response deadline."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
     stale: list[str] = field(default_factory=list)
@@ -10748,6 +10783,7 @@ def _dispatch_once_locked(
     # module-level import here would be circular. Swarm-specific logic
     # deliberately lives in kanban_swarm.py, not duplicated here.
     from hermes_cli import kanban_swarm as _ks
+    result.overdue_excused = _ks.excuse_overdue_workers(conn)
     result.quorum_excused = _ks.excuse_blocked_workers_below_quorum(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
 
@@ -12017,6 +12053,24 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
         lines.append("## Body")
         lines.append(_cap(task.body, _CTX_MAX_BODY_BYTES))
         lines.append("")
+
+    # A synthesizer must receive the live root blackboard deadline state at
+    # context-build time: excusals can happen after the graph was created but
+    # before this task is dispatched. Keep this out of ordinary worker bodies.
+    try:
+        from hermes_cli.kanban_swarm import (
+            extract_contract as _extract_swarm_contract,
+            synthesizer_blackboard_context as _synthesizer_blackboard_context,
+        )
+
+        contract = _extract_swarm_contract(task.body)
+        if contract and contract.get("role") == "synthesizer":
+            root_id = contract.get("root_id")
+            if root_id:
+                lines.append(_synthesizer_blackboard_context(conn, str(root_id)))
+    except Exception:
+        # Context rendering remains best-effort for legacy/non-swarm boards.
+        pass
 
     # Attachments — files uploaded to this task (PDFs, source docs,
     # images). Surface the absolute on-disk path so the worker, which has

@@ -226,7 +226,8 @@ class GatewayKanbanWatchersMixin:
         For each subscription row, fetches ``task_events`` newer than the
         stored cursor with kind in the terminal set (``completed``,
         ``blocked``, ``gave_up``, ``crashed``, ``timed_out``,
-        ``review_requested``, ``block_loop_detected``). Sends one
+        ``worker_excused_needs_input``, ``review_requested``,
+        ``block_loop_detected``). Sends one
         message per new event to ``(platform, chat_id, thread_id)``,
         then advances the cursor. The subscription is removed only when the
         task is ``archived``. A ``done`` task can be reopened for review or
@@ -291,7 +292,11 @@ class GatewayKanbanWatchersMixin:
         # but is not a block (see kanban_db.request_review); the task is not
         # archived, so the subscription stays alive and later review
         # cycles keep notifying.
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested")
+        TERMINAL_KINDS = (
+            "completed", "blocked", "gave_up", "crashed", "timed_out",
+            "worker_excused_needs_input", "status", "archived", "unblocked",
+            "block_loop_detected", "review_requested",
+        )
         # Subscriptions are removed only when the task reaches the irreversible
         # archived status. ``done`` is reversible in review/controller flows,
         # so removing its subscription would silence a later reopen. We used
@@ -516,13 +521,39 @@ class GatewayKanbanWatchersMixin:
                                             sub.get("task_id"), platform or "<missing>",
                                         )
                                         continue
+                                    # Some narrowly-scoped subscriptions (currently
+                                    # the swarm root) are only interested in one
+                                    # actionable event kind. Apply that filter at
+                                    # claim time so unrelated root lifecycle events
+                                    # cannot be delivered or wake a conversation.
+                                    subscription_kinds = TERMINAL_KINDS
+                                    delivery_metadata = sub.get("delivery_metadata")
+                                    if isinstance(delivery_metadata, dict):
+                                        raw_allowlist = delivery_metadata.get(
+                                            "event_kind_allowlist"
+                                        )
+                                        if isinstance(raw_allowlist, str):
+                                            allowlist = {raw_allowlist.strip()}
+                                        elif isinstance(raw_allowlist, (list, tuple, set)):
+                                            allowlist = {
+                                                str(kind).strip()
+                                                for kind in raw_allowlist
+                                                if str(kind).strip()
+                                            }
+                                        else:
+                                            allowlist = set()
+                                        if allowlist:
+                                            subscription_kinds = tuple(
+                                                kind for kind in TERMINAL_KINDS
+                                                if kind in allowlist
+                                            )
                                     old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
                                         conn,
                                         task_id=sub["task_id"],
                                         platform=sub["platform"],
                                         chat_id=sub["chat_id"],
                                         thread_id=sub.get("thread_id") or "",
-                                        kinds=TERMINAL_KINDS,
+                                        kinds=subscription_kinds,
                                     )
                                     if not events:
                                         continue
@@ -671,6 +702,24 @@ class GatewayKanbanWatchersMixin:
                             msg = (
                                 f"✖ {board_tag}{tag}Kanban {sub['task_id']} gave up "
                                 f"after repeated spawn failures{err}"
+                            )
+                        elif kind == "worker_excused_needs_input":
+                            lane_id = "unknown lane"
+                            skill_id = "unknown skill"
+                            reason = ""
+                            if ev.payload:
+                                if ev.payload.get("lane_id"):
+                                    lane_id = str(ev.payload["lane_id"])
+                                if ev.payload.get("skill_id"):
+                                    skill_id = str(ev.payload["skill_id"])
+                                if ev.payload.get("reason"):
+                                    reason = str(ev.payload["reason"])[:160]
+                            reason_suffix = f": {reason}" if reason else ""
+                            msg = (
+                                f"⚠ {board_tag}{tag}Kanban {sub['task_id']} lane "
+                                f"{lane_id} (skill {skill_id}) asked a question; "
+                                f"the swarm is proceeding WITHOUT its input"
+                                f"{reason_suffix}"
                             )
                         elif kind == "crashed":
                             msg = (

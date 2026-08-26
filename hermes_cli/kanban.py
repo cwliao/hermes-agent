@@ -2609,6 +2609,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                     metadata["output_contract"] = output_meta
             reason = ks.validate_completion(
                 task,
+                conn=conn,
                 metadata=metadata,
                 result=args.result,
                 summary=summary,

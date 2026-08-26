@@ -74,6 +74,26 @@ class GatewayKanbanWatchersMixin:
         — is the dedup mechanism (unsub-on-terminal dropped users when the
         dispatcher respawned a crashed task). All SQLite work runs in a thread;
         one tick's failure never stops the next.
+        For each subscription row, fetches ``task_events`` newer than the
+        stored cursor with kind in the terminal set (``completed``,
+        ``blocked``, ``gave_up``, ``crashed``, ``timed_out``,
+        ``worker_excused_needs_input``, ``review_requested``,
+        ``block_loop_detected``). Sends one
+        message per new event to ``(platform, chat_id, thread_id)``,
+        then advances the cursor. The subscription is removed only when the
+        task is ``archived``. A ``done`` task can be reopened for review or
+        continuation, so its subscription and origin-session ownership must
+        survive completion. Cursor advancement prevents old events replaying
+        when that happens.
+
+        Runs in the gateway event loop; all SQLite work is pushed to a
+        thread via ``asyncio.to_thread`` so the loop never blocks on the
+        WAL lock. Failures in one tick don't stop subsequent ticks.
+
+        **Multi-board:** iterates every board discovered on disk per
+        tick. Each gateway polls only subscriptions owned by profiles whose
+        adapters it hosts. The dispatch-owning gateway also handles legacy
+        subscriptions without a profile stamp.
         """
         from gateway.config import Platform as _Platform
         try:

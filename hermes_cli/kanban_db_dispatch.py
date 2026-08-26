@@ -118,6 +118,8 @@ class DispatchResult:
     quorum_excused: int = 0
     """Blocked swarm workers archived this tick after enough sibling workers
     completed to satisfy their configured partial quorum."""
+    overdue_excused: int = 0
+    """Swarm workers archived after the root-based response deadline."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
     stale: list[str] = field(default_factory=list)
@@ -1721,6 +1723,7 @@ def _run_reclaim_phase(
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.timed_out = enforce_max_runtime(conn)
     from hermes_cli import kanban_swarm as _ks
+    result.overdue_excused = _ks.excuse_overdue_workers(conn)
     result.quorum_excused = _ks.excuse_blocked_workers_below_quorum(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 

@@ -12,6 +12,7 @@ from gateway.run import GatewayRunner
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kbn
+from hermes_cli import kanban_swarm as ks
 
 
 class RecordingAdapter:
@@ -173,6 +174,76 @@ def test_synthesizer_notifier_sends_result_not_status_summary(tmp_path, monkeypa
     assert "status only" not in adapter.sent[0]["text"]
     # A completed synthesizer result is sent verbatim; no wake turn may
     # rewrite it or invent artifacts/task IDs.
+    assert adapter.handled == []
+
+
+def test_swarm_root_subscription_only_notifies_worker_excuse_events(
+    tmp_path, monkeypatch,
+):
+    """Root auto-subscription must not replay its lifecycle events."""
+    db_path = tmp_path / "swarm-root-subscription.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        created = ks.create_swarm(
+            conn,
+            goal="Produce one bounded result.",
+            workers=[
+                ks.SwarmWorkerSpec(profile="worker-a", title="A", body="A"),
+                ks.SwarmWorkerSpec(profile="worker-b", title="B", body="B"),
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+            origin={
+                "origin_platform": "telegram",
+                "origin_chat_id": "chat-1",
+                "origin_thread_id": "thread-1",
+                "origin_user_id": "user-1",
+                "origin_profile": "main",
+            },
+        )
+        subs = kb.list_notify_subs(conn, created.root_id)
+        assert len(subs) == 1
+        assert subs[0]["delivery_metadata"] == {
+            "event_kind_allowlist": "worker_excused_needs_input",
+        }
+        # These are deliberately appended AFTER subscription creation. The
+        # subscription must still ignore them, not merely skip the t=0 event.
+        kb._append_event(conn, created.root_id, "completed", {"summary": "root"})
+        kb._append_event(conn, created.root_id, "blocked", {"reason": "other"})
+        kb._append_event(
+            conn,
+            created.root_id,
+            "worker_excused_needs_input",
+            {
+                "task_id": "t_worker",
+                "lane_id": "claude",
+                "skill_id": "kanban-worker",
+                "reason": "question " + "x" * 300,
+            },
+        )
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    # The root auto-subscription stamps origin_profile as notifier_profile.
+    # list_notify_subs only returns rows owned by this gateway's active
+    # profile (plus unowned rows when it holds the dispatcher lock), so a
+    # named origin is invisible unless the runner is that same profile.
+    runner._active_profile_name = lambda: "main"
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    message = adapter.sent[0]["text"]
+    assert "claude" in message
+    assert "kanban-worker" in message
+    assert "WITHOUT its input" in message
+    truncated_reason = ("question " + "x" * 300)[:160]
+    assert truncated_reason in message
+    assert truncated_reason + "x" not in message
     assert adapter.handled == []
 
 

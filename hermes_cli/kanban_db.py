@@ -3050,10 +3050,13 @@ def complete_task(
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
     task_for_contract = initial_task
     if task_for_contract:
-        from hermes_cli import kanban_swarm as _kanban_swarm
-        contract_error = _kanban_swarm.validate_completion(
-            task_for_contract, metadata=metadata, result=result, summary=summary,
-        )
+        try:
+            from hermes_cli import kanban_swarm as _kanban_swarm
+            contract_error = _kanban_swarm.validate_completion(
+                task_for_contract, conn=conn, metadata=metadata, result=result, summary=summary,
+            )
+        except ImportError:
+            contract_error = None
         if contract_error:
             raise ValueError(contract_error)
         output_meta = _kanban_swarm.swarm_output_metadata(
@@ -4227,22 +4230,58 @@ def _insert_decomposed_child(
     return new_id
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def _archive_task_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    allowed_statuses: Optional[Iterable[str]] = None,
+) -> bool:
+    """Archive a task while the caller owns the current write transaction."""
+    statuses = tuple(allowed_statuses) if allowed_statuses is not None else None
+    if statuses:
+        placeholders = ",".join("?" for _ in statuses)
+        where = f"status IN ({placeholders})"
+        params: tuple[Any, ...] = (task_id, *statuses)
+    else:
+        where = "status != 'archived'"
+        params = (task_id,)
+    cur = conn.execute(
+        "UPDATE tasks SET status = 'archived', "
+        "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+        f"WHERE id = ? AND {where}",
+        params,
+    )
+    if cur.rowcount != 1:
+        return False
+    # If archive happened while a run was still in flight (e.g. user
+    # archived a running task from the dashboard), close that run with
+    # outcome='reclaimed' so attempt history isn't orphaned.
+    run_id = _end_run(
+        conn, task_id,
+        outcome="reclaimed", status="reclaimed",
+        summary="task archived with run still active",
+    )
+    _append_event(conn, task_id, "archived", None, run_id=run_id)
+    return True
+
+
+def archive_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    _within_transaction: bool = False,
+    _allowed_statuses: Optional[Iterable[str]] = None,
+) -> bool:
+    if _within_transaction:
+        return _archive_task_in_txn(
+            conn, task_id, allowed_statuses=_allowed_statuses,
+        )
     with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'archived', "
-            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status != 'archived'", (task_id,),
+        archived = _archive_task_in_txn(
+            conn, task_id, allowed_statuses=_allowed_statuses,
         )
-        if cur.rowcount != 1:
+        if not archived:
             return False
-        # Archived mid-run (dashboard): close the run so history isn't orphaned.
-        run_id = _end_run(
-            conn, task_id, outcome="reclaimed", status="reclaimed",
-            summary="task archived with run still active",
-        )
-        _append_event(conn, task_id, "archived", None, run_id=run_id)
-    # ``archived`` parents no longer block children; promote them now.
     recompute_ready(conn)
     # Reap the workspace on archive too (never-completed tasks kept it forever).
     _cleanup_workspace(conn, task_id)
@@ -4364,6 +4403,16 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    try:
+        from hermes_cli.kanban_swarm import (
+            extract_contract as _extract_swarm_contract,
+            synthesizer_blackboard_context as _synthesizer_blackboard_context,
+        )
+        contract = _extract_swarm_contract(task.body)
+        if contract and contract.get("role") == "synthesizer" and contract.get("root_id"):
+            lines.append(_synthesizer_blackboard_context(conn, str(contract["root_id"])))
+    except Exception:
+        pass
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)
@@ -4436,7 +4485,6 @@ def _ctx_header(lines: list[str], task: Task) -> None:
         lines.append("## Body")
         lines.append(_ctx_cap(task.body, _CTX_MAX_BODY_BYTES))
         lines.append("")
-
 
 def _ctx_attachments(lines: list[str], attachments: list[Attachment]) -> None:
     """Absolute on-disk paths so the worker's file tools read them directly
@@ -5055,6 +5103,7 @@ _PLUGIN_COMPAT_LAZY = {
     '_default_spawn': ('hermes_cli.kanban_db_dispatch', '_default_spawn'),
     '_resolve_worker_cli_toolsets': ('hermes_cli.kanban_db_dispatch', '_resolve_worker_cli_toolsets'),
     'dispatch_once': ('hermes_cli.kanban_db_dispatch', 'dispatch_once'),
+    '_dispatch_once_locked': ('hermes_cli.kanban_db_dispatch', '_dispatch_once_locked'),
     'enforce_max_runtime': ('hermes_cli.kanban_db_dispatch', 'enforce_max_runtime'),
     'has_spawnable_ready': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_ready'),
     'has_spawnable_review': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_review'),

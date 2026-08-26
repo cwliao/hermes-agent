@@ -28,7 +28,7 @@ def _kbn():
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "worker_excused_needs_input", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
 _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
@@ -199,9 +199,21 @@ class _Collector:
             logger.debug("kanban notifier: subscription for %s on %s skipped; adapter not connected",
                          sub.get("task_id"), platform or "<missing>")
             return None
+        subscription_kinds = TERMINAL_KINDS
+        delivery_metadata = sub.get("delivery_metadata")
+        if isinstance(delivery_metadata, dict):
+            raw_allowlist = delivery_metadata.get("event_kind_allowlist")
+            if isinstance(raw_allowlist, str):
+                allowlist = {raw_allowlist.strip()}
+            elif isinstance(raw_allowlist, (list, tuple, set)):
+                allowlist = {str(kind).strip() for kind in raw_allowlist if str(kind).strip()}
+            else:
+                allowlist = set()
+            if allowlist:
+                subscription_kinds = tuple(kind for kind in TERMINAL_KINDS if kind in allowlist)
         old_cursor, cursor, events = _kbn().claim_unseen_events_for_sub(
             conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
-            thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
+            thread_id=sub.get("thread_id") or "", kinds=subscription_kinds,
         )
         if not events:
             return None
@@ -323,6 +335,20 @@ def _fmt_changes_requested(ev, n) -> tuple:
     return msg, None, reason_text
 
 
+def _fmt_worker_excused_needs_input(ev, n) -> tuple:
+    payload = ev.payload or {}
+    lane_id = str(payload.get("lane_id") or "unknown lane")
+    skill_id = str(payload.get("skill_id") or "unknown skill")
+    reason = str(payload.get("reason") or "")[:160]
+    reason_suffix = f": {reason}" if reason else ""
+    return (
+        f"⚠ {n.board_tag}Kanban {n.task_id} lane {lane_id} (skill {skill_id}) "
+        f"asked a question; the swarm is proceeding WITHOUT its input{reason_suffix}",
+        None,
+        None,
+    )
+
+
 # archived / unblocked are claimed (so the cursor advances past them) but
 # intentionally silent (no formatter), and excluded from _WAKE_KINDS so they
 # never wake the creator.
@@ -339,6 +365,7 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, "_KanbanNotification"], tuple]] = {
     "status": lambda ev, n: (f"🔄 {n.head} → {_payload(ev, 'status') or ''}", None, None),
     "review_requested": _fmt_review_requested,
     "changes_requested": _fmt_changes_requested,
+    "worker_excused_needs_input": _fmt_worker_excused_needs_input,
     # Re-blocked for the same cause past the limit and routed to `triage` for a
     # human. It emits no blocked/status event, so ping loudly here.
     "block_loop_detected": lambda ev, n: (

@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from agent.message_sanitization import _sanitize_surrogates
 from gateway.platforms.base import BasePlatformAdapter as _BasePlatformAdapter
 from gateway.platforms.base import _custom_unit_to_cp
 from gateway.config import (
@@ -386,7 +387,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
     def on_commentary(self, text: str) -> None:
         """Queue a completed interim assistant commentary message."""
         if text:
-            self._queue.put((_COMMENTARY, text))
+            self._queue.put((_COMMENTARY, _sanitize_surrogates(text)))
 
     def flush_pending_sync(self, timeout: float = 5.0) -> bool:
         """Block the agent worker thread until everything queued so far is delivered:
@@ -508,7 +509,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         boundary: the current message is finalized and subsequent text goes out as a new
         message below any tool-progress messages."""
         if text:
-            self._queue.put(text)
+            self._queue.put(_sanitize_surrogates(text))
         elif text is None:
             self.on_segment_break()
 
@@ -517,7 +518,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         final_response (incl. post-stream augmentation the accumulator never saw); the drain
         loop adopts it as the finalize payload.  Interrupt/error paths call ``finish()`` bare."""
         if final_text is not None:
-            self._queue.put((_FINAL_TEXT, final_text))
+            self._queue.put((_FINAL_TEXT, _sanitize_surrogates(final_text)))
         self._queue.put(_DONE)
 
     async def run(self) -> None:

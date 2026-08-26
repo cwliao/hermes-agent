@@ -1488,3 +1488,131 @@ class TestFlushPendingSync:
         consumer.finish()
         await task
 
+
+# ── Stream-side surrogate sanitization tests ─────────────────────────────
+
+
+class TestStreamSurrogateSanitization:
+    """Validation for stream-side surrogate sanitization in on_delta,
+    on_commentary, and finish (docs/plans/2026-08-26-stream-delta-surrogate-sanitization-gap-001.md).
+    """
+
+    def test_on_delta_lone_surrogate_replaced_with_fffd(self):
+        """Criterion 1: A delta containing a lone surrogate code point is replaced
+        with U+FFFD on the queue, matching direct _sanitize_surrogates output."""
+        consumer = _make_consumer()
+        raw_text = "prefix \ud83d suffix \ud800 end"
+        consumer.on_delta(raw_text)
+
+        queued = consumer._queue.get_nowait()
+        assert queued == "prefix \ufffd suffix \ufffd end"
+        assert "\ud83d" not in queued
+        assert "\ud800" not in queued
+
+    def test_on_delta_non_bmp_characters_preserved_unchanged(self):
+        """Criterion 2: Real non-BMP characters (emoji, CJK extensions, math symbols)
+        pass through completely unchanged, whole or across delta boundaries."""
+        consumer = _make_consumer()
+        # Party popper emoji, math symbol blackboard bold X, CJK extension B/G character
+        delta1 = "Celebration 🎉 and math 𝕏 "
+        delta2 = "rare CJK 𪚥 character"
+        consumer.on_delta(delta1)
+        consumer.on_delta(delta2)
+
+        queued1 = consumer._queue.get_nowait()
+        queued2 = consumer._queue.get_nowait()
+        assert queued1 == delta1
+        assert queued2 == delta2
+
+    def test_on_delta_consecutive_lone_surrogates_independent_replacement(self):
+        """Criterion 3: Two lone surrogate code points arriving in consecutive
+        on_delta calls are each independently replaced with U+FFFD (no cross-call
+        reconstruction attempted)."""
+        consumer = _make_consumer()
+        consumer.on_delta("\ud83d")
+        consumer.on_delta("\ude00")
+
+        queued1 = consumer._queue.get_nowait()
+        queued2 = consumer._queue.get_nowait()
+        assert queued1 == "\ufffd"
+        assert queued2 == "\ufffd"
+
+    def test_on_delta_normal_text_fast_noop(self):
+        """Criterion 5: Normal text with no surrogates passes through without
+        modification or corruption."""
+        consumer = _make_consumer()
+        normal_text = "The quick brown fox jumps over the lazy dog. 12345! @#$%"
+        consumer.on_delta(normal_text)
+
+        queued = consumer._queue.get_nowait()
+        assert queued == normal_text
+
+    def test_on_commentary_lone_surrogate_sanitized(self):
+        """Criterion 6: Interim commentary with a lone surrogate is sanitized
+        before being placed on the queue."""
+        consumer = _make_consumer()
+        consumer.on_commentary("Running tool with param \ud83d now")
+
+        item = consumer._queue.get_nowait()
+        from gateway.stream_consumer import _COMMENTARY
+        assert isinstance(item, tuple)
+        assert item[0] is _COMMENTARY
+        assert item[1] == "Running tool with param \ufffd now"
+        assert "\ud83d" not in item[1]
+
+    def test_finish_final_text_lone_surrogate_sanitized(self):
+        """Criterion 6 (finish path): Authoritative final_text with lone surrogates
+        is sanitized when queued via finish(final_text=...)."""
+        consumer = _make_consumer()
+        consumer.finish(final_text="Final result \udfff with footer")
+
+        item = consumer._queue.get_nowait()
+        from gateway.stream_consumer import _FINAL_TEXT, _DONE
+        assert isinstance(item, tuple)
+        assert item[0] is _FINAL_TEXT
+        assert item[1] == "Final result \ufffd with footer"
+        assert "\udfff" not in item[1]
+        done_item = consumer._queue.get_nowait()
+        assert done_item is _DONE
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_streaming_surrogate_sanitization_in_delivery(self):
+        """Integration: End-to-end run() with deltas, commentary, and final_text
+        containing lone surrogates delivers only valid sanitized Unicode to adapter."""
+        adapter = MagicMock()
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="comm_1"),
+            SimpleNamespace(success=True, message_id="msg_1"),
+        ])
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+        )
+
+        consumer.on_commentary("Inspecting \ud83d repo")
+        consumer.on_delta("Chunk 1: \ud800 and ")
+        consumer.on_delta("Chunk 2: \udfff.")
+        consumer.finish("Chunk 1: \ud800 and Chunk 2: \udfff.\n\nVerified \ud83d.")
+
+        await consumer.run()
+
+        # Everything is queued before run(), so commentary is one send and the
+        # adopted final is a got_done first-send. No mid-stream edit_message.
+        assert adapter.send.call_count >= 1
+
+        sent_texts = [call[1].get("content", "") for call in adapter.send.call_args_list]
+        edited_texts = [
+            call[1].get("content", "") for call in adapter.edit_message.call_args_list
+        ]
+        delivered = sent_texts + edited_texts
+        assert "Inspecting \ufffd repo" in delivered
+        assert "Chunk 1: \ufffd and Chunk 2: \ufffd.\n\nVerified \ufffd." in delivered
+
+        for content in delivered:
+            assert not any(0xD800 <= ord(ch) <= 0xDFFF for ch in content), (
+                f"Lone surrogate found in delivered content: {content!r}"
+            )

@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from agent.message_sanitization import _sanitize_surrogates
 from gateway.platforms.base import BasePlatformAdapter as _BasePlatformAdapter
 from gateway.platforms.base import _custom_unit_to_cp
 from gateway.platforms.base import MEDIA_TAG_CLEANUP_RE
@@ -557,7 +558,7 @@ class GatewayStreamConsumer:
     def on_commentary(self, text: str) -> None:
         """Queue a completed interim assistant commentary message."""
         if text:
-            self._queue.put((_COMMENTARY, text))
+            self._queue.put((_COMMENTARY, _sanitize_surrogates(text)))
 
     def flush_pending_sync(self, timeout: float = 5.0) -> bool:
         """Block the calling (agent worker) thread until everything queued
@@ -665,7 +666,7 @@ class GatewayStreamConsumer:
         appears below any tool-progress messages the gateway sent in between.
         """
         if text:
-            self._queue.put(text)
+            self._queue.put(_sanitize_surrogates(text))
         elif text is None:
             self.on_segment_break()
 
@@ -682,7 +683,7 @@ class GatewayStreamConsumer:
         (interrupt/error paths) call ``finish()`` bare — legacy behavior.
         """
         if final_text is not None:
-            self._queue.put((_FINAL_TEXT, final_text))
+            self._queue.put((_FINAL_TEXT, _sanitize_surrogates(final_text)))
         self._queue.put(_DONE)
 
     # ── Think-block filtering ────────────────────────────────────────

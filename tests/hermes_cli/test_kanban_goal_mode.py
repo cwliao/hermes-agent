@@ -223,7 +223,6 @@ class TestCLIJudgeGate:
         assert rc != 0, "blocked verdict must reject the completion"
         assert complete_calls == [], "an unachievable goal must never reach complete_task"
 
-
 def test_cli_goal_mode_handoff_judges_worker_title_and_acceptance(monkeypatch):
     from types import SimpleNamespace
 

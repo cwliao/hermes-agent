@@ -13,6 +13,7 @@ Covers three layers:
 from __future__ import annotations
 
 import sqlite3
+import json
 from pathlib import Path
 
 import pytest
@@ -224,3 +225,134 @@ class TestCLIJudgeGate:
         assert complete_calls == [], "an unachievable goal must never reach complete_task"
         assert "unachievable" in err.lower()
         assert "kanban block" in err.lower()
+
+def test_cli_goal_mode_handoff_judges_worker_title_and_acceptance(monkeypatch):
+    from types import SimpleNamespace
+
+    from hermes_cli import kanban as kc
+
+    goals_seen = []
+    monkeypatch.setattr(
+        "agent.auxiliary_client.get_text_auxiliary_client",
+        lambda purpose: (object(), "judge-model"),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.goals.judge_goal",
+        lambda **kwargs: goals_seen.append(kwargs["goal"])
+        or ("done", "", False, None, False),
+    )
+    contract = {
+        "role": "worker",
+        "acceptance": "Only verify the assigned lane.",
+    }
+    task = SimpleNamespace(
+        goal_mode=True,
+        title="Worker lane",
+        body="Full swarm-wide goal and every other lane's instructions.\n"
+        + "[swarm:contract] "
+        + json.dumps(contract),
+    )
+
+    assert kc._goal_mode_handoff_rejection(task, "lane handoff") == ("done", None)
+    assert goals_seen == ["Worker lane\n\nOnly verify the assigned lane."]
+
+
+def test_cli_goal_mode_handoff_keeps_non_worker_title_and_body_goal(monkeypatch):
+    from types import SimpleNamespace
+
+    from hermes_cli import kanban as kc
+
+    goals_seen = []
+    monkeypatch.setattr(
+        "agent.auxiliary_client.get_text_auxiliary_client",
+        lambda purpose: (object(), "judge-model"),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.goals.judge_goal",
+        lambda **kwargs: goals_seen.append(kwargs["goal"])
+        or ("done", "", False, None, False),
+    )
+    task = SimpleNamespace(
+        goal_mode=True,
+        title="Regular goal card",
+        body="Full swarm-wide body retained for ordinary cards.",
+    )
+
+    assert kc._goal_mode_handoff_rejection(task, "handoff") == ("done", None)
+    assert goals_seen == [
+        "Regular goal card\n\nFull swarm-wide body retained for ordinary cards."
+    ]
+
+
+# ---------------------------------------------------------------------------
+# cli.py quiet-path goal loop entry (_run_kanban_goal_loop_q)
+# ---------------------------------------------------------------------------
+
+
+def _run_cli_goal_loop_q(monkeypatch, task, *, task_id="t1"):
+    """Drive cli._run_kanban_goal_loop_q with a fake task/DB and capture the
+    goal_text passed into goals.run_kanban_goal_loop."""
+    from types import SimpleNamespace
+
+    import cli as cli_mod
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+
+    fake_conn = object()
+    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: fake_conn)
+    monkeypatch.setattr("hermes_cli.kanban_db.get_task", lambda conn, tid: task)
+
+    calls = []
+
+    def _fake_run_loop(**kwargs):
+        calls.append(kwargs)
+        return {"outcome": "completed_by_worker"}
+
+    monkeypatch.setattr("hermes_cli.goals.run_kanban_goal_loop", _fake_run_loop)
+
+    fake_cli = SimpleNamespace(
+        agent=SimpleNamespace(run_conversation=lambda **kw: {"final_response": ""}),
+        conversation_history=[],
+        session_id="s1",
+    )
+
+    cli_mod._run_kanban_goal_loop_q(fake_cli, "first response")
+    assert len(calls) == 1
+    return calls[0]["goal_text"]
+
+
+def test_cli_goal_loop_q_worker_uses_title_and_acceptance(monkeypatch):
+    from types import SimpleNamespace
+
+    contract = {
+        "role": "worker",
+        "acceptance": "Only verify the assigned lane.",
+    }
+    task = SimpleNamespace(
+        goal_mode=True,
+        goal_max_turns=None,
+        title="Worker lane",
+        body="Full swarm-wide goal and every other lane's instructions.\n"
+        + "[swarm:contract] "
+        + json.dumps(contract),
+    )
+
+    goal_text = _run_cli_goal_loop_q(monkeypatch, task)
+    assert goal_text == "Worker lane\n\nOnly verify the assigned lane."
+
+
+def test_cli_goal_loop_q_non_worker_falls_back_to_title_and_body(monkeypatch):
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(
+        goal_mode=True,
+        goal_max_turns=None,
+        title="Regular goal card",
+        body="Full swarm-wide body retained for ordinary cards.",
+    )
+
+    goal_text = _run_cli_goal_loop_q(monkeypatch, task)
+    assert goal_text == (
+        "Regular goal card\n\nFull swarm-wide body retained for ordinary cards."
+    )

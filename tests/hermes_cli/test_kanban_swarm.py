@@ -798,6 +798,80 @@ def test_swarm_worker_parser_keeps_third_segment_as_skill_only():
     assert spec.profile == "claude"
     assert spec.body == "Return one bounded joke"
     assert spec.skills == ["kanban-worker"]
+    assert spec.acceptance == ""
+
+
+def test_swarm_worker_parser_keeps_two_segment_legacy_shape():
+    spec = parse_worker_arg("claude:Return one bounded joke")
+    assert spec.profile == "claude"
+    assert spec.title == "Return one bounded joke"
+    assert spec.body == "Return one bounded joke"
+    assert spec.skills == []
+    assert spec.acceptance == ""
+
+
+def test_swarm_worker_parser_reads_optional_acceptance_segment():
+    spec = parse_worker_arg(
+        "claude:Return one bounded joke:kanban-worker:Include the punchline and keep it brief"
+    )
+    assert spec.profile == "claude"
+    assert spec.title == "Return one bounded joke"
+    assert spec.body == "Return one bounded joke"
+    assert spec.skills == ["kanban-worker"]
+    assert spec.acceptance == "Include the punchline and keep it brief"
+
+
+def test_lane_bound_worker_contract_acceptance_prefers_explicit_body_then_title(tmp_path):
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Run three independent worker checks.",
+            workers=[
+                SwarmWorkerSpec(
+                    profile="native",
+                    title="Explicit worker",
+                    body="Detailed explicit worker instructions.",
+                    acceptance="Explicit worker acceptance.",
+                    lane_id="native_hermes",
+                ),
+                SwarmWorkerSpec(
+                    profile="claude",
+                    title="Rich worker",
+                    body="Detailed worker instructions that are also the acceptance.",
+                    skills=["kanban-worker"],
+                    lane_id="claude",
+                ),
+                SwarmWorkerSpec(
+                    profile="grok",
+                    title="Title fallback worker",
+                    body="",
+                    skills=["kanban-worker"],
+                    lane_id="grok",
+                ),
+                SwarmWorkerSpec(
+                    profile="agy",
+                    title="Fourth worker",
+                    body="Fourth worker instructions.",
+                    skills=["kanban-worker"],
+                    lane_id="agy",
+                ),
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+        )
+        workers = [kb.get_task(conn, tid) for tid in created.worker_ids]
+        contracts = [extract_contract(task.body) for task in workers]
+        by_lane = {
+            contract["expected_lane_id"]: contract for contract in contracts
+        }
+        assert by_lane["native_hermes"]["acceptance"] == "Explicit worker acceptance."
+        assert by_lane["claude"]["acceptance"] == (
+            "Detailed worker instructions that are also the acceptance."
+        )
+        assert by_lane["grok"]["acceptance"] == "Title fallback worker"
+    finally:
+        conn.close()
 
 
 def _metadata_from_body(body):

@@ -483,10 +483,19 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
     guidance; any other non-``done`` verdict gets the ``continue`` guidance.
     A broken judge fails open (logged) so it cannot permanently wedge work."""
     if not task or not task.goal_mode or not _goal_judge_available():
-        return
+        return None
+    contract = _KS.extract_contract(getattr(task, "body", None))
+    acceptance = (contract or {}).get("acceptance")
+    goal = (
+        f"{task.title}\n\n{acceptance}".strip()
+        if isinstance(acceptance, str) and acceptance.strip()
+        else f"{task.title}\n\n{task.body or ''}".strip()
+    )
+    verdict = "done"
+    reason = ""
     try:
         verdict, reason, _, _, transport_failed = judge_goal(
-            goal=f"{task.title}\n\n{task.body or ''}".strip(),
+            goal=goal,
             last_response=evidence.strip(),
         )
         if transport_failed:
@@ -513,9 +522,16 @@ def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
     """Compatibility helper for callers that need the judge reason directly."""
     if not task or not task.goal_mode or not _goal_judge_available():
         return None
+    contract = _KS.extract_contract(getattr(task, "body", None))
+    acceptance = (contract or {}).get("acceptance")
+    goal = (
+        f"{task.title}\n\n{acceptance}".strip()
+        if isinstance(acceptance, str) and acceptance.strip()
+        else f"{task.title}\n\n{task.body or ''}".strip()
+    )
     try:
         verdict, reason, _, _, transport_failed = judge_goal(
-            goal=f"{task.title}\n\n{task.body or ''}".strip(),
+            goal=goal,
             last_response=evidence.strip(),
         )
         if transport_failed:
@@ -1440,11 +1456,13 @@ def _handle_swarm(args: dict, **kw) -> str:
                 return tool_error(
                     f"workers[{i}].max_runtime_seconds must be an integer"
                 )
+        acceptance = w.get("acceptance")
         specs.append(ks.SwarmWorkerSpec(
             profile=str(profile), title=str(title), body=str(body),
             skills=list(skills) if skills else [], lane_id=lane_id,
             preflight_skill_id=preflight_skill_id,
             max_runtime_seconds=max_runtime,
+            acceptance=str(acceptance).strip() if acceptance else "",
         ))
 
     # Preserve the swarm topology validation error before routing preflight:
@@ -1550,11 +1568,53 @@ KANBAN_SWARM_SCHEMA = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "lane_id": {"type": "string", "enum": list(_KS.MULTI_AGENT_LANE_IDS)},
-                        "title": {"type": "string"},
-                        "body": {"type": "string"},
-                        "profile": {"type": "string"},
-                        "skills": {"type": "array", "items": {"type": "string"}},
+                        "lane_id": {
+                            "type": "string",
+                            "enum": list(_KS.MULTI_AGENT_LANE_IDS),
+                            "description": (
+                                "Lane this worker runs on. A lane-bound swarm "
+                                "requires native_hermes plus at least "
+                                f"{_KS.MIN_EXTERNAL_LANES} of "
+                                f"{', '.join(_KS.EXTERNAL_LANE_IDS)}. Omit for "
+                                "an unbound worker."
+                            ),
+                        },
+                        "title": {"type": "string", "description": "Task title."},
+                        "body": {
+                            "type": "string",
+                            "description": "Task instructions. Defaults to title if omitted.",
+                        },
+                        "acceptance": {
+                            "type": "string",
+                            "description": (
+                                "This worker's own deliverable/acceptance criteria, "
+                                "distinct from the swarm-wide goal. The completion "
+                                "judge evaluates this worker's handoff against this "
+                                "text instead of the full swarm goal, so a worker "
+                                "who does its own narrow job isn't rejected for not "
+                                "having done every other worker's job too. Defaults "
+                                "to title if omitted."
+                            ),
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": (
+                                "Hermes profile to dispatch this worker as. "
+                                "Defaults to the calling session's own profile "
+                                "(or 'default') — do not guess a lane-named "
+                                "profile like 'claude' or 'grok', the lane's "
+                                "external CLI is reached via its skill, not "
+                                "a separate profile."
+                            ),
+                        },
+                        "skills": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Leave unset for a lane worker — the lane's "
+                                "required skill is filled in automatically."
+                            ),
+                        },
                         "max_runtime_seconds": {"type": "integer"},
                     },
                     "required": ["title"],

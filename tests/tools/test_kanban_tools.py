@@ -568,6 +568,58 @@ def test_goal_mode_transport_failed_judge_does_not_wedge_completion(monkeypatch)
     assert kt._goal_mode_handoff_rejection(task, "lane handoff") is None
 
 
+def test_tools_goal_mode_handoff_judges_worker_title_and_acceptance(monkeypatch):
+    from types import SimpleNamespace
+
+    from tools import kanban_tools as kt
+
+    goals_seen = []
+    monkeypatch.setattr(kt, "_goal_judge_available", lambda: True)
+    monkeypatch.setattr(
+        kt,
+        "judge_goal",
+        lambda **kwargs: goals_seen.append(kwargs["goal"])
+        or ("done", "", False, None, False),
+    )
+    task = SimpleNamespace(
+        goal_mode=True,
+        title="Worker lane",
+        body=(
+            "Full swarm-wide goal and every other lane's instructions.\n"
+            '[swarm:contract] {"role":"worker",'
+            '"acceptance":"Only verify the assigned lane."}'
+        ),
+    )
+
+    assert kt._goal_mode_handoff_rejection(task, "lane handoff") is None
+    assert goals_seen == ["Worker lane\n\nOnly verify the assigned lane."]
+
+
+def test_tools_goal_mode_handoff_keeps_non_worker_title_and_body_goal(monkeypatch):
+    from types import SimpleNamespace
+
+    from tools import kanban_tools as kt
+
+    goals_seen = []
+    monkeypatch.setattr(kt, "_goal_judge_available", lambda: True)
+    monkeypatch.setattr(
+        kt,
+        "judge_goal",
+        lambda **kwargs: goals_seen.append(kwargs["goal"])
+        or ("done", "", False, None, False),
+    )
+    task = SimpleNamespace(
+        goal_mode=True,
+        title="Regular goal card",
+        body="Full swarm-wide body retained for ordinary cards.",
+    )
+
+    assert kt._goal_mode_handoff_rejection(task, "handoff") is None
+    assert goals_seen == [
+        "Regular goal card\n\nFull swarm-wide body retained for ordinary cards."
+    ]
+
+
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need clarification"})

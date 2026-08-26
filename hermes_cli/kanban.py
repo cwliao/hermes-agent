@@ -438,8 +438,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--worker",
         action="append",
         default=[],
-        metavar="PROFILE:TITLE[:SKILL,SKILL]",
-        help="Parallel worker card (repeatable)",
+        metavar="PROFILE:TITLE[:SKILL,SKILL[:ACCEPTANCE]]",
+        help=(
+            "Parallel worker card (repeatable). Optional 4th segment is this "
+            "worker's own deliverable/acceptance text, judged instead of the "
+            "full swarm goal; defaults to TITLE if omitted."
+        ),
     )
     p_swarm.add_argument(
         "--worker-lane",
@@ -2053,10 +2057,21 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
 
     from hermes_cli.goals import judge_goal
 
-    verdict, reason = "done", ""
+    contract = ks.extract_contract(task.body)
+    acceptance = (contract or {}).get("acceptance")
+    goal = (
+        f"{task.title}\n\n{acceptance}".strip()
+        if isinstance(acceptance, str) and acceptance.strip()
+        else f"{task.title}\n\n{task.body or ''}".strip()
+    )
+
+    verdict = "done"
+    reason = ""
     try:
-        verdict, reason, _, _, _ = judge_goal(goal=f"{task.title}\n\n{task.body or ''}".strip(),
-                                              last_response=evidence.strip())
+        verdict, reason, _, _, _ = judge_goal(
+            goal=goal,
+            last_response=evidence.strip(),
+        )
     except Exception as judge_exc:
         import logging as _logging
 

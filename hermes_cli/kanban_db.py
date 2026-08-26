@@ -3047,10 +3047,13 @@ def complete_task(
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
     task_for_contract = initial_task
     if task_for_contract:
-        from hermes_cli import kanban_swarm as _kanban_swarm
-        contract_error = _kanban_swarm.validate_completion(
-            task_for_contract, metadata=metadata, result=result, summary=summary,
-        )
+        try:
+            from hermes_cli import kanban_swarm as _kanban_swarm
+            contract_error = _kanban_swarm.validate_completion(
+                task_for_contract, conn=conn, metadata=metadata, result=result, summary=summary,
+            )
+        except ImportError:
+            contract_error = None
         if contract_error:
             raise ValueError(contract_error)
         output_meta = _kanban_swarm.swarm_output_metadata(
@@ -4084,22 +4087,205 @@ def specify_triage_task(
     return True
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def _validate_children_graph(children: list) -> None:
+    """DB-free shape check + Kahn's cycle check on the sibling graph (a cycle
+    would deadlock every involved child in ``todo`` forever)."""
+    for idx, child in enumerate(children):
+        if not isinstance(child, dict):
+            raise ValueError(f"child[{idx}] is not a dict")
+        title = child.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f"child[{idx}].title is required")
+        parents_idx = child.get("parents") or []
+        if not isinstance(parents_idx, list):
+            raise ValueError(f"child[{idx}].parents must be a list")
+        for p in parents_idx:
+            if not isinstance(p, int) or p < 0 or p >= len(children):
+                raise ValueError(f"child[{idx}].parents[{p}] is not a valid index into children")
+            if p == idx:
+                raise ValueError(f"child[{idx}] cannot list itself as a parent")
+
+    in_deg = [0] * len(children)
+    adj: list[list[int]] = [[] for _ in children]
+    for i, c in enumerate(children):
+        for p in (c.get("parents") or []):
+            adj[p].append(i)
+            in_deg[i] += 1
+    queue = [i for i in range(len(children)) if in_deg[i] == 0]
+    seen = 0
+    while queue:
+        seen += 1
+        for nb in adj[queue.pop()]:
+            in_deg[nb] -= 1
+            if in_deg[nb] == 0:
+                queue.append(nb)
+    if seen != len(children):
+        raise ValueError("cyclic dependency detected in decomposed children list")
+
+
+def decompose_triage_task(
+    conn: sqlite3.Connection, task_id: str, *, root_assignee: Optional[str], children: list[dict],
+    author: Optional[str] = None, auto_promote: bool = True,
+) -> Optional[list[str]]:
+    """Fan a triage task out into children and move the root to ``todo``; the root
+    waits on every child and wakes (``ready``) when all are done.
+
+    ``children``: dicts of ``title`` (required), ``body``, ``assignee``,
+    ``parents`` (indices into this list), optional workspace overrides.
+    Returns child ids in input order, or None when the root is missing / not
+    in triage. Atomic: a malformed entry aborts the whole fan-out.
+    """
+    if not children:
+        return None
+    if root_assignee is not None:
+        root_assignee = _canonical_assignee(root_assignee)
+    _validate_children_graph(children)
+
+    # ONE txn so the fan-out is atomic; helpers that open their own write_txn
+    # (create_task, link_tasks, add_comment) must not be called in here.
+    now = int(time.time())
     with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'archived', "
-            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status != 'archived'", (task_id,),
+        root_row = conn.execute(
+            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if root_row is None or root_row["status"] != "triage":
+            return None
+        child_ids = [
+            _insert_decomposed_child(conn, task_id, root_row, child, author, now)
+            for child in children
+        ]
+        # Sibling edges within the decomposed graph.
+        for idx, child in enumerate(children):
+            for p_idx in child.get("parents") or []:
+                parent_id, child_id = child_ids[p_idx], child_ids[idx]
+                _link(conn, parent_id, child_id)
+                _append_event(conn, child_id, "linked", {"parent": parent_id, "child": child_id})
+        # Root waits for the whole graph: link it under EVERY child (simpler
+        # than computing leaves; cycle-free since the root is only ever a child).
+        for cid in child_ids:
+            _link(conn, cid, task_id)
+        # Flip the root triage -> todo, assignee -> orchestrator.
+        sets = ["status = 'todo'"]
+        params: list[Any] = []
+        if root_assignee is not None:
+            sets.append("assignee = ?")
+            params.append(root_assignee)
+        params.append(task_id)
+        conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", tuple(params))
+        if author and author.strip():
+            _insert_comment(
+                conn, task_id, author.strip(),
+                "Decomposed into " + ", ".join(child_ids)
+                + ". Root will wake when all children complete.",
+                now,
+            )
+        _append_event(
+            conn, task_id, "decomposed", {"child_ids": child_ids, "root_assignee": root_assignee},
         )
-        if cur.rowcount != 1:
+    # Outside the txn (own IMMEDIATE txn). ``auto_promote=False`` leaves the
+    # children in ``todo`` for manual-review-first workflows.
+    if auto_promote:
+        recompute_ready(conn)
+    return child_ids
+
+
+def _insert_decomposed_child(
+    conn: sqlite3.Connection, root_id: str, root_row: sqlite3.Row, child: dict,
+    author: Optional[str], now: int,
+) -> str:
+    """Insert one decomposed child as ``todo`` (linked under the root later so
+    the dispatcher only ever sees a coherent graph); returns its id.
+
+    Workspace: per-child override wins, else inherit the root's kind. Path
+    inherits only when kinds match (a 'dir' child must not point at the
+    root's worktree) and NEVER for worktrees — siblings dispatch concurrently
+    and one shared checkout would put them all on the first sibling's branch
+    with no lock; leaving it unset makes dispatch materialize a fresh
+    ``<repo>/.worktrees/<child-id>`` per child from the board anchor.
+    """
+    root_ws_kind = root_row["workspace_kind"] or "scratch"
+    child_ws_kind = child.get("workspace_kind") or root_ws_kind
+    if child.get("workspace_path"):
+        child_ws_path = child.get("workspace_path")
+    elif child_ws_kind == "worktree":
+        child_ws_path = None
+    elif child_ws_kind == root_ws_kind:
+        child_ws_path = root_row["workspace_path"]
+    else:
+        child_ws_path = None
+    new_id = _new_task_id()
+    body = child.get("body")
+    conn.execute(
+        "INSERT INTO tasks "
+        "(id, title, body, assignee, status, workspace_kind, "
+        " workspace_path, tenant, created_at, created_by) "
+        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+        (
+            new_id, child["title"].strip(), body if isinstance(body, str) else None,
+            _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path,
+            root_row["tenant"], now, (author or "decomposer"),
+        ),
+    )
+    _append_event(
+        conn, new_id, "created", {"by": author or "decomposer", "from_decompose_of": root_id},
+    )
+    _inherit_notify_subs(conn, new_id, (root_id,), created_at=now)
+    return new_id
+
+
+def _archive_task_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    allowed_statuses: Optional[Iterable[str]] = None,
+) -> bool:
+    """Archive a task while the caller owns the current write transaction."""
+    statuses = tuple(allowed_statuses) if allowed_statuses is not None else None
+    if statuses:
+        placeholders = ",".join("?" for _ in statuses)
+        where = f"status IN ({placeholders})"
+        params: tuple[Any, ...] = (task_id, *statuses)
+    else:
+        where = "status != 'archived'"
+        params = (task_id,)
+    cur = conn.execute(
+        "UPDATE tasks SET status = 'archived', "
+        "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+        f"WHERE id = ? AND {where}",
+        params,
+    )
+    if cur.rowcount != 1:
+        return False
+    # If archive happened while a run was still in flight (e.g. user
+    # archived a running task from the dashboard), close that run with
+    # outcome='reclaimed' so attempt history isn't orphaned.
+    run_id = _end_run(
+        conn, task_id,
+        outcome="reclaimed", status="reclaimed",
+        summary="task archived with run still active",
+    )
+    _append_event(conn, task_id, "archived", None, run_id=run_id)
+    return True
+
+
+def archive_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    _within_transaction: bool = False,
+    _allowed_statuses: Optional[Iterable[str]] = None,
+) -> bool:
+    if _within_transaction:
+        return _archive_task_in_txn(
+            conn, task_id, allowed_statuses=_allowed_statuses,
+        )
+    with write_txn(conn):
+        archived = _archive_task_in_txn(
+            conn, task_id, allowed_statuses=_allowed_statuses,
+        )
+        if not archived:
             return False
-        # Archived mid-run (dashboard): close the run so history isn't orphaned.
-        run_id = _end_run(
-            conn, task_id, outcome="reclaimed", status="reclaimed",
-            summary="task archived with run still active",
-        )
-        _append_event(conn, task_id, "archived", None, run_id=run_id)
-    # ``archived`` parents no longer block children; promote them now.
     recompute_ready(conn)
     # Reap the workspace on archive too (never-completed tasks kept it forever).
     _cleanup_workspace(conn, task_id)
@@ -4221,6 +4407,16 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    try:
+        from hermes_cli.kanban_swarm import (
+            extract_contract as _extract_swarm_contract,
+            synthesizer_blackboard_context as _synthesizer_blackboard_context,
+        )
+        contract = _extract_swarm_contract(task.body)
+        if contract and contract.get("role") == "synthesizer" and contract.get("root_id"):
+            lines.append(_synthesizer_blackboard_context(conn, str(contract["root_id"])))
+    except Exception:
+        pass
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)
@@ -4293,7 +4489,6 @@ def _ctx_header(lines: list[str], task: Task) -> None:
         lines.append("## Body")
         lines.append(_ctx_cap(task.body, _CTX_MAX_BODY_BYTES))
         lines.append("")
-
 
 def _ctx_attachments(lines: list[str], attachments: list[Attachment]) -> None:
     """Absolute on-disk paths so the worker's file tools read them directly
@@ -4912,6 +5107,7 @@ _PLUGIN_COMPAT_LAZY = {
     '_default_spawn': ('hermes_cli.kanban_db_dispatch', '_default_spawn'),
     '_resolve_worker_cli_toolsets': ('hermes_cli.kanban_db_dispatch', '_resolve_worker_cli_toolsets'),
     'dispatch_once': ('hermes_cli.kanban_db_dispatch', 'dispatch_once'),
+    '_dispatch_once_locked': ('hermes_cli.kanban_db_dispatch', '_dispatch_once_locked'),
     'enforce_max_runtime': ('hermes_cli.kanban_db_dispatch', 'enforce_max_runtime'),
     'has_spawnable_ready': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_ready'),
     'has_spawnable_review': ('hermes_cli.kanban_db_dispatch', 'has_spawnable_review'),

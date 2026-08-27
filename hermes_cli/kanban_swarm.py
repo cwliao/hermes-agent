@@ -1017,7 +1017,6 @@ def _create_swarm_uncommitted(
         priority=priority,
         workspace_kind=workspace_kind,
         workspace_path=workspace_path,
-        skills=["requesting-code-review"],
         max_runtime_seconds=DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
     )
 

@@ -7,6 +7,7 @@ from hermes_cli.kanban_swarm import (
     DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS,
     DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
     MULTI_AGENT_LANE_IDS,
+    MalformedContract,
     SwarmWorkerSpec,
     _completion_call_example,
     _default_worker_max_runtime_seconds,
@@ -15,6 +16,7 @@ from hermes_cli.kanban_swarm import (
     excuse_blocked_workers_below_quorum,
     extract_contract,
     find_active_swarms_for_session,
+    is_malformed_contract,
     latest_blackboard,
     parse_worker_arg,
     post_blackboard_update,
@@ -1357,4 +1359,208 @@ def test_create_swarm_atomic_recheck_concurrent_race(tmp_path):
     assert len(results) == 1, f"Expected 1 success, got {len(results)}"
     assert len(errors) == 1, f"Expected 1 error, got {len(errors)}"
     assert "an active swarm is already in flight" in str(errors[0])
+
+
+def test_extract_contract_distinguishes_absent_valid_and_malformed():
+    # 1. Absent: returns None
+    assert extract_contract(None) is None
+    assert extract_contract("") is None
+    assert extract_contract("Just a plain task description") is None
+    assert is_malformed_contract(extract_contract("Just a plain task description")) is False
+
+    # 2. Valid: returns dict
+    valid_body = 'Task\n[swarm:contract] {"role": "worker", "root_id": "t_root1"}'
+    contract = extract_contract(valid_body)
+    assert isinstance(contract, dict)
+    assert contract == {"role": "worker", "root_id": "t_root1"}
+    assert is_malformed_contract(contract) is False
+    assert bool(contract) is True
+
+    # 3. Malformed JSON: returns MalformedContract
+    malformed_json_body = "Task\n[swarm:contract] {invalid json"
+    bad_json = extract_contract(malformed_json_body)
+    assert is_malformed_contract(bad_json) is True
+    assert isinstance(bad_json, MalformedContract)
+    assert "invalid JSON:" in bad_json.reason
+    assert bool(bad_json) is False  # deliberately falsy for backwards compatibility
+
+    # 4. Non-dict JSON payload (e.g. list, string, int): returns MalformedContract
+    non_dict_body = 'Task\n[swarm:contract] ["not", "a", "dict"]'
+    non_dict = extract_contract(non_dict_body)
+    assert is_malformed_contract(non_dict) is True
+    assert isinstance(non_dict, MalformedContract)
+    assert "contract payload must be a JSON object" in non_dict.reason
+    assert bool(non_dict) is False
+
+
+def test_validate_completion_rejects_malformed_contracts():
+    class DummyTask:
+        def __init__(self, body):
+            self.body = body
+
+    # Plain task without contract: no rejection
+    plain_task = DummyTask("Normal task description")
+    assert validate_completion(plain_task, metadata=None) is None
+
+    # Task with malformed JSON contract: rejected with distinct error
+    bad_json_task = DummyTask("Task\n[swarm:contract] {not json")
+    err1 = validate_completion(bad_json_task, metadata=None)
+    assert err1 is not None
+    assert err1.startswith("swarm contract is malformed: invalid JSON:")
+
+    # Task with non-dict contract: rejected with distinct error
+    bad_type_task = DummyTask('Task\n[swarm:contract] [1, 2, 3]')
+    err2 = validate_completion(bad_type_task, metadata=None)
+    assert err2 is not None
+    assert err2 == "swarm contract is malformed: contract payload must be a JSON object"
+
+
+def test_recompute_ready_blocks_synthesizer_when_verifier_metadata_missing_reproduces_incident(tmp_path):
+    """Reproduce 2026-08-27 incident: verifier completed but contract/metadata was missing.
+    recompute_ready must transition synthesizer to 'blocked' with a descriptive diagnostic event.
+    """
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Test incident reproduction",
+            workers=[
+                SwarmWorkerSpec(
+                    profile=lane, title=lane, body="Work.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+        )
+        for worker_id, lane in zip(created.worker_ids, MULTI_AGENT_LANE_IDS):
+            kb.complete_task(
+                conn, worker_id, summary="done",
+                metadata={
+                    "role": "worker", "root_id": created.root_id,
+                    "lane_id": lane, "preflight_skill_id": "" if lane == "native_hermes" else "kanban-worker",
+                    "outcome": "completed", "verified_clean": True,
+                },
+            )
+        assert kb.get_task(conn, created.verifier_id).status == "ready"
+
+        # Simulate contract loss on verifier (e.g. from an upstream auto-rewrite)
+        # so complete_task succeeds without contract validation, completing with no metadata
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET body = 'Rewritten body without contract' WHERE id = ?",
+                (created.verifier_id,),
+            )
+        assert kb.complete_task(conn, created.verifier_id, summary="Verified successfully.")
+
+        # Verifier is done with no contract. complete_task already calls
+        # recompute_ready, so the synthesizer is blocked immediately.
+        assert kb.get_task(conn, created.verifier_id).status == "done"
+
+        # A later tick must keep the synthesizer blocked (not promote it)
+        # and must not lose the diagnostic.
+        promoted = kb.recompute_ready(conn)
+        assert promoted == 0
+
+        synth = kb.get_task(conn, created.synthesizer_id)
+        assert synth.status == "blocked"
+        assert synth.block_kind == "needs_input"
+        assert "its contract is missing" in (synth.last_failure_error or "")
+
+        events = [e for e in kb.list_events(conn, created.synthesizer_id) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["stall_key"] == f"verifier:{created.verifier_id}:verifier-contract-missing"
+        assert payload["source"] == "recompute_ready"
+        assert payload["verifier_id"] == created.verifier_id
+    finally:
+        conn.close()
+
+
+def test_recompute_ready_deduplicates_stall_diagnostic_events(tmp_path):
+    """Calling recompute_ready multiple times must not spam duplicate diagnostic events."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Test deduplication",
+            workers=[
+                SwarmWorkerSpec(
+                    profile=lane, title=lane, body="Work.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+        )
+        for worker_id, lane in zip(created.worker_ids, MULTI_AGENT_LANE_IDS):
+            kb.complete_task(
+                conn, worker_id, summary="done",
+                metadata={
+                    "role": "worker", "root_id": created.root_id,
+                    "lane_id": lane, "preflight_skill_id": "" if lane == "native_hermes" else "kanban-worker",
+                    "outcome": "completed", "verified_clean": True,
+                },
+            )
+        # Reachable stall: contract marker stripped so validate_completion()
+        # is a no-op, then complete with no metadata. A gate!="pass"
+        # completion cannot occur -- validate_completion() rejects it.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET body = 'Rewritten body without contract' WHERE id = ?",
+                (created.verifier_id,),
+            )
+        assert kb.complete_task(conn, created.verifier_id, summary="Verified successfully.")
+
+        # Call recompute_ready twice
+        kb.recompute_ready(conn)
+        kb.recompute_ready(conn)
+        # Also dispatch_once
+        kb.dispatch_once(conn)
+
+        events = [e for e in kb.list_events(conn, created.synthesizer_id) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 1
+    finally:
+        conn.close()
+
+
+def test_recompute_ready_does_not_fire_diagnostic_while_verifier_running(tmp_path):
+    """A verifier that has not completed yet is a normal wait, not a diagnostic anomaly."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Test in-flight verifier",
+            workers=[
+                SwarmWorkerSpec(
+                    profile=lane, title=lane, body="Work.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+        )
+        for worker_id, lane in zip(created.worker_ids, MULTI_AGENT_LANE_IDS):
+            kb.complete_task(
+                conn, worker_id, summary="done",
+                metadata={
+                    "role": "worker", "root_id": created.root_id,
+                    "lane_id": lane, "preflight_skill_id": "" if lane == "native_hermes" else "kanban-worker",
+                    "outcome": "completed", "verified_clean": True,
+                },
+            )
+        # Verifier is ready, not done
+        assert kb.get_task(conn, created.verifier_id).status == "ready"
+        kb.recompute_ready(conn)
+
+        synth = kb.get_task(conn, created.synthesizer_id)
+        assert synth.status == "todo"
+        events = [e for e in kb.list_events(conn, created.synthesizer_id) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 0
+    finally:
+        conn.close()
+
 

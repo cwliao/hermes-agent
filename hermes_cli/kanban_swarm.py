@@ -38,6 +38,25 @@ MIN_EXTERNAL_LANES = 2
 _WORKER_RESPONSE_DEADLINE_SECONDS = 1800
 _WORKER_EXCUSED_EVENT_KIND = "worker_excused_needs_input"
 
+
+@dataclass(frozen=True)
+class MalformedContract:
+    """Marker returned when a contract line exists but is not valid JSON."""
+
+    reason: str
+
+    def __bool__(self) -> bool:
+        # Preserve the historical falsy behaviour for callers that only need
+        # to know whether a usable contract exists, while allowing callers
+        # that care about corruption to distinguish it from ``None``.
+        return False
+
+
+def is_malformed_contract(value: object) -> bool:
+    """Return whether ``extract_contract`` found an invalid contract line."""
+
+    return isinstance(value, MalformedContract)
+
 # GATE8-SWARM-CREATION-TOOL-001: the skill each external lane needs to reach
 # its actual CLI. Before this table existed, nothing in the codebase
 # constrained what skill string an agent put on a lane's worker -- observed
@@ -521,16 +540,26 @@ def _completion_call_example(contract: dict[str, Any]) -> str:
     )
 
 
-def extract_contract(body: Optional[str]) -> Optional[dict[str, Any]]:
-    """Read the last machine-readable swarm contract from a task body."""
+def extract_contract(
+    body: Optional[str],
+) -> Optional[dict[str, Any] | MalformedContract]:
+    """Read the last machine-readable swarm contract from a task body.
+
+    ``None`` means no contract marker was present.  A ``MalformedContract``
+    means a marker was present but its payload was invalid (or not a JSON
+    object); the marker is deliberately falsy for backwards compatibility.
+    """
+
     for line in reversed((body or "").splitlines()):
         if not line.startswith(CONTRACT_PREFIX):
             continue
         try:
             value = json.loads(line[len(CONTRACT_PREFIX):])
-        except json.JSONDecodeError:
-            return None
-        return value if isinstance(value, dict) else None
+        except json.JSONDecodeError as exc:
+            return MalformedContract(f"invalid JSON: {exc.msg}")
+        if not isinstance(value, dict):
+            return MalformedContract("contract payload must be a JSON object")
+        return value
     return None
 
 
@@ -572,6 +601,8 @@ def validate_completion(
 ) -> Optional[str]:
     """Return a rejection reason for a contract-bound task, else ``None``."""
     contract = extract_contract(getattr(task, "body", None))
+    if is_malformed_contract(contract):
+        return f"swarm contract is malformed: {contract.reason}"
     if not contract:
         return None
     metadata = metadata if isinstance(metadata, dict) else {}

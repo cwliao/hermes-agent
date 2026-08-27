@@ -34,7 +34,9 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import math
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
@@ -1296,6 +1298,145 @@ async def _vision_analyze_native(
                 pass
 
 
+async def _ensure_vision_service_ready() -> None:
+    """Pre-flight wake/health-check for an on-demand ``auxiliary.vision`` backend.
+
+    No-op unless both ``auxiliary.vision.on_demand_health_url`` and
+    ``auxiliary.vision.on_demand_start_script`` are configured — every other
+    vision setup (OpenRouter, Nous, Codex, an always-on custom endpoint, ...)
+    is completely unaffected. Shared by ``vision_analyze_tool`` and
+    ``video_analyze_tool``, both of which route through the same
+    ``async_call_llm(task="vision", ...)`` sink and hit the same
+    stopped-container failure mode.
+
+    On a health-poll timeout this raises a plain exception (not a bespoke
+    error dict) so it flows into the caller's existing ``except Exception``
+    handler and produces the same ``{"success": False, "error": ...}`` shape
+    a stopped-container connection error already produces today.
+    """
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        _cfg = load_config()
+        _vision_cfg = cfg_get(_cfg, "auxiliary", "vision", default={})
+    except Exception:
+        return
+
+    if not isinstance(_vision_cfg, dict):
+        return
+
+    health_url = _vision_cfg.get("on_demand_health_url")
+    start_script = _vision_cfg.get("on_demand_start_script")
+
+    if not health_url and not start_script:
+        return
+    if bool(health_url) != bool(start_script):
+        # Partial config (only one of the two fields set) is a
+        # misconfiguration. Chosen behavior: safe no-op, not fail-closed —
+        # log a warning and proceed to the existing call path unchanged
+        # rather than making every vision call pay a timeout for a feature
+        # that's only half-turned-on.
+        logger.warning(
+            "auxiliary.vision on-demand config is incomplete (on_demand_health_url"
+            " set=%s, on_demand_start_script set=%s) — both must be set to enable"
+            " on-demand wake; skipping pre-flight as if unconfigured.",
+            bool(health_url), bool(start_script),
+        )
+        return
+
+    _raw_timeout = _vision_cfg.get("on_demand_timeout")
+    if _raw_timeout is None:
+        budget = 150.0
+    else:
+        try:
+            budget = float(_raw_timeout)
+        except (TypeError, ValueError, OverflowError):
+            logger.warning(
+                "Invalid auxiliary.vision.on_demand_timeout %r; using default 150.0s.",
+                _raw_timeout,
+            )
+            budget = 150.0
+        else:
+            # Zero is valid and means do not wait; negative and non-finite
+            # values cannot define a meaningful polling budget.
+            if not math.isfinite(budget) or budget < 0:
+                logger.warning(
+                    "Invalid auxiliary.vision.on_demand_timeout %r; using default 150.0s.",
+                    _raw_timeout,
+                )
+                budget = 150.0
+
+    deadline = time.monotonic() + budget
+
+    async def _check_health() -> bool:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=min(5.0, remaining)) as client:
+                resp = await client.get(health_url)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    if await _check_health():
+        return
+
+    # Not healthy yet — trigger the start script as a background task and
+    # poll independently. The script's exit code is NEVER trusted as a
+    # readiness signal: it can exit 0 having never checked /health at all,
+    # if another concurrent caller's `docker start` already flipped the
+    # container to Docker `running` status moments earlier. Only the health
+    # poll below is the source of truth for "actually ready".
+    script_path = os.path.expandvars(os.path.expanduser(str(start_script)))
+    subprocess_task = None
+    try:
+        if os.path.isfile(script_path) and os.access(script_path, os.X_OK):
+            logger.info("Vision service not ready; starting it via %s", script_path)
+
+            async def _run_start_script() -> None:
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        script_path,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await proc.wait()
+                except Exception:
+                    logger.warning(
+                        "Vision on-demand start script failed to launch", exc_info=True,
+                    )
+
+            subprocess_task = asyncio.create_task(_run_start_script())
+            # Yield control once so the task actually gets scheduled and starts
+            # the subprocess before we move on to polling — we don't await its
+            # completion, just its start.
+            await asyncio.sleep(0)
+        else:
+            logger.warning(
+                "auxiliary.vision.on_demand_start_script %r is not an executable "
+                "file; cannot wake the vision service — will poll health until timeout.",
+                script_path,
+            )
+
+        while time.monotonic() < deadline:
+            if await _check_health():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(4.0, remaining))
+    finally:
+        if subprocess_task is not None and not subprocess_task.done():
+            subprocess_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await subprocess_task
+
+    raise ConnectionError(
+        f"Vision service at {health_url} did not become ready within "
+        f"{budget:.0f}s (auxiliary.vision.on_demand_timeout)."
+    )
+
+
 async def vision_analyze_tool(
     image_url: str,
     user_prompt: str,
@@ -1506,6 +1647,7 @@ async def vision_analyze_tool(
         if model:
             call_kwargs["model"] = model
         _load_auxiliary_client()
+        await _ensure_vision_service_ready()
         # Try full-size image first; on size-related rejection, downscale and retry.
         try:
             response = await async_call_llm(**call_kwargs)
@@ -2078,6 +2220,7 @@ async def video_analyze_tool(
             call_kwargs["model"] = model
 
         _load_auxiliary_client()
+        await _ensure_vision_service_ready()
         response = await async_call_llm(**call_kwargs)
         analysis = extract_content_or_reasoning(response)
 

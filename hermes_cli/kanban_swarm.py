@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+import logging
 import re
 import sqlite3
 import time
@@ -24,6 +25,8 @@ import unicodedata
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
+
+logger = logging.getLogger(__name__)
 
 BLACKBOARD_PREFIX = "[swarm:blackboard] "
 CONTRACT_PREFIX = "[swarm:contract] "
@@ -880,6 +883,25 @@ def _create_swarm_uncommitted(
                 raise ValueError(f"worker {worker_lane} requires a preflight skill id")
         resolved_skills.append(expected_skill)
 
+    # Re-check immediately before creating the root so concurrent calls for
+    # the same session cannot create duplicate in-flight swarms.
+    if not (idempotency_key and conn.execute(
+        "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived'",
+        (idempotency_key,),
+    ).fetchone()):
+        active = find_active_swarms_for_session(conn, origin=origin)
+        if active:
+            first = active[0]
+            root_id = first["root_id"]
+            synth_id = first["synthesizer_id"]
+            status = first.get("status") or first.get("synthesizer_status") or "in-flight"
+            raise ValueError(
+                f"an active swarm is already in flight for this session "
+                f"(root '{root_id}', synthesizer '{synth_id}', status '{status}'). "
+                "Do not create a new swarm or substitute task; "
+                f"use kanban_show on the synthesizer '{synth_id}' to inspect its status "
+                "or wait for the swarm to complete."
+            )
     common = dict(
         created_by=created_by, tenant=tenant,
         workspace_kind=workspace_kind, workspace_path=workspace_path,
@@ -1369,6 +1391,97 @@ def latest_blackboard(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
     if authors:
         merged["_authors"] = authors
     return merged
+
+
+def find_active_swarms_for_session(
+    conn: sqlite3.Connection,
+    origin: Optional[dict] = None,
+) -> list[dict[str, Any]]:
+    """Return active (non-terminal) swarm topologies belonging to the session/origin.
+
+    A swarm is active if its synthesizer node is in a non-terminal status (not
+    in ``("done", "archived")``). If a candidate root references a missing
+    or deleted synthesizer row, that swarm is treated as inactive and a warning
+    is logged.
+    """
+    if origin is None:
+        try:
+            from gateway.session_context import resolve_notify_origin
+            origin = resolve_notify_origin()
+        except Exception:
+            origin = None
+        if not origin:
+            import os
+            _self_tid = os.environ.get("HERMES_KANBAN_TASK")
+            if _self_tid:
+                _self_task = kb.get_task(conn, _self_tid)
+                if _self_task is not None and _self_task.origin_platform:
+                    origin = {
+                        "origin_platform": _self_task.origin_platform,
+                        "origin_chat_id": _self_task.origin_chat_id,
+                        "origin_thread_id": _self_task.origin_thread_id,
+                        "origin_user_id": _self_task.origin_user_id,
+                        "origin_session_key": _self_task.origin_session_key,
+                        "origin_profile": _self_task.origin_profile,
+                    }
+
+    session_key = (origin or {}).get("origin_session_key")
+    platform = (origin or {}).get("origin_platform")
+    chat_id = (origin or {}).get("origin_chat_id")
+
+    if not session_key and not (platform and chat_id):
+        return []
+
+    if session_key:
+        candidate_roots = conn.execute(
+            "SELECT id FROM tasks WHERE origin_session_key = ? AND status != 'archived'",
+            (session_key,),
+        ).fetchall()
+    else:
+        candidate_roots = conn.execute(
+            "SELECT id FROM tasks WHERE origin_platform = ? AND origin_chat_id = ? AND status != 'archived'",
+            (platform, chat_id),
+        ).fetchall()
+
+    if not candidate_roots:
+        return []
+
+    active: list[dict[str, Any]] = []
+    for row in candidate_roots:
+        root_id = row["id"]
+        topology = latest_blackboard(conn, root_id).get("topology")
+        if not isinstance(topology, dict):
+            continue
+        synthesizer_id = str(topology.get("synthesizer_id") or "").strip()
+        if not synthesizer_id:
+            continue
+
+        synth_row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (synthesizer_id,)
+        ).fetchone()
+        if synth_row is None:
+            logger.warning(
+                "find_active_swarms_for_session: root %r references missing synthesizer %r; ignoring",
+                root_id,
+                synthesizer_id,
+            )
+            continue
+        if synth_row["status"] in ("done", "archived"):
+            continue
+
+        worker_ids = [str(x).strip() for x in topology.get("worker_ids", []) if str(x).strip()]
+        verifier_id = str(topology.get("verifier_id") or "").strip()
+
+        active.append({
+            "root_id": root_id,
+            "synthesizer_id": synthesizer_id,
+            "verifier_id": verifier_id,
+            "worker_ids": worker_ids,
+            "status": str(synth_row["status"]),
+            "synthesizer_status": str(synth_row["status"]),
+        })
+
+    return active
 
 
 def parse_worker_arg(raw: str) -> SwarmWorkerSpec:

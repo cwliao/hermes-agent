@@ -119,8 +119,8 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 # the same generic ``blocked`` lane/UI, no new lifecycle state was added.
 #
 # ``synthesizer_retry_exhausted``: the synthesizer role's bounded retry
-# budget (max_retries=1, i.e. max_attempts=2) or its 2700s overall deadline
-# was exhausted. Terminal -- no later dispatcher tick may spawn another
+# budget (max_retries=2, i.e. the breaker trips on the 2nd failure) or its
+# 3600s overall deadline was exhausted. Terminal -- no later dispatcher tick may spawn another
 # attempt for this task (enforced by ``retry_not_before``/deadline checks
 # in ``enforce_max_runtime``, not by this constant alone).
 #
@@ -5143,6 +5143,7 @@ _PLUGIN_COMPAT_LAZY = {
     'DERIVED_MAX_IN_PROGRESS_CEILING': ('hermes_cli.kanban_db_dispatch', 'DERIVED_MAX_IN_PROGRESS_CEILING'),
     'DERIVED_MAX_IN_PROGRESS_FLOOR': ('hermes_cli.kanban_db_dispatch', 'DERIVED_MAX_IN_PROGRESS_FLOOR'),
     'KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS': ('hermes_cli.kanban_db_dispatch', 'KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS'),
+    '_SYNTHESIZER_OVERALL_DEADLINE_SECONDS': ('hermes_cli.kanban_db_dispatch', '_SYNTHESIZER_OVERALL_DEADLINE_SECONDS'),
     'KanbanDbCorruptError': ('hermes_cli.kanban_db_connect', 'KanbanDbCorruptError'),
     'MEMORY_GUARD_MB_PER_WORKER': ('hermes_cli.kanban_db_dispatch', 'MEMORY_GUARD_MB_PER_WORKER'),
     'RepairResult': ('hermes_cli.kanban_db_connect', 'RepairResult'),

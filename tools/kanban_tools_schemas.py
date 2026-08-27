@@ -356,7 +356,12 @@ KANBAN_CREATE_SCHEMA = _schema(
         "orchestrator workers to fan out — decompose work into child "
         "tasks with specific assignees, link them into a pipeline, "
         "then complete your own task. The dispatcher picks up the new "
-        "tasks on its next tick and spawns the assigned profiles."
+        "tasks on its next tick and spawns the assigned profiles. Do not "
+        "use kanban_create to hand-build a 'coordinator' or 'parent' task "
+        "whose purpose is to manually orchestrate several child tasks that "
+        "compare or parallelize the same kind of work (for example, 'create "
+        "N child tasks that each analyze X'); call kanban_swarm directly "
+        "instead."
     ),
     {
         "title": _prop("string", "Short task title (required)."),

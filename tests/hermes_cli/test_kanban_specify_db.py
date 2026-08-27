@@ -80,3 +80,48 @@ def test_specify_records_audit_comment_only_when_author_given(kanban_home):
     assert comments2 == []
 
 
+def test_specify_triage_task_refuses_contract(kanban_home):
+    body = 'Review work.\n[swarm:contract] {"role": "verifier", "root_id": "t_r"}'
+    with kb.connect() as conn:
+        tid = _create_triage(conn, title="verifier task", body=body)
+    with kb.connect() as conn:
+        ok = kb.specify_triage_task(
+            conn,
+            tid,
+            title="Refined verifier",
+            body="New body",
+            author="specifier-bot",
+        )
+    assert ok is False
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "triage"
+        assert task.body == body
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["stall_key"] == f"triage-refused:{tid}"
+        assert payload["source"] == "specify_triage_task"
+
+
+def test_specify_triage_task_refuses_malformed_contract(kanban_home):
+    body = "Review work.\n[swarm:contract] not-json"
+    with kb.connect() as conn:
+        tid = _create_triage(conn, title="verifier task", body=body)
+    with kb.connect() as conn:
+        ok = kb.specify_triage_task(
+            conn,
+            tid,
+            title="Refined verifier",
+            body="New body",
+        )
+    assert ok is False
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "triage"
+        assert task.body == body
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 1
+
+
+

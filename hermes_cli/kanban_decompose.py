@@ -290,6 +290,26 @@ def decompose_task(
             task_id, False, f"task is not in triage (status={task.status!r})"
         )
 
+    from hermes_cli.kanban_swarm import extract_contract, is_malformed_contract
+
+    contract = extract_contract(task.body)
+    if contract or is_malformed_contract(contract):
+        reason = (
+            "Task carries a [swarm:contract] marker; "
+            "refusing to auto-decompose/rewrite to avoid corrupting swarm state. "
+            "Needs human triage."
+        )
+        with kb.connect_closing() as conn:
+            kb.record_swarm_stall_diagnostic(
+                conn,
+                task_id,
+                reason=reason,
+                stall_key=f"triage-refused:{task_id}",
+                source="decompose_task",
+                expected_status="triage",
+            )
+        return DecomposeOutcome(task_id, False, reason)
+
     cfg = _load_config()
     orchestrator = _resolve_orchestrator_profile(cfg)
     default_assignee = _resolve_default_assignee(cfg)

@@ -161,6 +161,26 @@ def specify_task(
             task_id, False, f"task is not in triage (status={task.status!r})"
         )
 
+    from hermes_cli.kanban_swarm import extract_contract, is_malformed_contract
+
+    contract = extract_contract(task.body)
+    if contract or is_malformed_contract(contract):
+        reason = (
+            "Task carries a [swarm:contract] marker; "
+            "refusing to auto-decompose/rewrite to avoid corrupting swarm state. "
+            "Needs human triage."
+        )
+        with kb.connect_closing() as conn:
+            kb.record_swarm_stall_diagnostic(
+                conn,
+                task_id,
+                reason=reason,
+                stall_key=f"triage-refused:{task_id}",
+                source="specify_task",
+                expected_status="triage",
+            )
+        return SpecifyOutcome(task_id, False, reason)
+
     try:
         from agent.auxiliary_client import call_llm
     except Exception as exc:  # pragma: no cover — import smoke test

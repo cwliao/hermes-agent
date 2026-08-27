@@ -74,6 +74,54 @@ def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path)
         conn.close()
 
 
+def test_create_swarm_verifier_does_not_carry_requesting_code_review(tmp_path):
+    """Verifier tasks must not inherit requesting-code-review.
+
+    That skill assumes git/terminal/file tools the kanban verifier worker
+    does not have; attaching it causes unknown-tool exhaustion and a
+    protocol-violation stall. Cover both create_swarm() entry shapes:
+    non-lane (plain worker specs) and lane-bound (lane_id on every worker).
+    """
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        created = create_swarm(
+            conn,
+            goal="Map the target market and produce a decision memo.",
+            workers=[
+                SwarmWorkerSpec(profile="researcher-a", title="Market scan", body="Find competitors"),
+                SwarmWorkerSpec(profile="researcher-b", title="Customer scan", body="Find customer pains"),
+            ],
+            verifier_assignee="reviewer",
+            synthesizer_assignee="writer",
+            tenant="intel",
+            created_by="orchestrator",
+        )
+        verifier = kb.get_task(conn, created.verifier_id)
+        assert verifier is not None
+        assert "requesting-code-review" not in (verifier.skills or [])
+
+        created_lane = create_swarm(
+            conn,
+            goal="Ask four independent agents for one joke and synthesize it.",
+            workers=[
+                SwarmWorkerSpec(
+                    profile=lane, title=f"{lane} joke", body="Return one joke.",
+                    skills=[] if lane == "native_hermes" else ["kanban-worker"], lane_id=lane,
+                )
+                for lane in MULTI_AGENT_LANE_IDS
+            ],
+            verifier_assignee="verifier",
+            synthesizer_assignee="synthesizer",
+            tenant="delivery-test",
+        )
+        lane_verifier = kb.get_task(conn, created_lane.verifier_id)
+        assert lane_verifier is not None
+        assert "requesting-code-review" not in (lane_verifier.skills or [])
+        assert extract_contract(lane_verifier.body)["role"] == "verifier"
+    finally:
+        conn.close()
+
+
 def test_create_swarm_graph_is_atomic_and_rolls_back_partial_build(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):

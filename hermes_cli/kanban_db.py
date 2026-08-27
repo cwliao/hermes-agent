@@ -2353,8 +2353,14 @@ def record_swarm_stall_diagnostic(
     stall_key: str,
     source: str,
     expected_status: Optional[str] = None,
+    block: bool = False,
 ) -> bool:
-    """Persist a deduplicated swarm diagnostic without changing task state."""
+    """Persist a deduplicated swarm diagnostic.
+
+    ``block=False`` (the default, used by the swarm supervisor watcher) is
+    read-only: it never mutates task status.  Pass ``block=True`` only from
+    the verifier-gate path that is allowed to flip ``todo``/``blocked``.
+    """
     with write_txn(conn):
         return _record_swarm_stall_diagnostic(
             conn,
@@ -2363,7 +2369,63 @@ def record_swarm_stall_diagnostic(
             stall_key=stall_key,
             source=source,
             expected_status=expected_status,
+            block=block,
         )
+
+
+def find_active_swarm_topologies(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return every currently-active swarm on this board plus its topology.
+
+    A swarm is active when its synthesizer is not in ``TERMINAL_STATUSES``.
+    Board-wide counterpart of ``kanban_swarm.find_active_swarms_for_session``:
+    same liveness rule and the same ``latest_blackboard(...).get("topology")``
+    read, without the session/origin filter.
+    """
+    from hermes_cli.kanban_swarm import BLACKBOARD_PREFIX, latest_blackboard
+
+    candidate_roots = conn.execute(
+        "SELECT DISTINCT task_id FROM task_comments WHERE body LIKE ? "
+        "AND task_id IN (SELECT id FROM tasks WHERE status != 'archived')",
+        (BLACKBOARD_PREFIX + "%",),
+    ).fetchall()
+
+    active: list[dict[str, Any]] = []
+    for row in candidate_roots:
+        root_id = row["task_id"]
+        topology = latest_blackboard(conn, root_id).get("topology")
+        if not isinstance(topology, dict):
+            continue
+        synthesizer_id = str(topology.get("synthesizer_id") or "").strip()
+        if not synthesizer_id:
+            continue
+
+        synth_row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (synthesizer_id,),
+        ).fetchone()
+        if synth_row is None:
+            _log.warning(
+                "find_active_swarm_topologies: root %r references missing "
+                "synthesizer %r; ignoring",
+                root_id,
+                synthesizer_id,
+            )
+            continue
+        if synth_row["status"] in TERMINAL_STATUSES:
+            continue
+
+        worker_ids = [
+            str(x).strip() for x in topology.get("worker_ids", []) if str(x).strip()
+        ]
+        verifier_id = str(topology.get("verifier_id") or "").strip()
+        active.append({
+            "root_id": root_id,
+            "synthesizer_id": synthesizer_id,
+            "verifier_id": verifier_id,
+            "worker_ids": worker_ids,
+            "status": str(synth_row["status"]),
+            "synthesizer_status": str(synth_row["status"]),
+        })
+    return active
 
 
 def _end_run(

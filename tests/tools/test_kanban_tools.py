@@ -2188,3 +2188,214 @@ def test_worker_cannot_call_swarm(worker_env):
     d = json.loads(out)
     assert "error" in d
     assert "orchestrator-only" in d["error"]
+
+
+def test_create_rejects_parent_in_flight_swarm_topology_node(monkeypatch, worker_env):
+    """A model must not bypass an in-flight swarm by parenting a substitute task to
+    one of the swarm's internal nodes (verifier, worker, synthesizer)."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-swarm-001")
+    from hermes_cli import kanban_swarm as ks
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        created = ks.create_swarm(
+            conn,
+            goal="Test 4-lane swarm",
+            workers=[
+                ks.SwarmWorkerSpec(profile="peer", title="Lane 1", body="Lane 1 work"),
+                ks.SwarmWorkerSpec(profile="qa", title="Lane 2", body="Lane 2 work"),
+            ],
+            verifier_assignee="peer",
+            synthesizer_assignee="qa",
+            origin={"origin_session_key": "sess-test-swarm-001"},
+        )
+    finally:
+        conn.close()
+
+    # 1. Parenting to verifier is rejected
+    out = kt._handle_create({
+        "title": "Substitute synthesis task",
+        "assignee": "peer",
+        "parents": [created.verifier_id],
+    })
+    d = json.loads(out)
+    assert "error" in d, d
+    assert "refused" in d["error"]
+    assert created.root_id in d["error"]
+    assert created.synthesizer_id in d["error"]
+    assert "kanban_show" in d["error"]
+
+    # 2. Parenting to worker is rejected
+    out_worker = kt._handle_create({
+        "title": "Substitute worker task",
+        "assignee": "peer",
+        "parents": [created.worker_ids[0]],
+    })
+    d_worker = json.loads(out_worker)
+    assert "error" in d_worker, d_worker
+    assert "refused" in d_worker["error"]
+
+    # 3. Parenting to synthesizer is rejected
+    out_synth = kt._handle_create({
+        "title": "Substitute follow-on task",
+        "assignee": "peer",
+        "parents": [created.synthesizer_id],
+    })
+    d_synth = json.loads(out_synth)
+    assert "error" in d_synth, d_synth
+    assert "refused" in d_synth["error"]
+
+
+def test_create_allows_parent_when_swarm_is_done(monkeypatch, worker_env):
+    """When the swarm has reached done (synthesizer completed), follow-up task
+    creation referencing nodes is permitted."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-swarm-002")
+    from hermes_cli import kanban_swarm as ks
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        created = ks.create_swarm(
+            conn,
+            goal="Completed swarm",
+            workers=[
+                ks.SwarmWorkerSpec(profile="peer", title="Lane 1", body="Lane 1 work"),
+            ],
+            verifier_assignee="peer",
+            synthesizer_assignee="qa",
+            origin={"origin_session_key": "sess-test-swarm-002"},
+        )
+        # Drive the whole chain to done: workers -> verifier -> synthesizer,
+        # since each stage is dependency-gated on the previous one.
+        for worker_id in created.worker_ids:
+            kb.claim_task(conn, worker_id)
+            kb.complete_task(conn, worker_id, summary="Worker done", result="Worker output")
+        kb.claim_task(conn, created.verifier_id)
+        kb.complete_task(conn, created.verifier_id, summary="Verifier done", result="Verified")
+        kb.claim_task(conn, created.synthesizer_id)
+        kb.complete_task(conn, created.synthesizer_id, summary="Synth done", result="Final deliverable")
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "Legitimate post-swarm follow-up",
+        "assignee": "peer",
+        "parents": [created.synthesizer_id],
+    })
+    d = json.loads(out)
+    assert d.get("ok") is True, d
+
+
+def test_create_allows_unrelated_task_during_in_flight_swarm(monkeypatch, worker_env):
+    """An unrelated task creation with unrelated parent or no parent is not blocked
+    by an active swarm."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-swarm-003")
+    from hermes_cli import kanban_swarm as ks
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        created = ks.create_swarm(
+            conn,
+            goal="Active swarm",
+            workers=[
+                ks.SwarmWorkerSpec(profile="peer", title="Lane 1", body="Lane 1 work"),
+            ],
+            verifier_assignee="peer",
+            synthesizer_assignee="qa",
+            origin={"origin_session_key": "sess-test-swarm-003"},
+        )
+        unrelated_parent = kb.create_task(conn, title="Unrelated prior task", assignee="peer")
+    finally:
+        conn.close()
+
+    # Create unparented task
+    out1 = kt._handle_create({
+        "title": "Unrelated new task",
+        "assignee": "peer",
+    })
+    d1 = json.loads(out1)
+    assert d1.get("ok") is True, d1
+
+    # Create task parented to unrelated task
+    out2 = kt._handle_create({
+        "title": "Unrelated child task",
+        "assignee": "peer",
+        "parents": [unrelated_parent],
+    })
+    d2 = json.loads(out2)
+    assert d2.get("ok") is True, d2
+
+
+def test_link_rejects_in_flight_swarm_topology_node(monkeypatch, worker_env):
+    """kanban_link cannot be used to route around create-time guards by linking
+    into an in-flight swarm's topology."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-swarm-004")
+    from hermes_cli import kanban_swarm as ks
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        created = ks.create_swarm(
+            conn,
+            goal="In-flight swarm for link test",
+            workers=[
+                ks.SwarmWorkerSpec(profile="peer", title="Lane 1", body="Lane 1 work"),
+            ],
+            verifier_assignee="peer",
+            synthesizer_assignee="qa",
+            origin={"origin_session_key": "sess-test-swarm-004"},
+        )
+        stand_alone = kb.create_task(conn, title="Standalone task", assignee="peer")
+    finally:
+        conn.close()
+
+    # Link from verifier to standalone
+    out = kt._handle_link({
+        "parent_id": created.verifier_id,
+        "child_id": stand_alone,
+    })
+    d = json.loads(out)
+    assert "error" in d, d
+    assert "refused" in d["error"]
+    assert created.root_id in d["error"]
+    assert created.synthesizer_id in d["error"]
+
+    # Link from standalone to synthesizer
+    out2 = kt._handle_link({
+        "parent_id": stand_alone,
+        "child_id": created.synthesizer_id,
+    })
+    d2 = json.loads(out2)
+    assert "error" in d2, d2
+    assert "refused" in d2["error"]
+
+
+def test_link_allows_unrelated_tasks(monkeypatch, worker_env):
+    """kanban_link works normally for unrelated tasks."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        t1 = kb.create_task(conn, title="Task 1", assignee="peer")
+        t2 = kb.create_task(conn, title="Task 2", assignee="qa")
+    finally:
+        conn.close()
+
+    out = kt._handle_link({
+        "parent_id": t1,
+        "child_id": t2,
+    })
+    d = json.loads(out)
+    assert d.get("ok") is True, d

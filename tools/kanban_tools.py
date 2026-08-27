@@ -14,7 +14,7 @@ import os
 import re
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from agent.redact import redact_sensitive_text
 from hermes_cli import kanban_swarm as _KS
@@ -280,6 +280,89 @@ def _reject_downstream_swarm_mutation(tool_name: str) -> Optional[str]:
             "read the graph, comment, heartbeat, complete, or block their "
             "assigned task. Do not create child tasks, links, reviews, or artifacts."
         )
+    return None
+
+
+def _reject_in_flight_swarm_topology_mutation(
+    conn: Any,
+    candidate_task_ids: Sequence[Any],
+    tool_name: str,
+) -> Optional[str]:
+    """Reject attaching new work directly to an in-flight swarm's internal nodes."""
+    if not candidate_task_ids:
+        return None
+    target_ids = {str(tid).strip() for tid in candidate_task_ids if str(tid).strip()}
+    if not target_ids:
+        return None
+
+    from gateway.session_context import resolve_notify_origin
+    origin = resolve_notify_origin()
+    if not origin:
+        self_tid = os.environ.get("HERMES_KANBAN_TASK")
+        if self_tid:
+            from hermes_cli import kanban_db as kb
+            self_task = kb.get_task(conn, self_tid)
+            if self_task is not None and self_task.origin_platform:
+                origin = {
+                    "origin_platform": self_task.origin_platform,
+                    "origin_chat_id": self_task.origin_chat_id,
+                    "origin_thread_id": self_task.origin_thread_id,
+                    "origin_user_id": self_task.origin_user_id,
+                    "origin_session_key": self_task.origin_session_key,
+                    "origin_profile": self_task.origin_profile,
+                }
+
+    session_key = (origin or {}).get("origin_session_key")
+    platform = (origin or {}).get("origin_platform")
+    chat_id = (origin or {}).get("origin_chat_id")
+    if not session_key and not (platform and chat_id):
+        return None
+
+    if session_key:
+        roots = conn.execute(
+            "SELECT id FROM tasks WHERE origin_session_key = ? AND status != 'archived'",
+            (session_key,),
+        ).fetchall()
+    else:
+        roots = conn.execute(
+            "SELECT id FROM tasks WHERE origin_platform = ? AND origin_chat_id = ? "
+            "AND status != 'archived'",
+            (platform, chat_id),
+        ).fetchall()
+
+    for row in roots:
+        root_id = row["id"]
+        topology = _KS.latest_blackboard(conn, root_id).get("topology")
+        if not isinstance(topology, dict):
+            continue
+        synthesizer_id = str(topology.get("synthesizer_id") or "").strip()
+        if not synthesizer_id:
+            continue
+        synth_row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (synthesizer_id,)
+        ).fetchone()
+        if synth_row is not None and synth_row["status"] in {"done", "archived"}:
+            continue
+        internal_nodes = {
+            str(task_id).strip()
+            for task_id in topology.get("worker_ids", [])
+            if str(task_id).strip()
+        }
+        verifier_id = str(topology.get("verifier_id") or "").strip()
+        if verifier_id:
+            internal_nodes.add(verifier_id)
+        internal_nodes.add(synthesizer_id)
+        matched = target_ids & internal_nodes
+        if matched:
+            matched_id = sorted(matched)[0]
+            return tool_error(
+                f"{tool_name} refused: task '{matched_id}' is an internal node "
+                f"(worker/verifier/synthesizer) of an in-flight swarm "
+                f"(root '{root_id}', synthesizer '{synthesizer_id}'). "
+                "Do not create substitute or workaround tasks for in-flight swarm work; "
+                f"use kanban_show on the synthesizer '{synthesizer_id}' to inspect its status "
+                "or wait for the swarm to complete."
+            )
     return None
 
 
@@ -1172,6 +1255,12 @@ def _handle_create(args: dict, **kw) -> str:
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
+        if parents:
+            guard = _reject_in_flight_swarm_topology_mutation(
+                conn, parents, "kanban_create"
+            )
+            if guard:
+                return guard
         _assignee_name = str(assignee).strip()
         if kb.assignee_availability(conn, _assignee_name) is None:
             return tool_error(kb.assignee_unavailable_message(conn, _assignee_name))
@@ -1545,6 +1634,11 @@ def _handle_link(args: dict, **kw) -> str:
     child_id = args.get("child_id")
     _check(parent_id and child_id, "both parent_id and child_id are required")
     with _board(args.get("board")) as (kb, conn):
+        guard = _reject_in_flight_swarm_topology_mutation(
+            conn, [parent_id, child_id], "kanban_link"
+        )
+        if guard:
+            return guard
         kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
         return _ok(parent_id=parent_id, child_id=child_id)
 

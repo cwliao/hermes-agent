@@ -310,6 +310,11 @@ KANBAN_GUIDANCE = (
     "card as the result of the current turn unless the user explicitly names that card and asks to inspect or resume "
     "it. For a new request, create a fresh task or call `kanban_swarm`; a similar old title is not proof that the "
     "current work is complete."
+    "Never create substitute or workaround tasks for in-flight or stuck swarm "
+    "work. If a previously-launched swarm referenced in this conversation is "
+    "running, blocked, or timing out, use `kanban_show` on its synthesizer or "
+    "root task, wait, or report its true status truthfully — never spin up a "
+    "similar-goal task and report its result as if it were that swarm's completion.\n"
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (

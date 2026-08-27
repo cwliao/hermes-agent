@@ -822,9 +822,9 @@ async def test_gateway_autosubscribe_roundtrips_user_id_alt_for_session_key(
 
 @pytest.mark.asyncio
 async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_path, monkeypatch):
-    """Missing artifact paths are silently skipped — they may have been
-    referenced by name only. The notifier must not crash and must still
-    deliver any artifacts that do exist."""
+    """A file present at completion time but removed from disk before the
+    notifier watcher delivers it is silently skipped. The notifier must not
+    crash and must still deliver any artifacts that still exist."""
     import hermes_cli.kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as kbn
@@ -838,6 +838,8 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
 
     real_pdf = tmp_path / "real.pdf"
     real_pdf.write_bytes(b"%PDF-fake")
+    gone_pdf = tmp_path / "gone.pdf"
+    gone_pdf.write_bytes(b"%PDF-gone")
 
     conn = kbc.connect()
     try:
@@ -850,11 +852,15 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     os.environ["HERMES_KANBAN_TASK"] = tid
     try:
         kt._handle_complete({
-            "summary": "one real, one ghost",
-            "artifacts": [str(real_pdf), "/tmp/definitely-does-not-exist.pdf"],
+            "summary": "two real files, one removed before delivery",
+            "artifacts": [str(real_pdf), str(gone_pdf)],
         })
     finally:
         os.environ.pop("HERMES_KANBAN_TASK", None)
+
+    # Completion evidence validation requires both files to exist; the
+    # delivery-time skip is for a path that was valid then, gone now.
+    gone_pdf.unlink()
 
     runner = object.__new__(GatewayRunner)
     runner._owns_kanban_dispatcher_lock = lambda: True

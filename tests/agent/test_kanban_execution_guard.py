@@ -328,3 +328,205 @@ def test_invalid_current_user_idx_stays_pass_even_with_earlier_swarm_call():
     assert outcome == "pass"
     assert final_msg["content"] == "unrelated reply"
     assert agent._kanban_execution_guard_phase == ""
+
+
+def test_non_matching_prose_with_kanban_create_blocked_when_targets_swarm_topology(monkeypatch):
+    """A kanban_create parented into an active swarm's own topology node (e.g. its
+    verifier) is blocked from finalizing, as defense-in-depth alongside the
+    tool-level guard in tools/kanban_tools.py."""
+    import agent.kanban_execution_guard as guard
+
+    monkeypatch.setattr(
+        guard,
+        "_find_active_swarms_for_session",
+        lambda: [{
+            "root_id": "t_root_active",
+            "synthesizer_id": "t_synth_active",
+            "verifier_id": "t_verify_active",
+            "worker_ids": ["t_a", "t_b", "t_c", "t_d"],
+        }],
+    )
+    agent = _agent()
+    messages = [
+        {"role": "user", "content": NON_MATCHING_PROMPT},
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "create-1",
+                "function": {
+                    "name": "kanban_create",
+                    "arguments": json.dumps({"title": "substitute", "parents": ["t_verify_active"]}),
+                },
+            }],
+        },
+        {"role": "tool", "tool_call_id": "create-1", "content": '{"ok": true, "task_id": "t_substitute"}'},
+    ]
+    final_msg = {"role": "assistant", "content": "I created a substitute task and here is the result"}
+    outcome = guard.try_finalization(
+        agent, messages, 0, final_msg["content"], final_msg, list.append
+    )
+    assert outcome == "blocked"
+    assert "could not verify" in final_msg["content"]
+
+
+def test_non_matching_prose_with_unrelated_kanban_create_passes_despite_active_swarm(monkeypatch):
+    """An active swarm existing elsewhere in the session must NOT block a kanban_create
+    for a genuinely unrelated task (i.e. one that doesn't reference the swarm's own
+    topology node ids) -- this is the false-positive regression the guard must avoid."""
+    import agent.kanban_execution_guard as guard
+
+    monkeypatch.setattr(
+        guard,
+        "_find_active_swarms_for_session",
+        lambda: [{
+            "root_id": "t_root_active",
+            "synthesizer_id": "t_synth_active",
+            "verifier_id": "t_verify_active",
+            "worker_ids": ["t_a", "t_b", "t_c", "t_d"],
+        }],
+    )
+    agent = _agent()
+    messages = [
+        {"role": "user", "content": NON_MATCHING_PROMPT},
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "create-1",
+                "function": {
+                    "name": "kanban_create",
+                    "arguments": json.dumps({"title": "unrelated task", "parents": ["t_unrelated_parent"]}),
+                },
+            }],
+        },
+        {"role": "tool", "tool_call_id": "create-1", "content": '{"ok": true, "task_id": "t_unrelated"}'},
+    ]
+    final_msg = {"role": "assistant", "content": "created the unrelated task"}
+    outcome = guard.try_finalization(
+        agent, messages, 0, final_msg["content"], final_msg, list.append
+    )
+    assert outcome == "pass"
+    assert final_msg["content"] == "created the unrelated task"
+
+
+def test_non_matching_prose_with_kanban_create_passes_when_no_active_swarm_in_session(monkeypatch):
+    """When no active swarm exists for the session, an ordinary kanban_create passes."""
+    import agent.kanban_execution_guard as guard
+
+    monkeypatch.setattr(guard, "_find_active_swarms_for_session", lambda: [])
+    agent = _agent()
+    messages = [
+        {"role": "user", "content": NON_MATCHING_PROMPT},
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "create-1",
+                "function": {"name": "kanban_create", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "create-1", "content": '{"ok": true, "task_id": "t_legit"}'},
+    ]
+    final_msg = {"role": "assistant", "content": "created the legit task"}
+    outcome = guard.try_finalization(
+        agent, messages, 0, final_msg["content"], final_msg, list.append
+    )
+    assert outcome == "pass"
+    assert final_msg["content"] == "created the legit task"
+
+
+def test_non_matching_prose_with_read_only_passes_even_with_active_swarm(monkeypatch):
+    """When an active swarm exists, a status-checking turn calling read-only tools like
+    kanban_show is allowed to pass and report status."""
+    import agent.kanban_execution_guard as guard
+
+    monkeypatch.setattr(
+        guard,
+        "_find_active_swarms_for_session",
+        lambda: [{
+            "root_id": "t_root_active",
+            "synthesizer_id": "t_synth_active",
+            "verifier_id": "t_verify_active",
+            "worker_ids": ["t_a", "t_b", "t_c", "t_d"],
+        }],
+    )
+    agent = _agent()
+    messages = [
+        {"role": "user", "content": "swarm 的進度如何？"},
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "show-1",
+                "function": {"name": "kanban_show", "arguments": '{"task_id": "t_synth_active"}'},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "show-1", "content": '{"task": {"id": "t_synth_active", "status": "running"}}'},
+    ]
+    final_msg = {"role": "assistant", "content": "Synthesizer 目前仍在 running 中，請稍候。"}
+    outcome = guard.try_finalization(
+        agent, messages, 0, final_msg["content"], final_msg, list.append
+    )
+    assert outcome == "pass"
+    assert final_msg["content"] == "Synthesizer 目前仍在 running 中，請稍候。"
+
+
+def test_find_active_swarms_for_session_end_to_end(monkeypatch, tmp_path):
+    """End-to-end test verifying that _find_active_swarms_for_session correctly finds
+    non-terminal swarms matching the session and ignores completed or archived swarms."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_swarm as ks
+    import agent.kanban_execution_guard as guard
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        # Create an active swarm in session-A
+        swarm_a = ks.create_swarm(
+            conn,
+            goal="Swarm A in flight",
+            workers=[ks.SwarmWorkerSpec(profile="default", title="W1", body="W1 work")],
+            verifier_assignee="default",
+            synthesizer_assignee="default",
+            origin={"origin_session_key": "session-A"},
+        )
+        # Create a completed swarm in session-B
+        swarm_b = ks.create_swarm(
+            conn,
+            goal="Swarm B done",
+            workers=[ks.SwarmWorkerSpec(profile="default", title="W2", body="W2 work")],
+            verifier_assignee="default",
+            synthesizer_assignee="default",
+            origin={"origin_session_key": "session-B"},
+        )
+        for worker_id in swarm_b.worker_ids:
+            kb.claim_task(conn, worker_id)
+            kb.complete_task(conn, worker_id, summary="worker done", result="worker output")
+        kb.claim_task(conn, swarm_b.verifier_id)
+        kb.complete_task(conn, swarm_b.verifier_id, summary="verified", result="verified")
+        kb.claim_task(conn, swarm_b.synthesizer_id)
+        kb.complete_task(conn, swarm_b.synthesizer_id, summary="done", result="synth output")
+    finally:
+        conn.close()
+
+    # Session A: should find active swarm A
+    monkeypatch.setenv("HERMES_SESSION_KEY", "session-A")
+    active_a = guard._find_active_swarms_for_session()
+    assert len(active_a) == 1
+    assert active_a[0]["root_id"] == swarm_a.root_id
+    assert active_a[0]["synthesizer_id"] == swarm_a.synthesizer_id
+
+    # Session B: should find no active swarms
+    monkeypatch.setenv("HERMES_SESSION_KEY", "session-B")
+    active_b = guard._find_active_swarms_for_session()
+    assert len(active_b) == 0
+
+    # Session C (unrelated): should find no active swarms
+    monkeypatch.setenv("HERMES_SESSION_KEY", "session-C")
+    active_c = guard._find_active_swarms_for_session()
+    assert len(active_c) == 0
+

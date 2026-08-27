@@ -15,6 +15,7 @@ from tools.vision_tools import (
     video_analyze_tool,
     VIDEO_ANALYZE_SCHEMA,
 )
+from tests.tools.test_vision_tools import _fake_health_client_cls, _fake_subprocess_exec
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +264,49 @@ class TestVideoAnalyzeTool:
         uploaded_bytes = base64.b64decode(video_url.split(",", 1)[1])
         assert uploaded_bytes == remote_bytes
         assert uploaded_bytes != host_video.read_bytes()
+
+    def test_on_demand_wake_and_poll_before_llm_call(self, tmp_path):
+        """Criterion 5c: video_analyze_tool gets the identical on-demand
+        wake/health pre-flight as vision_analyze_tool — verified
+        independently against the video call path, not just assumed from
+        sharing the helper function.
+        """
+        video = tmp_path / "demo.mp4"
+        video.write_bytes(b"\x00" * 1024)
+        script = tmp_path / "start.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": str(script),
+            "on_demand_timeout": 5.0,
+        }}}
+        fake_cls = _fake_health_client_cls([500, 200])
+        mock_exec = _fake_subprocess_exec(exit_code=0)
+
+        health_calls_at_llm_invocation = []
+
+        async def capture_llm(**kwargs):
+            health_calls_at_llm_invocation.append(len(fake_cls.calls))
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "A short video showing a demo."
+            return mock_response
+
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient", fake_cls),
+            patch("tools.vision_tools.asyncio.create_subprocess_exec", mock_exec),
+            patch("tools.vision_tools.async_call_llm", side_effect=capture_llm),
+        ):
+            result = self._run(video_analyze_tool(str(video), "What is this?"))
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert len(fake_cls.calls) >= 2
+        assert health_calls_at_llm_invocation == [2]
+        mock_exec.assert_awaited_once()
+        assert mock_exec.call_args.args[0] == str(script)
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import pytest
 
 from tools.vision_tools import (
     _validate_image_url_async,
+    _ensure_vision_service_ready,
     _handle_vision_analyze,
     _determine_mime_type,
     _image_to_base64_data_url,
@@ -308,6 +309,353 @@ class TestVisionConfig:
         assert "max_tokens" not in kwargs
         assert kwargs["temperature"] == 0.1
         assert kwargs["timeout"] == 120.0
+
+
+# ---------------------------------------------------------------------------
+# _ensure_vision_service_ready — on-demand vllm-vision wake/health pre-flight
+# ---------------------------------------------------------------------------
+
+
+def _fake_health_client_cls(statuses):
+    """Build a fake ``httpx.AsyncClient`` class whose ``.get()`` consumes one
+    entry from ``statuses`` per call (an int status code, or an Exception
+    instance to simulate a connection error). Exhausting the list raises
+    StopIteration, which surfaces as a test failure if a test under-provisions
+    responses relative to how many polls actually happen.
+    """
+    it = iter(statuses)
+    calls = []
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url):
+            calls.append(url)
+            item = next(it)
+            if isinstance(item, Exception):
+                raise item
+            resp = MagicMock()
+            resp.status_code = item
+            return resp
+
+    _FakeAsyncClient.calls = calls
+    return _FakeAsyncClient
+
+
+def _fake_subprocess_exec(exit_code=0):
+    """AsyncMock standing in for asyncio.create_subprocess_exec whose fake
+    process ``wait()``s to ``exit_code`` immediately — simulating the
+    documented race where the start script exits 0 without ever having
+    polled /health itself (Docker container status already 'running').
+    """
+    proc = MagicMock()
+    proc.wait = AsyncMock(return_value=exit_code)
+    return AsyncMock(return_value=proc)
+
+
+class TestEnsureVisionServiceReady:
+    """Unit tests for the on-demand vision wake/health pre-flight helper."""
+
+    @pytest.mark.asyncio
+    async def test_both_fields_unset_is_a_complete_noop(self):
+        # No httpx.AsyncClient/subprocess calls at all — regression guard for
+        # every vision config that isn't this specific on-demand setup.
+        with (
+            patch("hermes_cli.config.load_config", return_value={"auxiliary": {"vision": {}}}),
+            patch("tools.vision_tools.httpx.AsyncClient") as mock_client_cls,
+            patch("tools.vision_tools.asyncio.create_subprocess_exec") as mock_exec,
+        ):
+            await _ensure_vision_service_ready()
+            mock_client_cls.assert_not_called()
+            mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_only_one_field_set_is_treated_as_unconfigured(self, caplog):
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            # on_demand_start_script intentionally left unset.
+        }}}
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient") as mock_client_cls,
+            patch("tools.vision_tools.asyncio.create_subprocess_exec") as mock_exec,
+            caplog.at_level(logging.WARNING, logger="tools.vision_tools"),
+        ):
+            await _ensure_vision_service_ready()
+            mock_client_cls.assert_not_called()
+            mock_exec.assert_not_called()
+            assert any("incomplete" in r.getMessage().lower() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_malformed_vision_config_is_a_complete_noop(self):
+        for malformed_config in (None, ["not", "a", "dict"]):
+            with (
+                patch("hermes_cli.config.load_config", return_value={"auxiliary": {}}),
+                patch("hermes_cli.config.cfg_get", return_value=malformed_config),
+                patch("tools.vision_tools.httpx.AsyncClient") as mock_client_cls,
+                patch("tools.vision_tools.asyncio.create_subprocess_exec") as mock_exec,
+            ):
+                await _ensure_vision_service_ready()
+                mock_client_cls.assert_not_called()
+                mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_zero_on_demand_timeout_is_not_replaced_with_default(self, tmp_path):
+        script = tmp_path / "start.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": str(script),
+            "on_demand_timeout": 0,
+        }}}
+        mock_exec = _fake_subprocess_exec()
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient") as mock_client_cls,
+            patch("tools.vision_tools.asyncio.create_subprocess_exec", mock_exec),
+        ):
+            with pytest.raises(ConnectionError) as exc_info:
+                await _ensure_vision_service_ready()
+        assert "within 0s" in str(exc_info.value)
+        assert "150s" not in str(exc_info.value)
+        mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_timeout", [-1.0, float("inf")])
+    async def test_invalid_on_demand_timeout_uses_default_and_warns(
+        self, invalid_timeout, caplog,
+    ):
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": "/missing/start.sh",
+            "on_demand_timeout": invalid_timeout,
+        }}}
+        fake_cls = _fake_health_client_cls([200])
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient", fake_cls),
+            caplog.at_level(logging.WARNING, logger="tools.vision_tools"),
+        ):
+            await _ensure_vision_service_ready()
+        assert any(
+            "invalid" in record.getMessage().lower()
+            and "150.0s" in record.getMessage()
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_start_task_yield_cleans_up_subprocess_task(
+        self, tmp_path,
+    ):
+        script = tmp_path / "start.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": str(script),
+            "on_demand_timeout": 5.0,
+        }}}
+        fake_cls = _fake_health_client_cls([500])
+
+        async def blocking_exec(*args, **kwargs):
+            await asyncio.Future()
+
+        mock_exec = AsyncMock(side_effect=blocking_exec)
+        created_tasks = []
+        real_create_task = asyncio.create_task
+        real_sleep = asyncio.sleep
+
+        def capture_create_task(coro):
+            task = real_create_task(coro)
+            created_tasks.append(task)
+            return task
+
+        async def cancel_at_start_task_yield(delay):
+            assert delay == 0
+            asyncio.current_task().cancel()
+            await real_sleep(0)
+
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient", fake_cls),
+            patch("tools.vision_tools.asyncio.create_subprocess_exec", mock_exec),
+            patch("tools.vision_tools.asyncio.create_task", side_effect=capture_create_task),
+            patch("tools.vision_tools.asyncio.sleep", side_effect=cancel_at_start_task_yield),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await _ensure_vision_service_ready()
+
+        assert len(created_tasks) == 1
+        assert created_tasks[0].done()
+        assert created_tasks[0].cancelled()
+
+    @pytest.mark.asyncio
+    async def test_health_url_200_on_first_check_skips_start_script(self, tmp_path):
+        script = tmp_path / "start.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": str(script),
+        }}}
+        fake_cls = _fake_health_client_cls([200])
+        mock_exec = _fake_subprocess_exec()
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient", fake_cls),
+            patch("tools.vision_tools.asyncio.create_subprocess_exec", mock_exec),
+        ):
+            await _ensure_vision_service_ready()
+        assert len(fake_cls.calls) == 1
+        mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_health_fails_then_succeeds_invokes_expanded_script_path(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        script = home / "bin" / "vllm-vision-start"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        monkeypatch.setenv("HOME", str(home))
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": "~/bin/vllm-vision-start",
+            "on_demand_timeout": 5.0,
+        }}}
+        fake_cls = _fake_health_client_cls([500, 200])
+        mock_exec = _fake_subprocess_exec()
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient", fake_cls),
+            patch("tools.vision_tools.asyncio.create_subprocess_exec", mock_exec),
+        ):
+            await _ensure_vision_service_ready()
+        assert len(fake_cls.calls) == 2
+        mock_exec.assert_awaited_once()
+        assert mock_exec.call_args.args[0] == str(script)
+
+    @pytest.mark.asyncio
+    async def test_health_never_ready_raises_within_timeout_budget(self, tmp_path):
+        script = tmp_path / "start.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": str(script),
+            "on_demand_timeout": 0.05,
+        }}}
+        fake_cls = _fake_health_client_cls([500] * 50)
+        mock_exec = _fake_subprocess_exec()
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient", fake_cls),
+            patch("tools.vision_tools.asyncio.create_subprocess_exec", mock_exec),
+        ):
+            with pytest.raises(Exception):
+                await _ensure_vision_service_ready()
+
+    @pytest.mark.asyncio
+    async def test_health_timeout_via_vision_analyze_tool_yields_same_error_shape(self, tmp_path):
+        """Criterion 4: a never-ready on-demand backend fails the same way a
+        stopped-container connection error already fails today — no new
+        error shape invented, and the overall call does not hang past the
+        configured timeout budget."""
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        script = tmp_path / "start.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": str(script),
+            "on_demand_timeout": 0.05,
+        }}}
+        fake_cls = _fake_health_client_cls([500] * 50)
+        mock_exec = _fake_subprocess_exec()
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient", fake_cls),
+            patch("tools.vision_tools.asyncio.create_subprocess_exec", mock_exec),
+            patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock) as mock_llm,
+        ):
+            result = json.loads(await vision_analyze_tool(str(img), "describe", "test/model"))
+        assert result["success"] is False
+        assert "error" in result
+        assert "analysis" in result
+        mock_llm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_script_exit_0_race_does_not_short_circuit_health_polling(self, tmp_path):
+        """Regression guard for the resolved cross-review disagreement: the
+        start script can exit 0 immediately (Docker container status already
+        'running') without ever having checked /health itself. The real
+        downstream call must only happen after the health poll independently
+        returns 200 on its N+1-th call, never right after the script exits.
+        """
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        script = tmp_path / "start.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": str(script),
+            "on_demand_timeout": 5.0,
+        }}}
+        # First N=2 polls fail, the 3rd (N+1-th) succeeds.
+        fake_cls = _fake_health_client_cls([500, 500, 200])
+        mock_exec = _fake_subprocess_exec(exit_code=0)
+
+        health_calls_at_llm_invocation = []
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "woke up fine"
+
+        async def capture_llm(**kwargs):
+            health_calls_at_llm_invocation.append(len(fake_cls.calls))
+            return mock_response
+
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.httpx.AsyncClient", fake_cls),
+            patch("tools.vision_tools.asyncio.create_subprocess_exec", mock_exec),
+            patch("tools.vision_tools.async_call_llm", side_effect=capture_llm),
+        ):
+            result = json.loads(await vision_analyze_tool(str(img), "describe", "test/model"))
+
+        assert result["success"] is True
+        assert len(fake_cls.calls) >= 3
+        assert health_calls_at_llm_invocation == [3]
+
+    @pytest.mark.asyncio
+    async def test_invalid_image_fails_fast_without_invoking_start_script(self, tmp_path):
+        """Criterion 5b: the pre-flight hook sits after validation, so a
+        malformed/invalid image never triggers the start script at all."""
+        config = {"auxiliary": {"vision": {
+            "on_demand_health_url": "http://127.0.0.1:18003/health",
+            "on_demand_start_script": str(tmp_path / "start.sh"),
+            "on_demand_timeout": 5.0,
+        }}}
+        mock_exec = _fake_subprocess_exec()
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("tools.vision_tools.asyncio.create_subprocess_exec", mock_exec),
+        ):
+            result = json.loads(
+                await vision_analyze_tool("not a valid url or path", "describe", "test/model")
+            )
+        assert result["success"] is False
+        mock_exec.assert_not_called()
 
 
 class TestVisionSafetyGuards:

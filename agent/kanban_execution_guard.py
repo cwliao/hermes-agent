@@ -325,52 +325,12 @@ def _has_control_escape(value: Any) -> bool:
 def _find_active_swarms_for_session() -> list[dict[str, Any]]:
     """Return active (non-terminal) swarm topologies belonging to the current session."""
     try:
-        from gateway.session_context import resolve_notify_origin
-        origin = resolve_notify_origin()
-        session_key = (origin or {}).get("origin_session_key")
-        platform = (origin or {}).get("origin_platform")
-        chat_id = (origin or {}).get("origin_chat_id")
-
-        if not session_key and not (platform and chat_id):
-            return []
-
         from hermes_cli import kanban_db as kb
-        from hermes_cli.kanban_swarm import latest_blackboard
+        from hermes_cli.kanban_swarm import find_active_swarms_for_session
 
         conn = kb.connect()
         try:
-            if session_key:
-                rows = conn.execute(
-                    "SELECT id FROM tasks WHERE origin_session_key = ? AND status != 'archived'",
-                    (session_key,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT id FROM tasks WHERE origin_platform = ? AND origin_chat_id = ? AND status != 'archived'",
-                    (platform, chat_id),
-                ).fetchall()
-
-            active = []
-            for row in rows:
-                root_id = row["id"]
-                topology = latest_blackboard(conn, root_id).get("topology")
-                if not isinstance(topology, dict):
-                    continue
-                synthesizer_id = str(topology.get("synthesizer_id") or "").strip()
-                if not synthesizer_id:
-                    continue
-                synth_row = conn.execute(
-                    "SELECT status FROM tasks WHERE id = ?", (synthesizer_id,)
-                ).fetchone()
-                if synth_row is not None and synth_row["status"] in ("done", "archived"):
-                    continue
-                active.append({
-                    "root_id": root_id,
-                    "synthesizer_id": synthesizer_id,
-                    "verifier_id": str(topology.get("verifier_id") or "").strip(),
-                    "worker_ids": [str(x) for x in topology.get("worker_ids", []) if x],
-                })
-            return active
+            return find_active_swarms_for_session(conn)
         finally:
             conn.close()
     except Exception:

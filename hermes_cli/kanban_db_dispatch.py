@@ -427,7 +427,7 @@ def _is_synthesizer_role(body: Optional[str]) -> bool:
 
 _SYNTHESIZER_TERMINATION_GRACE_SECONDS = 15
 _SYNTHESIZER_RETRY_BACKOFF_SECONDS = 30
-_SYNTHESIZER_OVERALL_DEADLINE_SECONDS = 660
+_SYNTHESIZER_OVERALL_DEADLINE_SECONDS = 3600
 
 
 def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:

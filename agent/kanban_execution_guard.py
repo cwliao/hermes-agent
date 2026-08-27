@@ -206,6 +206,63 @@ def _mutation_attempted(messages: Sequence[Mapping[str, Any]], current_user_idx:
     return False
 
 
+def _call_args(call: Mapping[str, Any]) -> Mapping[str, Any]:
+    function = call.get("function")
+    raw = function.get("arguments") if isinstance(function, Mapping) else call.get("arguments")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+    return raw if isinstance(raw, Mapping) else {}
+
+
+def _referenced_task_ids(args: Mapping[str, Any]) -> set[str]:
+    """Collect task ids a kanban_create/kanban_link call's arguments touch."""
+    ids: set[str] = set()
+    parents = args.get("parents")
+    if isinstance(parents, Sequence) and not isinstance(parents, (str, bytes)):
+        ids.update(str(item).strip() for item in parents if str(item).strip())
+    for key in ("parent_id", "child_id"):
+        value = args.get(key)
+        if value and str(value).strip():
+            ids.add(str(value).strip())
+    return ids
+
+
+def _swarm_topology_mutation_attempted(
+    messages: Sequence[Mapping[str, Any]],
+    current_user_idx: int,
+    active_swarms: Sequence[Mapping[str, Any]],
+) -> bool:
+    """True if this turn's kanban_create/kanban_link targets an active swarm's own nodes.
+
+    Mirrors ``tools/kanban_tools.py``'s ``_reject_in_flight_swarm_topology_mutation``
+    signal: a mutation is only in-scope for this guard if it structurally
+    references a worker/verifier/synthesizer id of a swarm still in flight in
+    this session, not merely "some mutation happened while some swarm exists".
+    """
+    if not active_swarms:
+        return False
+    topology_ids: set[str] = set()
+    for swarm in active_swarms:
+        topology_ids.add(swarm.get("synthesizer_id") or "")
+        topology_ids.add(swarm.get("verifier_id") or "")
+        topology_ids.update(swarm.get("worker_ids") or [])
+    topology_ids.discard("")
+    if not topology_ids:
+        return False
+    for message in messages[current_user_idx + 1 :]:
+        if not isinstance(message, Mapping):
+            continue
+        for call in _calls(message):
+            if _call_name(call) not in ("kanban_create", "kanban_link"):
+                continue
+            if _referenced_task_ids(_call_args(call)) & topology_ids:
+                return True
+    return False
+
+
 def _swarm_attempted(messages: Sequence[Mapping[str, Any]], current_user_idx: int) -> bool:
     for message in messages[current_user_idx + 1 :]:
         if isinstance(message, Mapping) and any(
@@ -265,6 +322,62 @@ def _has_control_escape(value: Any) -> bool:
     return "\x00" in text or re.search(r"\\0(?=[A-Za-z])", text) is not None
 
 
+def _find_active_swarms_for_session() -> list[dict[str, Any]]:
+    """Return active (non-terminal) swarm topologies belonging to the current session."""
+    try:
+        from gateway.session_context import resolve_notify_origin
+        origin = resolve_notify_origin()
+        session_key = (origin or {}).get("origin_session_key")
+        platform = (origin or {}).get("origin_platform")
+        chat_id = (origin or {}).get("origin_chat_id")
+
+        if not session_key and not (platform and chat_id):
+            return []
+
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_swarm import latest_blackboard
+
+        conn = kb.connect()
+        try:
+            if session_key:
+                rows = conn.execute(
+                    "SELECT id FROM tasks WHERE origin_session_key = ? AND status != 'archived'",
+                    (session_key,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id FROM tasks WHERE origin_platform = ? AND origin_chat_id = ? AND status != 'archived'",
+                    (platform, chat_id),
+                ).fetchall()
+
+            active = []
+            for row in rows:
+                root_id = row["id"]
+                topology = latest_blackboard(conn, root_id).get("topology")
+                if not isinstance(topology, dict):
+                    continue
+                synthesizer_id = str(topology.get("synthesizer_id") or "").strip()
+                if not synthesizer_id:
+                    continue
+                synth_row = conn.execute(
+                    "SELECT status FROM tasks WHERE id = ?", (synthesizer_id,)
+                ).fetchone()
+                if synth_row is not None and synth_row["status"] in ("done", "archived"):
+                    continue
+                active.append({
+                    "root_id": root_id,
+                    "synthesizer_id": synthesizer_id,
+                    "verifier_id": str(topology.get("verifier_id") or "").strip(),
+                    "worker_ids": [str(x) for x in topology.get("worker_ids", []) if x],
+                })
+            return active
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("kanban execution guard: active swarm probe failed", exc_info=True)
+        return []
+
+
 def try_finalization(
     agent: Any,
     messages: list[dict[str, Any]],
@@ -278,9 +391,28 @@ def try_finalization(
     valid_current_user = 0 <= current_user_idx < len(messages) and isinstance(current_user, Mapping)
     prose_trigger = valid_current_user and request_requires_four_lane_swarm(current_user.get("content"))
     swarm_trigger = valid_current_user and _swarm_attempted(messages, current_user_idx)
-    if not prose_trigger and not swarm_trigger:
+    active_swarms = _find_active_swarms_for_session() if valid_current_user else []
+    active_swarm_trigger = valid_current_user and _swarm_topology_mutation_attempted(
+        messages, current_user_idx, active_swarms
+    )
+    if not prose_trigger and not swarm_trigger and not active_swarm_trigger:
         agent._kanban_execution_guard_phase = ""
         return "pass"
+
+    if active_swarm_trigger and not prose_trigger and not swarm_trigger:
+        # Defense-in-depth: tools/kanban_tools.py's
+        # _reject_in_flight_swarm_topology_mutation should already have hard-
+        # rejected a kanban_create/kanban_link that structurally targets an
+        # active swarm's own worker/verifier/synthesizer nodes. This is the
+        # redundant net for the (should-be-unreachable) case where a
+        # topology-targeting mutation still reached a successful receipt.
+        agent._kanban_execution_guard_phase = "blocked"
+        final_msg["content"] = KANBAN_EXECUTION_BLOCKED
+        logger.warning(
+            "kanban_execution_guard decision=blocked "
+            "reason=swarm_topology_mutation_in_session"
+        )
+        return "blocked"
 
     failed_mutations = _failed_mutation_tools(messages, current_user_idx)
     if failed_mutations:
@@ -365,6 +497,7 @@ __all__ = [
     "KANBAN_EXECUTION_GUARD_SYNTHETIC",
     "KANBAN_EXECUTION_NUDGE",
     "KANBAN_EXECUTION_PENDING",
+    "_find_active_swarms_for_session",
     "request_requires_four_lane_swarm",
     "request_requires_transactional_delivery",
     "try_finalization",

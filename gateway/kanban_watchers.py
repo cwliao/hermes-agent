@@ -124,6 +124,134 @@ def _resolve_gateway_max_in_progress(kanban_cfg: dict, kb: Any):
     return kb.resolve_max_in_progress(
         kanban_cfg.get("max_in_progress"), warn=logger.warning,
     )
+_SWARM_SUPERVISOR_DEFAULT_INTERVAL = 30.0
+_SWARM_SUPERVISOR_MIN_INTERVAL = 15.0
+_SWARM_SUPERVISOR_SOURCE = "swarm_supervisor"
+
+
+def _swarm_topology_node_ids(swarm: dict[str, Any]) -> list[str]:
+    """Stable unique worker / verifier / synthesizer ids from a topology dict."""
+    ids: list[str] = []
+    ids.extend(str(x).strip() for x in (swarm.get("worker_ids") or []) if str(x).strip())
+    verifier_id = str(swarm.get("verifier_id") or "").strip()
+    if verifier_id:
+        ids.append(verifier_id)
+    synthesizer_id = str(swarm.get("synthesizer_id") or "").strip()
+    if synthesizer_id:
+        ids.append(synthesizer_id)
+    seen: set[str] = set()
+    out: list[str] = []
+    for node_id in ids:
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        out.append(node_id)
+    return out
+
+
+def _swarm_node_last_activity(row: sqlite3.Row) -> Optional[int]:
+    """Heartbeat if present, else the task's start/create timestamp.
+
+    There is no ``updated_at`` column; ``started_at`` is the status-change
+    stamp for a running attempt and ``created_at`` is the fallback when the
+    node has never started.
+    """
+    heartbeat = row["last_heartbeat_at"]
+    if heartbeat is not None:
+        return int(heartbeat)
+    started = row["started_at"]
+    if started is not None:
+        return int(started)
+    created = row["created_at"]
+    if created is not None:
+        return int(created)
+    return None
+
+
+def _swarm_node_runtime_budget(row: sqlite3.Row) -> int:
+    """Per-node runtime cap actually recorded on the task, else the lane default."""
+    raw = row["max_runtime_seconds"] if "max_runtime_seconds" in row.keys() else None
+    if raw is not None:
+        try:
+            budget = int(raw)
+        except (TypeError, ValueError):
+            budget = 0
+        if budget >= 1:
+            return budget
+    from hermes_cli.kanban_swarm import (
+        _default_worker_max_runtime_seconds,
+        extract_contract,
+    )
+
+    lane_id = None
+    body = row["body"] if "body" in row.keys() else None
+    contract = extract_contract(body) if body else None
+    if isinstance(contract, dict):
+        raw_lane = contract.get("expected_lane_id")
+        if raw_lane is not None:
+            lane_id = str(raw_lane).strip() or None
+    return int(_default_worker_max_runtime_seconds(lane_id))
+
+
+def _supervise_swarm_stalls(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+) -> int:
+    """Record stall diagnostics for overdue non-terminal swarm nodes.
+
+    Read-only on task status: always calls ``record_swarm_stall_diagnostic``
+    with ``block=False``. Returns the number of diagnostic calls made
+    (including no-op dedup hits).
+    """
+    from hermes_cli import kanban_db as kb
+
+    now_ts = int(now if now is not None else time.time())
+    recorded = 0
+    for swarm in kb.find_active_swarm_topologies(conn):
+        node_ids = _swarm_topology_node_ids(swarm)
+        if not node_ids:
+            continue
+        placeholders = ",".join("?" * len(node_ids))
+        rows = conn.execute(
+            f"SELECT id, status, last_heartbeat_at, started_at, created_at, "
+            f"max_runtime_seconds, body FROM tasks WHERE id IN ({placeholders})",
+            tuple(node_ids),
+        ).fetchall()
+        root_id = str(swarm.get("root_id") or "")
+        for row in rows:
+            if row["status"] in kb.TERMINAL_STATUSES:
+                continue
+            last_activity = _swarm_node_last_activity(row)
+            if last_activity is None:
+                continue
+            elapsed = now_ts - last_activity
+            budget = _swarm_node_runtime_budget(row)
+            if elapsed < budget:
+                continue
+            node_id = str(row["id"])
+            stall_key = f"swarm-stall:{root_id}:{node_id}:{last_activity}"
+            reason = (
+                f"Swarm node {node_id} in swarm {root_id} has no fresh "
+                f"heartbeat/activity for {elapsed}s (budget {budget}s)"
+            )
+            kb.record_swarm_stall_diagnostic(
+                conn,
+                node_id,
+                reason=reason,
+                stall_key=stall_key,
+                source=_SWARM_SUPERVISOR_SOURCE,
+                block=False,
+            )
+            recorded += 1
+            logger.debug(
+                "kanban swarm supervisor: stall on %s swarm=%s elapsed=%ss budget=%ss",
+                node_id,
+                root_id,
+                elapsed,
+                budget,
+            )
+    return recorded
 
 
 class GatewayKanbanWatchersMixin:
@@ -744,7 +872,119 @@ class GatewayKanbanWatchersMixin:
 
         self._release_kanban_dispatcher_lock()
 
+    def _kanban_swarm_supervisor_tick(self, *, now: Optional[int] = None) -> None:
+        """One read-only stall-detection pass over every board.
 
+        No-ops unless this process currently holds the dispatcher lock.
+        Never mutates task status.
+        """
+        if not self._owns_kanban_dispatcher_lock():
+            return
+        try:
+            from hermes_cli import kanban_db as _kb
+        except Exception:
+            logger.warning("kanban swarm supervisor: kanban_db not importable; skip tick")
+            return
+        try:
+            boards = _kb.list_boards(include_archived=False)
+        except Exception:
+            boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+        for board in boards:
+            slug = board.get("slug") or _kb.DEFAULT_BOARD
+            conn = None
+            try:
+                conn = _kb.connect(board=slug)
+                _supervise_swarm_stalls(conn, now=now)
+            except Exception:
+                logger.exception(
+                    "kanban swarm supervisor: tick failed on board %s", slug,
+                )
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+    async def _kanban_swarm_supervisor_watcher(self) -> None:
+        """Periodic read-only observer of active swarm node liveness.
+
+        Shares the dispatcher singleton lock: only the process that owns
+        ``.dispatcher.lock`` runs the stall scan. Each tick records
+        ``record_swarm_stall_diagnostic(..., block=False)`` for nodes whose
+        heartbeat/activity is older than the node's own
+        ``max_runtime_seconds`` (lane default if unset). Task status is
+        never mutated. Failures in one tick do not stop subsequent ticks.
+        """
+        try:
+            from hermes_cli.config import load_config as _load_config
+        except Exception:
+            logger.warning("kanban swarm supervisor: config loader unavailable; disabled")
+            return
+        env_override = os.environ.get("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "").strip().lower()
+        if env_override in {"0", "false", "no", "off"}:
+            logger.info(
+                "kanban swarm supervisor: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env"
+            )
+            return
+
+        try:
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning(
+                "kanban swarm supervisor: cannot load config (%s); disabled", exc,
+            )
+            return
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        if not kanban_cfg.get("dispatch_in_gateway", True):
+            logger.info(
+                "kanban swarm supervisor: disabled via config "
+                "kanban.dispatch_in_gateway=false"
+            )
+            return
+
+        try:
+            from hermes_cli import kanban_db as _kb  # noqa: F401
+        except Exception:
+            logger.warning(
+                "kanban swarm supervisor: kanban_db not importable; disabled"
+            )
+            return
+
+        try:
+            interval = float(
+                kanban_cfg.get(
+                    "swarm_supervisor_interval_seconds",
+                    _SWARM_SUPERVISOR_DEFAULT_INTERVAL,
+                )
+                or _SWARM_SUPERVISOR_DEFAULT_INTERVAL
+            )
+        except (ValueError, TypeError):
+            logger.warning(
+                "kanban swarm supervisor: invalid swarm_supervisor_interval_seconds=%r, "
+                "using default %.1f",
+                kanban_cfg.get("swarm_supervisor_interval_seconds"),
+                _SWARM_SUPERVISOR_DEFAULT_INTERVAL,
+            )
+            interval = _SWARM_SUPERVISOR_DEFAULT_INTERVAL
+        interval = max(interval, _SWARM_SUPERVISOR_MIN_INTERVAL)
+
+        logger.info(
+            "kanban swarm supervisor: embedded in gateway (interval=%.1fs)", interval
+        )
+        await asyncio.sleep(5)
+
+        while self._running:
+            try:
+                if self._owns_kanban_dispatcher_lock():
+                    await _to_thread_process_service(self._kanban_swarm_supervisor_tick)
+            except Exception:
+                logger.exception("kanban swarm supervisor: unexpected watcher error")
+
+            slept = 0.0
+            while slept < interval and self._running:
+                await asyncio.sleep(min(1.0, interval - slept))
+                slept += 1.0
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
 # Names external plugins imported from this module before the Sep 2026 decomposition.
 # Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).

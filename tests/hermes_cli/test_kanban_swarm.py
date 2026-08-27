@@ -4,6 +4,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.kanban_swarm import (
     DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS,
+    DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS,
     DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
     MULTI_AGENT_LANE_IDS,
     SwarmWorkerSpec,
@@ -1192,3 +1193,17 @@ class TestNoPartialGraphOnValidationFailure:
             assert kb.get_task(conn, created.synthesizer_id) is not None
         finally:
             conn.close()
+
+
+def test_synthesizer_runtime_and_retry_budget_reaches_overall_deadline():
+    """Regression guard for
+    docs/plans/2026-08-27-synthesizer-failure-limit-vs-deadline-001.md: the
+    synthesizer's create_task() call passes max_retries=2, so its per-attempt
+    runtime cap times that retry budget must stay >= kanban_db's overall
+    synthesizer deadline, or the generic 2-strike failure breaker trips
+    before the deadline check ever gets a chance to fire."""
+    synthesizer_max_retries = 2
+    assert (
+        DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS * synthesizer_max_retries
+        >= kb._SYNTHESIZER_OVERALL_DEADLINE_SECONDS
+    )

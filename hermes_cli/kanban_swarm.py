@@ -77,6 +77,15 @@ LANE_SKILL_IDS = {
 # affects every lane's per-step latency) needed up to ~220s+.
 DEFAULT_WORKER_MAX_RUNTIME_SECONDS = 1200
 DEFAULT_EXTERNAL_LANE_WORKER_MAX_RUNTIME_SECONDS = 1200
+# The synthesizer reads all workers' outputs plus a verifier pass and
+# produces a full synthesis after gpt-oss's typically heavy internal
+# reasoning -- measured throughput on this host (~25 tok/s single-stream)
+# means 1200s is not enough headroom for that combined workload, even
+# though it's fine for lane workers. Paired with max_retries=2 below, this
+# gives 1800 * 2 = 3600s of ceiling, matching kanban_db.py's
+# _SYNTHESIZER_OVERALL_DEADLINE_SECONDS so `deadline_exceeded` is actually
+# reachable (see docs/plans/2026-08-27-synthesizer-failure-limit-vs-deadline-001.md).
+DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS = 1800
 DEFAULT_GOAL_MAX_TURNS = 5
 
 _INTERNAL_LENGTH_MARKER_RE = re.compile(r"(?:（\s*\d+\s*字\s*）|\(\s*\d+\s*字\s*\))")
@@ -1023,7 +1032,8 @@ def _create_swarm_uncommitted(
         parents=[verifier],
         priority=priority,
         skills=["humanizer"],
-        max_runtime_seconds=DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
+        max_runtime_seconds=DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS,
+        max_retries=2,
         goal_mode=lane_mode,
         goal_max_turns=goal_max_turns if lane_mode else None,
         **common,

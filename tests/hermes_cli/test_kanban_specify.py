@@ -139,3 +139,47 @@ def test_cli_specify_tenant_filter(kanban_home, capsys):
         assert kb.get_task(conn, inside).status in {"todo", "ready"}
 
 
+def test_specify_refuses_task_with_contract(kanban_home):
+    contract_line = '[swarm:contract] {"role": "worker", "root_id": "t_root"}'
+    body_with_contract = f"Do work.\n{contract_line}"
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="swarm worker", body=body_with_contract, triage=True)
+
+    content = jsonlib.dumps({
+        "title": "Refined title",
+        "body": "Rewritten body",
+    })
+    p, _ = _patch_aux_client(content)
+    with p:
+        outcome = spec.specify_task(tid, author="ace")
+
+    assert outcome.ok is False
+    assert "refusing to auto-decompose" in outcome.reason
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "triage"
+        assert task.body == body_with_contract
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["stall_key"] == f"triage-refused:{tid}"
+        assert payload["source"] == "specify_task"
+
+
+def test_specify_refuses_task_with_malformed_contract(kanban_home):
+    body_with_malformed = "Do work.\n[swarm:contract] {bad-json"
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="swarm worker", body=body_with_malformed, triage=True)
+
+    outcome = spec.specify_task(tid, author="ace")
+    assert outcome.ok is False
+    assert "refusing to auto-decompose" in outcome.reason
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "triage"
+        assert task.body == body_with_malformed
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 1
+
+
+

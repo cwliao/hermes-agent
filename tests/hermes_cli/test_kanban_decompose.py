@@ -162,3 +162,98 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
     assert "not in triage" in outcome.reason
 
 
+def test_decompose_refuses_task_with_contract_fanout_true(kanban_home):
+    contract_line = '[swarm:contract] {"role": "verifier", "root_id": "t_root", "verifier_id": "t_v"}'
+    body_with_contract = f"Review work.\n{contract_line}"
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="swarm verifier", body=body_with_contract, triage=True)
+
+    llm_payload = jsonlib.dumps({
+        "fanout": True,
+        "rationale": "test split",
+        "tasks": [
+            {"title": "child 1", "body": "c1", "assignee": "researcher", "parents": []},
+        ],
+    })
+
+    patches = _patch_list_profiles(["orchestrator", "researcher"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is False
+    assert "refusing to auto-decompose" in outcome.reason
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "triage"
+        assert task.body == body_with_contract
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["stall_key"] == f"triage-refused:{tid}"
+        assert payload["source"] == "decompose_task"
+
+
+def test_decompose_refuses_task_with_contract_fanout_false(kanban_home):
+    contract_line = '[swarm:contract] {"role": "worker", "root_id": "t_root"}'
+    body_with_contract = f"Do work.\n{contract_line}"
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="swarm worker", body=body_with_contract, triage=True)
+
+    llm_payload = jsonlib.dumps({
+        "fanout": False,
+        "rationale": "single",
+        "title": "Rewritten title",
+        "body": "Rewritten body without contract",
+    })
+
+    patches = _patch_list_profiles(["orchestrator"])
+    for p in patches:
+        p.start()
+    try:
+        with _patch_aux_client(llm_payload), _patch_extra_body():
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is False
+    assert "refusing to auto-decompose" in outcome.reason
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "triage"
+        assert task.body == body_with_contract
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 1
+
+
+def test_decompose_refuses_task_with_malformed_contract(kanban_home):
+    body_with_malformed = "Do work.\n[swarm:contract] {invalid-json"
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="broken swarm", body=body_with_malformed, triage=True)
+
+    patches = _patch_list_profiles(["orchestrator"])
+    for p in patches:
+        p.start()
+    try:
+        outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is False
+    assert "refusing to auto-decompose" in outcome.reason
+    with kb.connect() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "triage"
+        assert task.body == body_with_malformed
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "verifier_gate_rejected"]
+        assert len(events) == 1
+
+
+

@@ -187,7 +187,7 @@ def test_synthesizer_unconfirmed_termination_blocks_without_retry(
 
 
 # ---------------------------------------------------------------------------
-# Scenario 4: overall 2700s deadline trips the breaker even with budget left
+# Scenario 4: overall 3600s deadline trips the breaker even with budget left
 # ---------------------------------------------------------------------------
 
 
@@ -195,18 +195,21 @@ def test_synthesizer_overall_deadline_forces_exhaustion(kanban_home, monkeypatch
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
     conn = kb.connect()
     try:
-        # max_retries=5 -- plenty of budget by count, but the first-ever
-        # attempt started 2800s ago (> the 2700s deadline), so this single
+        # max_retries=2 -- matching create_swarm()'s real synthesizer default
+        # (see kanban_swarm.py's DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS *
+        # max_retries=2 == this 3600s deadline) -- plenty of budget by count
+        # (only 1 of 2 failures gets counted below), but the first-ever
+        # attempt started 3700s ago (> the 3600s deadline), so this single
         # timeout must trip the breaker immediately.
-        tid = _make_synth_task(conn, max_retries=5)
-        _backdate_run_start(conn, tid, seconds_ago=2800)
+        tid = _make_synth_task(conn, max_retries=2)
+        _backdate_run_start(conn, tid, seconds_ago=3700)
 
         kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
 
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
         assert task.block_kind == "synthesizer_retry_exhausted"
-        # force_trip path: counted once, not compared against the 5-budget.
+        # force_trip path: counted once, not compared against the 2-budget.
         assert task.consecutive_failures == 1
 
         events = kb.list_events(conn, tid)
@@ -222,9 +225,9 @@ def test_synthesizer_deadline_checked_after_termination_polling(
     """The overall deadline includes time spent confirming worker death."""
     conn = kb.connect()
     try:
-        tid = _make_synth_task(conn, max_retries=5)
+        tid = _make_synth_task(conn, max_retries=2)
         loop_start = int(time.time())
-        started_at = loop_start - 2699
+        started_at = loop_start - 3599
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET started_at = ? WHERE id = ?",

@@ -132,8 +132,8 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 # the same generic ``blocked`` lane/UI, no new lifecycle state was added.
 #
 # ``synthesizer_retry_exhausted``: the synthesizer role's bounded retry
-# budget (max_retries=1, i.e. max_attempts=2) or its 2700s overall deadline
-# was exhausted. Terminal -- no later dispatcher tick may spawn another
+# budget (max_retries=2, i.e. the breaker trips on the 2nd failure) or its
+# 3600s overall deadline was exhausted. Terminal -- no later dispatcher tick may spawn another
 # attempt for this task (enforced by ``retry_not_before``/deadline checks
 # in ``enforce_max_runtime``, not by this constant alone).
 #
@@ -9089,9 +9089,16 @@ def _is_synthesizer_role(body: Optional[str]) -> bool:
 # worker/synthesizer max runtime was raised to 1200s, giving room for roughly
 # two full attempts plus backoff so the overall deadline spans retries rather
 # than tripping on the first attempt's timeout.
+#
+# Raised again from 2700s to 3600s to match kanban_swarm.py's
+# DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS (1800s) paired with the
+# synthesizer task's max_retries=2: 1800 * 2 = 3600s, so this deadline
+# stays reachable instead of being preempted by the generic 2-strike
+# failure breaker (see
+# docs/plans/2026-08-27-synthesizer-failure-limit-vs-deadline-001.md).
 _SYNTHESIZER_TERMINATION_GRACE_SECONDS = 15
 _SYNTHESIZER_RETRY_BACKOFF_SECONDS = 30
-_SYNTHESIZER_OVERALL_DEADLINE_SECONDS = 2700
+_SYNTHESIZER_OVERALL_DEADLINE_SECONDS = 3600
 
 
 def enforce_max_runtime(
@@ -9121,7 +9128,7 @@ def enforce_max_runtime(
        timeout that produced it — ``retry_not_before`` is set 30s out,
        enforced by ``claim_task``'s CAS (see its WHERE clause).
     3. The overall attempt budget is bounded by wall-clock time, not just
-       attempt count: if 2700s have elapsed since ``tasks.started_at``
+       attempt count: if 3600s have elapsed since ``tasks.started_at``
        (the first-ever attempt start — see its column comment), the
        breaker trips immediately regardless of ``consecutive_failures``,
        with ``block_kind="synthesizer_retry_exhausted"``.

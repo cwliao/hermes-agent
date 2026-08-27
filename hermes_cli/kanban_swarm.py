@@ -987,10 +987,10 @@ def _create_swarm_uncommitted(
         assignee=verifier_assignee,
         parents=worker_ids,
         priority=priority,
-        skills=["requesting-code-review"],
         goal_mode=lane_mode,
         goal_max_turns=goal_max_turns if lane_mode else None,
-        **common,
+        workspace_kind=workspace_kind,
+        workspace_path=workspace_path,
         max_runtime_seconds=DEFAULT_WORKER_MAX_RUNTIME_SECONDS,
     )
     synthesizer_body = (

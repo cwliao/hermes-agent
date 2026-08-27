@@ -14,6 +14,7 @@ from hermes_cli.kanban_swarm import (
     create_swarm,
     excuse_blocked_workers_below_quorum,
     extract_contract,
+    find_active_swarms_for_session,
     latest_blackboard,
     parse_worker_arg,
     post_blackboard_update,
@@ -1207,3 +1208,153 @@ def test_synthesizer_runtime_and_retry_budget_reaches_overall_deadline():
         DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS * synthesizer_max_retries
         >= kb._SYNTHESIZER_OVERALL_DEADLINE_SECONDS
     )
+
+
+def test_find_active_swarms_for_session_finds_in_flight_and_ignores_terminal(tmp_path):
+    """find_active_swarms_for_session finds swarms with non-terminal synthesizers,
+    and ignores completed or archived ones."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        # Swarm 1: active (synthesizer is todo)
+        s1 = create_swarm(
+            conn,
+            goal="Swarm 1 in flight",
+            workers=[SwarmWorkerSpec(profile="w1", title="W1", body="W1")],
+            verifier_assignee="v1",
+            synthesizer_assignee="s1",
+            origin={"origin_session_key": "sess-unit-1"},
+        )
+        active1 = find_active_swarms_for_session(conn, origin={"origin_session_key": "sess-unit-1"})
+        assert len(active1) == 1
+        assert active1[0]["root_id"] == s1.root_id
+        assert active1[0]["synthesizer_id"] == s1.synthesizer_id
+        assert active1[0]["status"] == "todo"
+
+        # Production create_swarm() dependency-gates the synthesizer on the
+        # verifier (and the verifier on the workers). complete_task() is a
+        # silent no-op (returns False, status stays 'todo') while any parent
+        # is non-terminal, so completing the synthesizer in isolation never
+        # marks the swarm done. Drive the real chain: workers -> verifier
+        # -> synthesizer. This swarm is non-lane-mode, so no contract
+        # metadata is required.
+        for worker_id in s1.worker_ids:
+            assert kb.complete_task(conn, worker_id, summary="done", result="res")
+        assert kb.complete_task(conn, s1.verifier_id, summary="verified", result="ok")
+        assert kb.complete_task(conn, s1.synthesizer_id, summary="done", result="res")
+        assert kb.get_task(conn, s1.synthesizer_id).status == "done"
+        assert len(find_active_swarms_for_session(conn, origin={"origin_session_key": "sess-unit-1"})) == 0
+
+        # Swarm 2: archived synthesizer -> not active
+        s2 = create_swarm(
+            conn,
+            goal="Swarm 2 archived",
+            workers=[SwarmWorkerSpec(profile="w2", title="W2", body="W2")],
+            verifier_assignee="v2",
+            synthesizer_assignee="s2",
+            origin={"origin_session_key": "sess-unit-2"},
+        )
+        kb.archive_task(conn, s2.synthesizer_id)
+        assert len(find_active_swarms_for_session(conn, origin={"origin_session_key": "sess-unit-2"})) == 0
+    finally:
+        conn.close()
+
+
+def test_find_active_swarms_for_session_ignores_corrupt_or_missing_synthesizer(tmp_path, caplog):
+    """When a candidate root references a missing/deleted synthesizer task,
+    it logs a warning and does NOT treat the swarm as perpetually active."""
+    import logging
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        s = create_swarm(
+            conn,
+            goal="Swarm to corrupt",
+            workers=[SwarmWorkerSpec(profile="w", title="W", body="W")],
+            verifier_assignee="v",
+            synthesizer_assignee="s",
+            origin={"origin_session_key": "sess-corrupt-001"},
+        )
+        # Delete synthesizer row to simulate corruption
+        conn.execute("DELETE FROM tasks WHERE id = ?", (s.synthesizer_id,))
+        conn.commit()
+
+        with caplog.at_level(logging.WARNING):
+            active = find_active_swarms_for_session(conn, origin={"origin_session_key": "sess-corrupt-001"})
+        assert active == []
+        assert any("missing synthesizer" in record.message for record in caplog.records)
+    finally:
+        conn.close()
+
+
+def test_create_swarm_atomic_recheck_blocks_duplicate_swarm_directly(tmp_path):
+    """Calling create_swarm directly when an active swarm is in flight for the
+    same session origin raises ValueError via the atomic transaction check."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        s1 = create_swarm(
+            conn,
+            goal="Direct swarm 1",
+            workers=[SwarmWorkerSpec(profile="w", title="W", body="W")],
+            verifier_assignee="v",
+            synthesizer_assignee="s",
+            origin={"origin_session_key": "sess-direct-001"},
+        )
+        assert s1.root_id is not None
+
+        with pytest.raises(ValueError) as exc_info:
+            create_swarm(
+                conn,
+                goal="Direct swarm 2 duplicate",
+                workers=[SwarmWorkerSpec(profile="w", title="W", body="W")],
+                verifier_assignee="v",
+                synthesizer_assignee="s",
+                origin={"origin_session_key": "sess-direct-001"},
+            )
+        assert "an active swarm is already in flight" in str(exc_info.value)
+        assert s1.root_id in str(exc_info.value)
+        assert s1.synthesizer_id in str(exc_info.value)
+    finally:
+        conn.close()
+
+
+def test_create_swarm_atomic_recheck_concurrent_race(tmp_path):
+    """Two concurrent create_swarm calls under the same session/origin result
+    in exactly one swarm created and one rejected with ValueError by the atomic
+    check inside write_txn."""
+    import concurrent.futures
+
+    db_file = tmp_path / "kanban_race.db"
+    init_conn = kb.connect(db_file)
+    init_conn.close()
+
+    results = []
+    errors = []
+
+    def _attempt():
+        thread_conn = kb.connect(db_file)
+        try:
+            created = create_swarm(
+                thread_conn,
+                goal="Race test swarm",
+                workers=[
+                    SwarmWorkerSpec(profile="default", title="W1", body="W1"),
+                ],
+                verifier_assignee="default",
+                synthesizer_assignee="default",
+                origin={"origin_session_key": "sess-race-001"},
+            )
+            results.append(created)
+        except ValueError as exc:
+            errors.append(exc)
+        finally:
+            thread_conn.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(_attempt)
+        f2 = executor.submit(_attempt)
+        f1.result()
+        f2.result()
+
+    assert len(results) == 1, f"Expected 1 success, got {len(results)}"
+    assert len(errors) == 1, f"Expected 1 error, got {len(errors)}"
+    assert "an active swarm is already in flight" in str(errors[0])
+

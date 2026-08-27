@@ -190,6 +190,21 @@ def specify_task(
     if task is None:
         return SpecifyOutcome(task_id, False, reason)
 
+    from hermes_cli.kanban_swarm import extract_contract, is_malformed_contract
+    contract = extract_contract(task.body)
+    if contract or is_malformed_contract(contract):
+        reason = (
+            "Task carries a [swarm:contract] marker; refusing to auto-decompose/"
+            "rewrite to avoid corrupting swarm state. Needs human triage."
+        )
+        with kb.connect_closing() as conn:
+            kb.record_swarm_stall_diagnostic(
+                conn, task_id, reason=reason,
+                stall_key=f"triage-refused:{task_id}",
+                source="specify_task", expected_status="triage",
+            )
+        return SpecifyOutcome(task_id, False, reason)
+
     raw, reason = _call_aux(
         "specify", task_id, aux_task="triage_specifier", system=_SYSTEM_PROMPT,
         user=_USER_TEMPLATE.format(**_task_prompt_fields(task)),

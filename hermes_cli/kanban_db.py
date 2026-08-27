@@ -2281,6 +2281,91 @@ def _append_event(
     )
 
 
+def _record_swarm_stall_diagnostic(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str,
+    stall_key: str,
+    source: str,
+    verifier_id: Optional[str] = None,
+    gate: Optional[str] = None,
+    expected_status: Optional[str] = None,
+    block: bool = False,
+) -> bool:
+    """Record one durable swarm-stall diagnostic inside an open transaction.
+
+    The event kind is intentionally stable so the normal Kanban event stream
+    and notifier can expose it.  ``stall_key`` makes the operation idempotent
+    across the dispatcher's frequent recompute ticks.  ``block`` is used by
+    the verifier gate; Fix A uses the same diagnostic path while leaving its
+    triage task untouched.
+    """
+    task_row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if task_row is None:
+        return False
+    if expected_status is not None and task_row["status"] != expected_status:
+        return False
+
+    if block and task_row["status"] in {"todo", "blocked"}:
+        if task_row["status"] != "blocked":
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', "
+                "last_failure_error = ?, "
+                "block_kind = COALESCE(block_kind, 'needs_input') "
+                "WHERE id = ? AND status = ?",
+                (reason[:500], task_id, task_row["status"]),
+            )
+
+    prior_rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'verifier_gate_rejected'",
+        (task_id,),
+    ).fetchall()
+    for prior in prior_rows:
+        try:
+            payload = json.loads(prior["payload"]) if prior["payload"] else {}
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict) and payload.get("stall_key") == stall_key:
+            return True
+
+    payload: dict[str, Any] = {
+        "reason": reason[:500],
+        "stall_key": stall_key,
+        "source": source,
+    }
+    if verifier_id is not None:
+        payload["verifier_id"] = str(verifier_id)
+    if gate is not None:
+        payload["gate"] = gate
+    _append_event(conn, task_id, "verifier_gate_rejected", payload)
+    return True
+
+
+def record_swarm_stall_diagnostic(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str,
+    stall_key: str,
+    source: str,
+    expected_status: Optional[str] = None,
+) -> bool:
+    """Persist a deduplicated swarm diagnostic without changing task state."""
+    with write_txn(conn):
+        return _record_swarm_stall_diagnostic(
+            conn,
+            task_id,
+            reason=reason,
+            stall_key=stall_key,
+            source=source,
+            expected_status=expected_status,
+        )
+
+
 def _end_run(
     conn: sqlite3.Connection, task_id: str, *, outcome: str, summary: Optional[str] = None,
     error: Optional[str] = None, metadata: Optional[dict] = None, status: Optional[str] = None,
@@ -2447,6 +2532,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
+    from hermes_cli.kanban_swarm import extract_contract, is_malformed_contract
+
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
@@ -2471,8 +2558,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                     "SELECT body FROM tasks WHERE id = ?", (task_id,)
                 ).fetchone()
                 if child_body and (child_body["body"] or "").splitlines():
-                    from hermes_cli import kanban_swarm as _kanban_swarm
-                    contract = _kanban_swarm.extract_contract(child_body["body"])
+                    contract = extract_contract(child_body["body"])
                     if contract and contract.get("role") == "synthesizer":
                         expected_verifier = contract.get("verifier_id")
                         verifier_ids = [
@@ -2484,32 +2570,102 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                         if verifier_ids != [str(expected_verifier)]:
                             continue
                         verifier_row = conn.execute(
-                            "SELECT body FROM tasks WHERE id = ?", (expected_verifier,)
+                            "SELECT status, body FROM tasks WHERE id = ?",
+                            (expected_verifier,),
                         ).fetchone()
-                        verifier_contract = (
-                            _kanban_swarm.extract_contract(verifier_row["body"])
-                            if verifier_row else None
-                        )
+                        # The dependency check above normally guarantees this,
+                        # but keep the status test explicit: a verifier that
+                        # is still running is an ordinary wait, not a stall.
+                        if verifier_row is None or verifier_row["status"] not in {
+                            "done", "archived",
+                        }:
+                            continue
+                        verifier_contract = extract_contract(verifier_row["body"])
                         verifier_run = conn.execute(
-                            "SELECT metadata FROM task_runs WHERE task_id = ? "
+                            "SELECT metadata, summary, error FROM task_runs WHERE task_id = ? "
                             "AND outcome = 'completed' ORDER BY id DESC LIMIT 1",
                             (expected_verifier,),
                         ).fetchone()
-                        try:
-                            verifier_metadata = (
-                                json.loads(verifier_run["metadata"])
-                                if verifier_run and verifier_run["metadata"] else {}
+                        diagnostic: Optional[str] = None
+                        condition: Optional[str] = None
+                        gate_value: Optional[str] = None
+                        if is_malformed_contract(verifier_contract):
+                            diagnostic = (
+                                "its contract is malformed: "
+                                + verifier_contract.reason
                             )
-                        except (TypeError, json.JSONDecodeError):
-                            verifier_metadata = {}
-                        if (
-                            not verifier_contract
-                            or verifier_contract.get("role") != "verifier"
-                            or verifier_contract.get("root_id") != contract.get("root_id")
-                            or verifier_metadata.get("role") != "verifier"
-                            or verifier_metadata.get("root_id") != contract.get("root_id")
-                            or verifier_metadata.get("gate") != "pass"
-                        ):
+                            condition = "verifier-contract-malformed"
+                        elif verifier_contract is None:
+                            diagnostic = "its contract is missing"
+                            condition = "verifier-contract-missing"
+                        elif verifier_contract.get("role") != "verifier":
+                            diagnostic = "its contract has a non-verifier role"
+                            condition = "verifier-contract-role-mismatch"
+                        elif verifier_contract.get("root_id") != contract.get("root_id"):
+                            diagnostic = "its contract root_id does not match the synthesizer"
+                            condition = "verifier-contract-root-mismatch"
+                        elif verifier_run is None or not verifier_run["metadata"]:
+                            diagnostic = "its completion metadata is missing"
+                            condition = "verifier-metadata-missing"
+                        else:
+                            try:
+                                verifier_metadata = json.loads(verifier_run["metadata"])
+                            except (TypeError, json.JSONDecodeError):
+                                verifier_metadata = None
+                            if not isinstance(verifier_metadata, dict):
+                                diagnostic = "its completion metadata is malformed"
+                                condition = "verifier-metadata-malformed"
+                            elif verifier_metadata.get("role") != "verifier":
+                                diagnostic = "its completion metadata has a non-verifier role"
+                                condition = "verifier-metadata-role-mismatch"
+                            elif verifier_metadata.get("root_id") != contract.get("root_id"):
+                                diagnostic = "its completion metadata root_id does not match the synthesizer"
+                                condition = "verifier-metadata-root-mismatch"
+                            else:
+                                raw_gate = verifier_metadata.get("gate")
+                                gate_value = str(raw_gate) if raw_gate is not None else None
+                                # Unreachable via kanban_complete today:
+                                # validate_completion() already rejects any
+                                # verifier completion whose gate is not
+                                # "pass". Kept as defense-in-depth if a
+                                # completed run is written some other way.
+                                if raw_gate != "pass":
+                                    detail = (
+                                        verifier_run["summary"]
+                                        or verifier_metadata.get("reason")
+                                        or verifier_run["error"]
+                                    )
+                                    detail_text = (
+                                        f": {str(detail).strip()[:300]}"
+                                        if detail and str(detail).strip()
+                                        else ""
+                                    )
+                                    displayed_gate = (
+                                        repr(raw_gate)
+                                        if raw_gate is not None else "missing"
+                                    )
+                                    diagnostic = (
+                                        f"it reported gate={displayed_gate}"
+                                        + detail_text
+                                    )
+                                    condition = f"verifier-gate-{gate_value or 'missing'}"
+                        if diagnostic is not None and condition is not None:
+                            reason = (
+                                f"Verifier {expected_verifier} completed but "
+                                f"{diagnostic}"
+                            )
+                            _record_swarm_stall_diagnostic(
+                                conn,
+                                task_id,
+                                reason=reason,
+                                stall_key=(
+                                    f"verifier:{expected_verifier}:{condition}"
+                                ),
+                                source="recompute_ready",
+                                verifier_id=str(expected_verifier),
+                                gate=gate_value,
+                                block=True,
+                            )
                             continue
                 resume_status = _resume_status_from_events(conn, task_id)
                 if cur_status == "blocked":
@@ -4044,6 +4200,24 @@ def specify_triage_task(
         ).fetchone()
         if existing is None:
             return False
+        from hermes_cli.kanban_swarm import extract_contract, is_malformed_contract
+
+        contract = extract_contract(existing["body"])
+        if contract or is_malformed_contract(contract):
+            reason = (
+                "Task carries a [swarm:contract] marker; "
+                "refusing to auto-decompose/rewrite to avoid corrupting swarm state. "
+                "Needs human triage."
+            )
+            _record_swarm_stall_diagnostic(
+                conn,
+                task_id,
+                reason=reason,
+                stall_key=f"triage-refused:{task_id}",
+                source="specify_triage_task",
+                expected_status="triage",
+            )
+            return False
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
         changed_fields: list[str] = []
@@ -4142,10 +4316,24 @@ def decompose_triage_task(
     now = int(time.time())
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
-            "FROM tasks WHERE id = ?", (task_id,),
+            "SELECT id, status, tenant, workspace_kind, workspace_path, body "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
+            return None
+        from hermes_cli.kanban_swarm import extract_contract, is_malformed_contract
+        contract = extract_contract(root_row["body"])
+        if contract or is_malformed_contract(contract):
+            reason = (
+                "Task carries a [swarm:contract] marker; refusing to auto-decompose/"
+                "rewrite to avoid corrupting swarm state. Needs human triage."
+            )
+            _record_swarm_stall_diagnostic(
+                conn, task_id, reason=reason,
+                stall_key=f"triage-refused:{task_id}",
+                source="decompose_triage_task", expected_status="triage",
+            )
             return None
         child_ids = [
             _insert_decomposed_child(conn, task_id, root_row, child, author, now)

@@ -308,6 +308,21 @@ def decompose_task(
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
 
+    from hermes_cli.kanban_swarm import extract_contract, is_malformed_contract
+    contract = extract_contract(task.body)
+    if contract or is_malformed_contract(contract):
+        reason = (
+            "Task carries a [swarm:contract] marker; refusing to auto-decompose/"
+            "rewrite to avoid corrupting swarm state. Needs human triage."
+        )
+        with kb.connect_closing() as conn:
+            kb.record_swarm_stall_diagnostic(
+                conn, task_id, reason=reason,
+                stall_key=f"triage-refused:{task_id}",
+                source="decompose_task", expected_status="triage",
+            )
+        return DecomposeOutcome(task_id, False, reason)
+
     routing = _load_routing()
     raw, reason = _call_aux(
         "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,

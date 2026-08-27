@@ -1261,6 +1261,37 @@ def test_find_active_swarms_for_session_finds_in_flight_and_ignores_terminal(tmp
         conn.close()
 
 
+def test_find_active_swarm_topologies_is_board_wide_and_skips_terminal(tmp_path):
+    """Board-wide helper returns in-flight swarm topology and ignores a
+    synthesizer that has reached TERMINAL_STATUSES."""
+    conn = kb.connect(tmp_path / "kanban.db")
+    try:
+        s1 = create_swarm(
+            conn,
+            goal="Board-wide active swarm",
+            workers=[SwarmWorkerSpec(profile="w1", title="W1", body="W1")],
+            verifier_assignee="v1",
+            synthesizer_assignee="s1",
+        )
+        s2 = create_swarm(
+            conn,
+            goal="Board-wide terminal swarm",
+            workers=[SwarmWorkerSpec(profile="w2", title="W2", body="W2")],
+            verifier_assignee="v2",
+            synthesizer_assignee="s2",
+        )
+        kb.archive_task(conn, s2.synthesizer_id)
+
+        active = kb.find_active_swarm_topologies(conn)
+        assert [row["root_id"] for row in active] == [s1.root_id]
+        assert active[0]["synthesizer_id"] == s1.synthesizer_id
+        assert active[0]["verifier_id"] == s1.verifier_id
+        assert active[0]["worker_ids"] == s1.worker_ids
+        assert active[0]["synthesizer_status"] not in kb.TERMINAL_STATUSES
+    finally:
+        conn.close()
+
+
 def test_find_active_swarms_for_session_ignores_corrupt_or_missing_synthesizer(tmp_path, caplog):
     """When a candidate root references a missing/deleted synthesizer task,
     it logs a warning and does NOT treat the swarm as perpetually active."""

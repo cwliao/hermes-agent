@@ -13664,6 +13664,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # simply don't use kanban; this loop becomes a no-op.
         self._spawn_supervised(self._kanban_dispatcher_watcher, "kanban_dispatcher_watcher")
 
+        # Read-only swarm stall observer. Shares the dispatcher lock (no new
+        # lock file); ticks no-op unless this process currently holds it.
+        self._spawn_supervised(
+            self._kanban_swarm_supervisor_watcher, "kanban_swarm_supervisor_watcher"
+        )
+
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(

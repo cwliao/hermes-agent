@@ -2684,6 +2684,9 @@ DEFAULT_CONFIG = {
         # Seconds between dispatcher ticks (idle or not). Lower = snappier
         # pickup of newly-ready tasks; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
+        # Seconds between swarm-supervisor ticks (read-only stall diagnostics).
+        # Clamped to a 15s floor at runtime. Unset uses the 30s default.
+        "swarm_supervisor_interval_seconds": 30,
         # Auto-block after this many consecutive non-success attempts for the
         # same task/profile (spawn_failed, timed_out, or crashed). Reassignment
         # resets the streak for the new profile.

@@ -12,7 +12,9 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import logging
+import math
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, NamedTuple, Optional
@@ -756,6 +758,110 @@ async def _run_analysis(
                     logger.warning("Could not delete temporary file: %s", cleanup_error, exc_info=True)
 
 
+async def _ensure_vision_service_ready() -> None:
+    """Wake and health-check an optional on-demand auxiliary vision backend."""
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        config = load_config()
+        vision_cfg = cfg_get(config, "auxiliary", "vision", default={})
+    except Exception:
+        return
+    if not isinstance(vision_cfg, dict):
+        return
+
+    health_url = vision_cfg.get("on_demand_health_url")
+    start_script = vision_cfg.get("on_demand_start_script")
+    if not health_url and not start_script:
+        return
+    if bool(health_url) != bool(start_script):
+        logger.warning(
+            "auxiliary.vision on-demand config is incomplete (on_demand_health_url "
+            "set=%s, on_demand_start_script set=%s); skipping pre-flight",
+            bool(health_url), bool(start_script),
+        )
+        return
+
+    raw_timeout = vision_cfg.get("on_demand_timeout")
+    if raw_timeout is None:
+        budget = 150.0
+    else:
+        try:
+            budget = float(raw_timeout)
+        except (TypeError, ValueError, OverflowError):
+            logger.warning(
+                "Invalid auxiliary.vision.on_demand_timeout %r; using default 150.0s.",
+                raw_timeout,
+            )
+            budget = 150.0
+        else:
+            if not math.isfinite(budget) or budget < 0:
+                logger.warning(
+                    "Invalid auxiliary.vision.on_demand_timeout %r; using default 150.0s.",
+                    raw_timeout,
+                )
+                budget = 150.0
+
+    deadline = time.monotonic() + budget
+
+    async def _check_health() -> bool:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=min(5.0, remaining)) as client:
+                response = await client.get(health_url)
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    if await _check_health():
+        return
+
+    script_path = os.path.expandvars(os.path.expanduser(str(start_script)))
+    subprocess_task = None
+    try:
+        if os.path.isfile(script_path) and os.access(script_path, os.X_OK):
+            logger.info("Vision service not ready; starting it via %s", script_path)
+
+            async def _run_start_script() -> None:
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        script_path,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await process.wait()
+                except Exception:
+                    logger.warning("Vision on-demand start script failed to launch", exc_info=True)
+
+            subprocess_task = asyncio.create_task(_run_start_script())
+            await asyncio.sleep(0)
+        else:
+            logger.warning(
+                "auxiliary.vision.on_demand_start_script %r is not executable; "
+                "polling health until timeout.",
+                script_path,
+            )
+
+        while time.monotonic() < deadline:
+            if await _check_health():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(4.0, remaining))
+    finally:
+        if subprocess_task is not None and not subprocess_task.done():
+            subprocess_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await subprocess_task
+
+    raise ConnectionError(
+        f"Vision service at {health_url} did not become ready within "
+        f"{budget:.0f}s (auxiliary.vision.on_demand_timeout)."
+    )
+
+
 async def vision_analyze_tool(
     image_url: str, user_prompt: str, model: str = None,
     task_id: Optional[str] = None, region: Optional[list] = None) -> str:
@@ -780,6 +886,7 @@ async def vision_analyze_tool(
         logger.info("Processing image with vision model...")
         call_kwargs = _aux_call_kwargs(messages, model, 120.0)
         _load_auxiliary_client()
+        await _ensure_vision_service_ready()
         try:
             response = await async_call_llm(**call_kwargs)
         except Exception as _api_err:
@@ -999,6 +1106,7 @@ async def video_analyze_tool(
         debug_call_data["video_size_bytes"] = video_size_bytes
         messages = _media_messages(prompt, "video_url", video_data_url)
         call_kwargs = _aux_call_kwargs(messages, model, 180.0, min_timeout=180.0)
+        await _ensure_vision_service_ready()
         analysis = await _call_vision_llm(call_kwargs, "Empty video response, retrying once")
         return analysis, None
     return await _run_analysis("video", video_url, user_prompt, model, stage)

@@ -328,6 +328,102 @@ def _reject_downstream_swarm_mutation(tool_name: str) -> Optional[str]:
     return None
 
 
+def _reject_in_flight_swarm_topology_mutation(
+    conn: Any,
+    candidate_task_ids: Sequence[Any],
+    tool_name: str,
+) -> Optional[str]:
+    """Reject attaching new work directly to an in-flight swarm's internal nodes.
+
+    A conversational orchestrator or worker must not bypass or work around an
+    active swarm by parenting or linking new tasks to its internal worker,
+    verifier, or synthesizer nodes.
+    """
+    if not candidate_task_ids:
+        return None
+
+    target_ids = {str(tid).strip() for tid in candidate_task_ids if str(tid).strip()}
+    if not target_ids:
+        return None
+
+    from gateway.session_context import resolve_notify_origin
+    origin = resolve_notify_origin()
+    if not origin:
+        _self_tid = os.environ.get("HERMES_KANBAN_TASK")
+        if _self_tid:
+            from hermes_cli import kanban_db as kb
+            _self_task = kb.get_task(conn, _self_tid)
+            if _self_task is not None and _self_task.origin_platform:
+                origin = {
+                    "origin_platform": _self_task.origin_platform,
+                    "origin_chat_id": _self_task.origin_chat_id,
+                    "origin_thread_id": _self_task.origin_thread_id,
+                    "origin_user_id": _self_task.origin_user_id,
+                    "origin_session_key": _self_task.origin_session_key,
+                    "origin_profile": _self_task.origin_profile,
+                }
+
+    session_key = (origin or {}).get("origin_session_key")
+    platform = (origin or {}).get("origin_platform")
+    chat_id = (origin or {}).get("origin_chat_id")
+
+    if not session_key and not (platform and chat_id):
+        return None
+
+    if session_key:
+        candidate_roots = conn.execute(
+            "SELECT id FROM tasks WHERE origin_session_key = ? AND status != 'archived'",
+            (session_key,),
+        ).fetchall()
+    else:
+        candidate_roots = conn.execute(
+            "SELECT id FROM tasks WHERE origin_platform = ? AND origin_chat_id = ? AND status != 'archived'",
+            (platform, chat_id),
+        ).fetchall()
+
+    if not candidate_roots:
+        return None
+
+    for row in candidate_roots:
+        root_id = row["id"]
+        topology = _KS.latest_blackboard(conn, root_id).get("topology")
+        if not isinstance(topology, dict):
+            continue
+        synthesizer_id = str(topology.get("synthesizer_id") or "").strip()
+        if not synthesizer_id:
+            continue
+
+        synth_row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (synthesizer_id,)
+        ).fetchone()
+        if synth_row is not None and synth_row["status"] in ("done", "archived"):
+            continue
+
+        worker_ids = [str(x).strip() for x in topology.get("worker_ids", []) if str(x).strip()]
+        verifier_id = str(topology.get("verifier_id") or "").strip()
+
+        internal_nodes = set(worker_ids)
+        if verifier_id:
+            internal_nodes.add(verifier_id)
+        if synthesizer_id:
+            internal_nodes.add(synthesizer_id)
+
+        matched = target_ids & internal_nodes
+        if matched:
+            matched_id = sorted(matched)[0]
+            return tool_error(
+                f"{tool_name} refused: task '{matched_id}' is an internal node "
+                f"(worker/verifier/synthesizer) of an in-flight swarm "
+                f"(root '{root_id}', synthesizer '{synthesizer_id}'). "
+                f"Do not create substitute or workaround tasks for in-flight swarm work; "
+                f"use kanban_show on the synthesizer '{synthesizer_id}' to inspect its status "
+                f"or wait for the swarm to complete."
+            )
+
+    return None
+
+
+
 def _connect(board: Optional[str] = None):
     """Import + connect lazily so the module imports cleanly in non-kanban
     contexts (e.g. test rigs that import every tool module).
@@ -1768,6 +1864,12 @@ def _handle_create(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            if parents:
+                guard = _reject_in_flight_swarm_topology_mutation(
+                    conn, parents, "kanban_create"
+                )
+                if guard:
+                    return guard
             # KANBAN-ASSIGNEE-AVAILABILITY-FAIL-CLOSED-001: a model must not
             # create a ready card that the dispatcher or an external terminal
             # can never claim.  Profile existence is not inferred from a
@@ -2316,6 +2418,11 @@ def _handle_link(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            guard = _reject_in_flight_swarm_topology_mutation(
+                conn, [parent_id, child_id], "kanban_link"
+            )
+            if guard:
+                return guard
             kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
             return _ok(parent_id=parent_id, child_id=child_id)
         finally:

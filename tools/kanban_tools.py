@@ -1608,6 +1608,19 @@ def _handle_swarm(args: dict, **kw) -> str:
                     "origin_session_key": self_task.origin_session_key,
                     "origin_profile": self_task.origin_profile,
                 }
+        active_swarms = ks.find_active_swarms_for_session(conn, origin=origin)
+        if active_swarms:
+            active = active_swarms[0]
+            root_id = active["root_id"]
+            synth_id = active["synthesizer_id"]
+            status = active.get("status") or active.get("synthesizer_status") or "in-flight"
+            return tool_error(
+                "kanban_swarm refused: an active swarm is already in flight for this session "
+                f"(root '{root_id}', synthesizer '{synth_id}', status '{status}'). "
+                "Do not create a new swarm or substitute task; "
+                f"use kanban_show on the synthesizer '{synth_id}' to inspect its status "
+                "or wait for the swarm to complete."
+            )
         created = ks.create_swarm(
             conn,
             goal=str(goal),

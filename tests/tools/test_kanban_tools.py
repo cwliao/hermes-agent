@@ -1934,6 +1934,75 @@ def _lane_bound_workers():
     ]
 
 
+def _complete_lane_swarm(conn, created):
+    """Drive a lane-mode swarm through the production completion chain.
+
+    ``create_swarm()`` with ``lane_id`` stamps a ``[swarm:contract]`` on
+    every worker/verifier/synthesizer. ``complete_task()`` then enforces
+    that contract via ``validate_completion`` and also refuses to complete
+    a child while any parent is non-terminal. Completing only the
+    synthesizer with a bare summary therefore either raises or silently
+    no-ops; this helper matches the metadata shape used by the existing
+    lane-mode tests in ``tests/hermes_cli/test_kanban_swarm.py``.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_swarm import extract_contract
+
+    for worker_id in created["worker_ids"]:
+        worker = kb.get_task(conn, worker_id)
+        contract = extract_contract(worker.body)
+        assert contract is not None, f"worker {worker_id} is missing a swarm contract"
+        assert kb.complete_task(
+            conn,
+            worker_id,
+            summary="Worker done",
+            result="Output",
+            metadata={
+                "role": "worker",
+                "root_id": contract["root_id"],
+                "lane_id": contract["expected_lane_id"],
+                "preflight_skill_id": contract.get("preflight_skill_id") or "",
+                "outcome": "completed",
+                "verified_clean": True,
+            },
+        ), f"worker {worker_id} stayed {kb.get_task(conn, worker_id).status}"
+
+    verifier = kb.get_task(conn, created["verifier_id"])
+    vcontract = extract_contract(verifier.body)
+    assert vcontract is not None
+    expected = vcontract["expected_lane_count"]
+    assert kb.complete_task(
+        conn,
+        created["verifier_id"],
+        summary="Verifier done",
+        result="Verified",
+        metadata={
+            "role": "verifier",
+            "root_id": vcontract["root_id"],
+            "gate": "pass",
+            "expected_lane_count": expected,
+            "verified_lane_count": expected,
+        },
+    ), f"verifier stayed {kb.get_task(conn, created['verifier_id']).status}"
+
+    synth = kb.get_task(conn, created["synthesizer_id"])
+    scontract = extract_contract(synth.body)
+    assert scontract is not None
+    assert kb.complete_task(
+        conn,
+        created["synthesizer_id"],
+        summary="Synth done",
+        result="最終交付內容。",
+        metadata={
+            "role": "synthesizer",
+            "root_id": scontract["root_id"],
+            "outcome": "completed",
+            "result_present": True,
+        },
+    ), f"synthesizer stayed {kb.get_task(conn, created['synthesizer_id']).status}"
+    assert kb.get_task(conn, created["synthesizer_id"]).status == "done"
+
+
 def test_swarm_happy_path_fills_in_skill_and_profile(monkeypatch, worker_env):
     """The property this whole ticket is about: the tool fills in the
     correct preflight_skill_id per lane and a real profile, so the model
@@ -2399,3 +2468,199 @@ def test_link_allows_unrelated_tasks(monkeypatch, worker_env):
     })
     d = json.loads(out)
     assert d.get("ok") is True, d
+
+
+def test_swarm_rejected_when_active_swarm_in_flight(monkeypatch, worker_env):
+    """kanban_swarm is rejected when an active swarm is already in flight for the session."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-duplicate-swarm-001")
+    from tools import kanban_tools as kt
+
+    out1 = kt._handle_swarm({
+        "goal": "First swarm in flight",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d1 = json.loads(out1)
+    assert d1.get("ok") is True, d1
+    root_id = d1["root_id"]
+    synth_id = d1["synthesizer_id"]
+
+    out2 = kt._handle_swarm({
+        "goal": "Second duplicate swarm attempt",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d2 = json.loads(out2)
+    assert "error" in d2, d2
+    assert "refused" in d2["error"]
+    assert root_id in d2["error"]
+    assert synth_id in d2["error"]
+    assert "kanban_show" in d2["error"]
+
+
+def test_swarm_allowed_when_prior_swarm_synthesizer_is_done(monkeypatch, worker_env):
+    """kanban_swarm succeeds when the only prior swarm's synthesizer is done."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-prior-done-001")
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out1 = kt._handle_swarm({
+        "goal": "First swarm to complete",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d1 = json.loads(out1)
+    assert d1.get("ok") is True, d1
+
+    conn = kb.connect()
+    try:
+        _complete_lane_swarm(conn, d1)
+    finally:
+        conn.close()
+
+    out2 = kt._handle_swarm({
+        "goal": "Second swarm after first completed",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d2 = json.loads(out2)
+    assert d2.get("ok") is True, d2
+
+
+def test_swarm_allowed_when_prior_swarm_synthesizer_is_archived(monkeypatch, worker_env):
+    """kanban_swarm succeeds when the prior swarm's synthesizer is archived."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-prior-archived-001")
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out1 = kt._handle_swarm({
+        "goal": "First swarm to archive",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d1 = json.loads(out1)
+    assert d1.get("ok") is True, d1
+
+    conn = kb.connect()
+    try:
+        kb.archive_task(conn, d1["synthesizer_id"])
+    finally:
+        conn.close()
+
+    out2 = kt._handle_swarm({
+        "goal": "Second swarm after synth archived",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d2 = json.loads(out2)
+    assert d2.get("ok") is True, d2
+
+
+def test_swarm_root_done_but_synthesizer_not_done_is_rejected(monkeypatch, worker_env):
+    """Root-vs-synthesizer distinction: create_swarm marks root done immediately,
+    but kanban_swarm must still reject duplicate creation while synthesizer is in-flight."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-root-done-synth-todo-001")
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out1 = kt._handle_swarm({
+        "goal": "First swarm with root done immediately",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d1 = json.loads(out1)
+    assert d1.get("ok") is True, d1
+
+    # Verify that root is done, but synthesizer is in 'todo'
+    conn = kb.connect()
+    try:
+        root_task = kb.get_task(conn, d1["root_id"])
+        synth_task = kb.get_task(conn, d1["synthesizer_id"])
+        assert root_task.status == "done"
+        assert synth_task.status == "todo"
+    finally:
+        conn.close()
+
+    out2 = kt._handle_swarm({
+        "goal": "Second duplicate swarm attempt",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d2 = json.loads(out2)
+    assert "error" in d2, d2
+    assert "refused" in d2["error"]
+    assert d1["root_id"] in d2["error"]
+
+
+def test_swarm_allowed_on_different_board(monkeypatch, worker_env):
+    """An active swarm on board A does not block a new swarm on board B in the same session."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-different-board-001")
+    from tools import kanban_tools as kt
+
+    out_a = kt._handle_swarm({
+        "board": "board-alpha",
+        "goal": "Swarm on board alpha",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    da = json.loads(out_a)
+    assert da.get("ok") is True, da
+
+    out_b = kt._handle_swarm({
+        "board": "board-beta",
+        "goal": "Swarm on board beta",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    db = json.loads(out_b)
+    assert db.get("ok") is True, db
+
+
+def test_swarm_missing_synthesizer_row_does_not_block_new_swarm(monkeypatch, worker_env):
+    """A corrupted swarm with a missing synthesizer row is treated as non-active
+    and does not perpetually block subsequent swarm creations."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-test-missing-synth-001")
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    out1 = kt._handle_swarm({
+        "goal": "Swarm whose synth will be deleted",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d1 = json.loads(out1)
+    assert d1.get("ok") is True, d1
+
+    conn = kb.connect()
+    try:
+        conn.execute("DELETE FROM tasks WHERE id = ?", (d1["synthesizer_id"],))
+        conn.commit()
+    finally:
+        conn.close()
+
+    out2 = kt._handle_swarm({
+        "goal": "New swarm despite corrupted prior swarm",
+        "workers": _lane_bound_workers(),
+        "verifier_assignee": "default",
+        "synthesizer_assignee": "default",
+    })
+    d2 = json.loads(out2)
+    assert d2.get("ok") is True, d2
+

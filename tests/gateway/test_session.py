@@ -1541,19 +1541,28 @@ class TestGatewaySessionDbRecovery:
         assert "child" not in store._dirty_transcripts
 
 
-    def test_fts_corruption_error_does_not_match_false_positives(self):
-        """Only errors with explicit FTS provenance may trigger rebuilding."""
+    def test_fts_corruption_error_requires_fts_provenance(self):
+        """_is_fts_corruption_error must not treat a generic malformed-image
+        error as FTS-scoped (#97940): bare SQLITE_CORRUPT can mean canonical
+        B-tree damage. It must also not match unrelated error strings
+        containing 'fts' as a substring (e.g. 'shifts', 'gifts')."""
+        import sqlite3
+
+        # Generic structural corruption: no FTS provenance -> fail closed.
         assert not SessionStore._is_fts_corruption_error(
             RuntimeError("database disk image is malformed")
         )
         assert not SessionStore._is_fts_corruption_error(
-            RuntimeError("malformed database schema")
+            sqlite3.DatabaseError("database disk image is malformed")
         )
+        # FTS-scoped errors remain eligible for the one-shot rebuild.
         assert SessionStore._is_fts_corruption_error(
             RuntimeError("no such table: messages_fts")
         )
         assert SessionStore._is_fts_corruption_error(
-            RuntimeError('fts5: corrupt structure record for table "messages_fts"')
+            sqlite3.DatabaseError(
+                'fts5: corrupt structure record for table "messages_fts"'
+            )
         )
         assert not SessionStore._is_fts_corruption_error(
             RuntimeError("shifts were applied")
@@ -1647,4 +1656,3 @@ class TestGatewayRoutingTable:
         recovered = restarted.get_or_create_session(self._source())
         assert recovered.session_id == entry.session_id
         restarted._db.close()
-

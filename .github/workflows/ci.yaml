@@ -166,6 +166,11 @@ jobs:
     needs: detect
     uses: ./.github/workflows/infographic-check.yml
 
+  profile-artifact-check:
+    name: Profile artifact check
+    needs: detect
+    uses: ./.github/workflows/profile-artifact-check.yml
+
   lockfile-diff:
     name: package-lock.json diff
     needs: detect
@@ -257,6 +262,7 @@ jobs:
       - lockfile-diff
       - docker-lint
       - windows-wrapper-tests
+      - profile-artifact-check
       - supply-chain
       - review-labels
       - osv-scanner

@@ -130,6 +130,9 @@ _NAMECARD_NOTION_API_BASE = "https://api.notion.com/v1"
 _NAMECARD_NOTION_VERSION = "2025-09-03"
 _NAMECARD_NOTION_DATA_SOURCE_ID = "c13e29d0-66e6-4ec0-9835-39a788617fa3"
 _NAMECARD_GDRIVE_DIR = Path("/mnt/gdrive/AI/namecards")
+# The correction pointer is intentionally ephemeral: it is a convenience for
+# correcting the card just saved in this chat, not a durable record index.
+_NAMECARD_CORRECTION_TTL_SECS = 30 * 60
 _NAMECARD_FIELDS = (
     "姓名",
     "公司名稱",
@@ -18707,6 +18710,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if pending_last30days_result is not None:
             return pending_last30days_result
 
+        pending_namecard_result = await self._handle_pending_namecard_correction(event)
+        if pending_namecard_result is not None:
+            return pending_namecard_result
+
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
         # forwarded it to the user; now the user's reply goes back via
@@ -27825,7 +27832,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if normalized == "news":
             reply_text = await self._format_news_ocr_reply(ocr_text)
         elif normalized == "business_card":
-            reply_text = await self._process_business_card_ocr(ocr_text, image_paths)
+            reply_text = await self._process_business_card_ocr(
+                ocr_text, image_paths, source=source
+            )
         else:
             reply_text = self._format_tesseract_image_ocr_reply(ocr_text, mode=normalized)
         await self._deliver_direct_image_ocr_reply(
@@ -27836,7 +27845,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return ""
 
     async def _process_business_card_ocr(
-        self, ocr_text: str, image_paths: List[str]
+        self,
+        ocr_text: str,
+        image_paths: List[str],
+        *,
+        source: Optional[SessionSource] = None,
     ) -> str:
         """Extract, back up, and persist one business-card OCR result.
 
@@ -27878,6 +27891,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         else:
             notion_error = "結構化擷取失敗，未寫入 Notion"
 
+        # Keep only the pointer needed for the immediate correction UX.  The
+        # Notion page must have been created successfully before this exists.
+        page_id = str(notion_result.get("page_id") or "").strip()
+        if source is not None and page_id:
+            self._pending_namecard_correction_choices()[
+                self._image_ocr_choice_key(source)
+            ] = {
+                "page_id": page_id,
+                "fields": dict(fields),
+                "record_path": str(local_backup.get("record_path") or ""),
+                "saved_at": time.time(),
+            }
+
         return self._format_business_card_reply(
             ocr_text=ocr_text,
             fields=fields,
@@ -27885,6 +27911,248 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             notion_result=notion_result,
             notion_error=notion_error,
         )
+
+    def _pending_namecard_correction_choices(self) -> dict:
+        pending = getattr(self, "_pending_namecard_correction_by_session", None)
+        if pending is None:
+            pending = {}
+            self._pending_namecard_correction_by_session = pending
+        return pending
+
+    @staticmethod
+    def _namecard_correction_looks_like(text: str) -> bool:
+        """Cheap gate to keep ordinary follow-up chat out of this workflow."""
+        text = (text or "").strip()
+        if not text:
+            return False
+        field_names = ("姓名", "公司名稱", "電話", "手機", "Email", "傳真", "地址", "統編", "備註")
+        correction_cues = ("打錯", "不對", "應該是", "更正", "改成", "改為", "修正", "修改")
+        return any(field in text for field in field_names) and any(
+            cue in text for cue in correction_cues
+        )
+
+    @staticmethod
+    def _namecard_correction_strongly_signaled(text: str) -> bool:
+        text = (text or "").strip()
+        has_notion_url = bool(re.search(r"https?://(?:www\.)?notion\.so/\S+", text, re.I))
+        has_correction_language = any(
+            cue in text for cue in ("打錯", "不對", "應該是", "更正", "改成", "改為", "修正", "修改")
+        )
+        return has_correction_language and ("名片" in text or has_notion_url)
+
+    async def _extract_business_card_correction(
+        self, message_text: str
+    ) -> Dict[str, str]:
+        """Extract only explicit field/new-value pairs from a correction message."""
+        from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                field: {"type": ["string", "null"]} for field in _NAMECARD_FIELDS
+            },
+            "required": list(_NAMECARD_FIELDS),
+        }
+        prompt = (
+            "你正在處理使用者對已儲存名片的修正要求。只擷取使用者明確要求"
+            "變更的欄位與新值，不要摘要、不要補完、不要依常識推測。每個新值"
+            "都必須在使用者訊息中逐字出現；無法確認欄位或新值就填 null。"
+            "不要把『更正』『改成』『應該是』等指令文字放進值，也不要擷取"
+            "使用者沒有要求修改的欄位。只能輸出 JSON object，不要 markdown。\n\n"
+            "欄位（鍵名必須完全相同）："
+            + ", ".join(_NAMECARD_FIELDS)
+            + "\n\n使用者訊息：\n"
+            + (message_text or "")
+        )
+        response = await async_call_llm(
+            task="title_generation",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=500,
+            timeout=90,
+            extra_body={
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "business_card_correction",
+                        "strict": True,
+                        "schema": schema,
+                    },
+                }
+            },
+        )
+        content = extract_content_or_reasoning(response).strip()
+        if not content:
+            return {}
+        try:
+            parsed = json.loads(self._strip_json_code_fences(content))
+        except (TypeError, ValueError):
+            logger.warning("Business-card correction extraction returned invalid JSON")
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+
+        # A second, deterministic check prevents a malformed or over-helpful
+        # auxiliary response from inventing a value outside the user's text.
+        extracted: Dict[str, str] = {}
+        for field in _NAMECARD_FIELDS:
+            value = parsed.get(field)
+            if not isinstance(value, str):
+                continue
+            value = value.strip()
+            if value and value in message_text:
+                extracted[field] = value
+        return extracted
+
+    @staticmethod
+    def _business_card_notion_property(field: str, value: str) -> Dict[str, Any]:
+        value = (value or "").strip()
+        if field == "Email":
+            return {"email": value}
+        return {"rich_text": [{"type": "text", "text": {"content": value}}]}
+
+    async def _patch_business_card_notion(
+        self,
+        *,
+        page_id: str,
+        fields: Dict[str, str],
+        original_fields: Optional[Dict[str, str]] = None,
+    ) -> None:
+        import httpx
+
+        api_key = (os.environ.get("NOTION_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError("NOTION_API_KEY is not configured")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Notion-Version": _NAMECARD_NOTION_VERSION,
+            "Content-Type": "application/json",
+        }
+        properties = {
+            field: self._business_card_notion_property(field, value)
+            for field, value in fields.items()
+            if field in _NAMECARD_FIELDS and str(value or "").strip()
+        }
+        corrected_name = str(fields.get("姓名") or "").strip()
+        original_fields = original_fields or {}
+        original_name = str(original_fields.get("姓名") or "").strip()
+        original_company = str(original_fields.get("公司名稱") or "").strip()
+        # Creation prefers 姓名 and falls back to 公司名稱.  Preserve a title
+        # that was intentionally company-based, but keep a name-based title in
+        # sync when 姓名 is corrected.
+        if corrected_name and (original_name or not original_company):
+            properties["名片名稱"] = {
+                "title": [{"type": "text", "text": {"content": corrected_name}}]
+            }
+        if not properties:
+            raise ValueError("no usable business-card correction fields")
+        async with httpx.AsyncClient(timeout=75) as client:
+            response = await client.patch(
+                f"{_NAMECARD_NOTION_API_BASE.rstrip('/')}/pages/{page_id}",
+                headers=headers,
+                json={"properties": properties},
+            )
+            response.raise_for_status()
+
+    @staticmethod
+    def _append_business_card_correction_record(
+        record_path: str, changes: List[Tuple[str, str, str]], corrected_at: datetime
+    ) -> bool:
+        if not record_path:
+            return False
+        path = Path(record_path).expanduser()
+        if not path.is_file():
+            return False
+        lines = ["\n## 修正紀錄\n", f"\n- correction_time: {corrected_at.isoformat()}\n"]
+        lines.extend(f"- {field}: {old or '（空）'} → {new}\n" for field, old, new in changes)
+        with path.open("a", encoding="utf-8") as record_file:
+            record_file.writelines(lines)
+        return True
+
+    async def _handle_pending_namecard_correction(
+        self, event: MessageEvent
+    ) -> Optional[str]:
+        source = getattr(event, "source", None)
+        if source is None or getattr(event, "media_urls", None):
+            return None
+        text = (getattr(event, "text", "") or "").strip()
+        if not text or text.startswith("/"):
+            return None
+
+        key = self._image_ocr_choice_key(source)
+        pending_store = self._pending_namecard_correction_choices()
+        pending = pending_store.get(key)
+        if pending and time.time() - float(pending.get("saved_at") or 0) > _NAMECARD_CORRECTION_TTL_SECS:
+            pending_store.pop(key, None)
+            pending = None
+        if not pending:
+            if self._namecard_correction_strongly_signaled(text):
+                await self._deliver_direct_image_ocr_reply(
+                    source,
+                    "⚠️ 找不到最近儲存的名片紀錄，這次修正沒有綁定到可用的名片。"
+                    "請提供 Notion 連結，或告訴我對方的姓名／公司，我再協助查找。",
+                    already_formatted=True,
+                )
+                return ""
+            return None
+
+        if not self._namecard_correction_looks_like(text):
+            return None
+
+        try:
+            extracted = await self._extract_business_card_correction(text)
+        except Exception as exc:
+            logger.warning("Business-card correction extraction failed: %s", exc)
+            return None
+        if not extracted:
+            return None
+
+        old_fields = pending.get("fields") or {}
+        changes = [
+            (field, str(old_fields.get(field) or ""), value)
+            for field, value in extracted.items()
+        ]
+        try:
+            await self._patch_business_card_notion(
+                page_id=str(pending.get("page_id") or ""),
+                fields=extracted,
+                original_fields=old_fields,
+            )
+        except Exception as exc:
+            logger.exception("Business-card Notion correction failed: %s", exc)
+            await self._deliver_direct_image_ocr_reply(
+                source,
+                f"⚠️ 名片修正失敗，Notion 沒有更新：{exc}",
+                already_formatted=True,
+            )
+            return ""
+
+        local_record_updated = False
+        try:
+            local_record_updated = await asyncio.to_thread(
+                self._append_business_card_correction_record,
+                str(pending.get("record_path") or ""),
+                changes,
+                datetime.now().astimezone(),
+            )
+        except Exception as exc:
+            logger.warning("Business-card local correction record failed: %s", exc)
+
+        pending_store.pop(key, None)
+        page_url = f"https://www.notion.so/{str(pending['page_id']).replace('-', '')}"
+        lines = ["✅ 名片已修正", ""]
+        lines.extend(f"{field}：{old or '（空）'} → {new}" for field, old, new in changes)
+        lines.append(f"✅ Notion：{page_url}")
+        if pending.get("record_path") and local_record_updated:
+            lines.append(f"✅ 修正紀錄：{pending['record_path']}")
+        elif pending.get("record_path"):
+            lines.append("⚠️ 本機紀錄未更新（Notion 已成功修正）")
+        return_text = "\n".join(lines)
+        await self._deliver_direct_image_ocr_reply(
+            source, return_text, already_formatted=True
+        )
+        return ""
 
     async def _extract_business_card_fields(self, ocr_text: str) -> Dict[str, str]:
         """Use the existing bounded auxiliary LLM lane for field extraction.
@@ -28152,12 +28420,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 value = fields.get(field, "").strip()
                 if not value:
                     continue
-                if field == "Email":
-                    properties[field] = {"email": value}
-                else:
-                    properties[field] = {
-                        "rich_text": [{"type": "text", "text": {"content": value}}]
-                    }
+                properties[field] = self._business_card_notion_property(field, value)
             if uploaded_file is not None:
                 properties["名片圖檔"] = {"files": [uploaded_file]}
 
@@ -28173,9 +28436,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             page_data = page_response.json()
 
         page_url = str(page_data.get("url") or "").strip()
-        if not page_url and page_data.get("id"):
-            page_url = f"https://www.notion.so/{str(page_data['id']).replace('-', '')}"
-        return {"url": page_url, "duplicates": duplicates}
+        page_id = str(page_data.get("id") or "").strip()
+        if not page_url and page_id:
+            page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
+        return {"page_id": page_id, "url": page_url, "duplicates": duplicates}
 
     @staticmethod
     def _notion_duplicate_summaries(query_data: Any) -> List[Dict[str, str]]:

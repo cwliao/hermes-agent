@@ -262,6 +262,71 @@ async def test_telegram_image_only_ocr_prompts_for_purpose(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_image_ocr_purpose_appends_later_media_group_before_choice(monkeypatch):
+    runner = _make_runner()
+    source = _source()
+    session_key = runner._session_key_for_source(source)
+    notices = []
+
+    async def fake_notice(_source, content):
+        notices.append(content)
+
+    monkeypatch.setattr(runner, "_deliver_platform_notice", fake_notice)
+
+    await runner._prompt_for_image_ocr_purpose(
+        source=source,
+        session_key=session_key,
+        image_paths=["/tmp/album-1-a.jpg", "/tmp/album-1-b.jpg"],
+    )
+    await runner._prompt_for_image_ocr_purpose(
+        source=source,
+        session_key=session_key,
+        image_paths=["/tmp/album-2-a.jpg"],
+    )
+
+    assert runner._pending_image_ocr_by_session[session_key]["image_paths"] == [
+        "/tmp/album-1-a.jpg",
+        "/tmp/album-1-b.jpg",
+        "/tmp/album-2-a.jpg",
+    ]
+    assert len(notices) == 1
+
+
+@pytest.mark.asyncio
+async def test_image_ocr_purpose_replaces_stale_pending_batch_and_resends_choice(
+    monkeypatch,
+):
+    from gateway.run import _IMAGE_OCR_CHOICE_TTL_SECS
+
+    runner = _make_runner()
+    source = _source()
+    session_key = runner._session_key_for_source(source)
+    runner._pending_image_ocr_by_session[session_key] = {
+        "source": source,
+        "image_paths": ["/tmp/stale-card.jpg"],
+        "created_at": time.time() - _IMAGE_OCR_CHOICE_TTL_SECS - 1,
+    }
+    notices = []
+
+    async def fake_notice(_source, content):
+        notices.append(content)
+
+    monkeypatch.setattr(runner, "_deliver_platform_notice", fake_notice)
+
+    await runner._prompt_for_image_ocr_purpose(
+        source=source,
+        session_key=session_key,
+        image_paths=["/tmp/fresh-card.jpg"],
+    )
+
+    pending = runner._pending_image_ocr_by_session[session_key]
+    assert pending["image_paths"] == ["/tmp/fresh-card.jpg"]
+    assert pending["created_at"] > time.time() - _IMAGE_OCR_CHOICE_TTL_SECS
+    assert len(notices) == 1
+    assert "請選擇這張圖片要怎麼處理" in notices[0]
+
+
+@pytest.mark.asyncio
 async def test_telegram_image_choice_news_uses_tesseract_and_skips_vision(monkeypatch):
     runner = _make_runner()
     source = _source()
@@ -435,10 +500,12 @@ class _FakeNotionClient:
         duplicate: bool = False,
         fail: bool = False,
         upload_status: str = "uploaded",
+        page_id: str = "new-page-123",
     ):
         self.duplicate = duplicate
         self.fail = fail
         self.upload_status = upload_status
+        self.page_id = page_id
         self.calls: list[dict] = []
         self.sent_file_bytes = None
 
@@ -480,7 +547,7 @@ class _FakeNotionClient:
             return _FakeNotionResponse({"status": "uploaded"})
         if url.endswith("/pages"):
             return _FakeNotionResponse(
-                {"id": "new-page-123", "url": "https://www.notion.so/new-card"}
+                {"id": self.page_id, "url": "https://www.notion.so/new-card"}
             )
         raise AssertionError(f"unexpected Notion URL: {url}")
 
@@ -586,13 +653,16 @@ async def test_business_card_ocr_success_saves_local_record_and_notion_page(
     monkeypatch, tmp_path
 ):
     runner = _make_runner()
+    source = _source()
     client = _FakeNotionClient()
     fields, image_path, hermes_home = _patch_business_card_dependencies(
         monkeypatch, tmp_path, client
     )
     ocr_text = "王小明 綠能科技 02-1234-5678 ming@example.com"
 
-    reply = await runner._process_business_card_ocr(ocr_text, [str(image_path)])
+    reply = await runner._process_business_card_ocr(
+        ocr_text, [str(image_path)], source=source
+    )
 
     record_path = next((hermes_home / "namecards" / "records").rglob("*.md"))
     assert fields["姓名"] in reply
@@ -639,6 +709,93 @@ async def test_business_card_ocr_success_saves_local_record_and_notion_page(
             }
         ]
     }
+    assert runner._pending_namecard_correction_by_session[
+        runner._image_ocr_choice_key(source)
+    ]["page_id"] == "new-page-123"
+
+
+@pytest.mark.asyncio
+async def test_business_card_batch_saves_each_image_as_separate_notion_page(
+    monkeypatch, tmp_path
+):
+    runner = _make_runner()
+    source = _source()
+    runner._pending_namecard_correction_by_session = {}
+    client = _FakeNotionClient()
+    _fields, image_path, _hermes_home = _patch_business_card_dependencies(
+        monkeypatch, tmp_path, client
+    )
+    image_paths = [
+        str(image_path),
+        str(image_path.with_name("business-card-2.png")),
+    ]
+    Path(image_paths[1]).write_bytes(b"second business card image")
+
+    monkeypatch.setattr(
+        runner,
+        "_extract_images_text_with_tesseract",
+        lambda paths: f"OCR for {Path(paths[0]).name}",
+    )
+
+    reply = await runner._process_business_card_batch(image_paths, source=source)
+
+    assert "共 2 張" in reply
+    assert "成功 2 張" in reply
+    assert "失敗 0 張" in reply
+    page_calls = [call for call in client.calls if call["url"].endswith("/pages")]
+    assert len(page_calls) == 2
+    assert [
+        call["json"]["properties"]["名片圖檔"]["files"][0]["name"]
+        for call in page_calls
+    ] == ["business-card.png", "business-card-2.png"]
+    assert runner._image_ocr_choice_key(source) not in runner._pending_namecard_correction_by_session
+
+
+@pytest.mark.asyncio
+async def test_business_card_batch_continues_after_one_image_processing_failure(
+    monkeypatch, tmp_path
+):
+    runner = _make_runner()
+    source = _source()
+    runner._pending_namecard_correction_by_session = {}
+    client = _FakeNotionClient()
+    _fields, image_path, _hermes_home = _patch_business_card_dependencies(
+        monkeypatch, tmp_path, client
+    )
+    image_paths = [
+        str(image_path.with_name("business-card-1.png")),
+        str(image_path.with_name("business-card-2.png")),
+        str(image_path.with_name("business-card-3.png")),
+    ]
+    for path in image_paths:
+        Path(path).write_bytes(path.encode())
+
+    processed_paths = []
+
+    def fake_extract(paths):
+        processed_paths.append(paths[0])
+        if Path(paths[0]).name == "business-card-2.png":
+            raise RuntimeError("simulated OCR failure")
+        return f"OCR for {Path(paths[0]).name}"
+
+    monkeypatch.setattr(runner, "_extract_images_text_with_tesseract", fake_extract)
+
+    reply = await runner._process_business_card_batch(image_paths, source=source)
+
+    assert "共 3 張" in reply
+    assert "成功 2 張" in reply
+    assert "失敗 1 張" in reply
+    assert "business-card-2.png" in reply
+    assert "simulated OCR failure" in reply
+    assert "ValueError" not in reply
+    assert processed_paths == image_paths
+    page_calls = [call for call in client.calls if call["url"].endswith("/pages")]
+    assert len(page_calls) == 2
+    assert [
+        call["json"]["properties"]["名片圖檔"]["files"][0]["name"]
+        for call in page_calls
+    ] == ["business-card-1.png", "business-card-3.png"]
+    assert runner._image_ocr_choice_key(source) not in runner._pending_namecard_correction_by_session
 
 
 @pytest.mark.asyncio
@@ -697,9 +854,12 @@ async def test_business_card_gdrive_failure_does_not_block_local_backup(
     )
     gdrive_root = tmp_path / "gdrive-namecards"
     gdrive_root.write_text("not a directory", encoding="utf-8")
+    outcome = {}
 
     reply = await runner._process_business_card_ocr(
-        "王小明 綠能科技 02-1234-5678 ming@example.com", [str(image_path)]
+        "王小明 綠能科技 02-1234-5678 ming@example.com",
+        [str(image_path)],
+        _outcome=outcome,
     )
 
     record_path = next((hermes_home / "namecards" / "records").rglob("*.md"))
@@ -709,6 +869,61 @@ async def test_business_card_gdrive_failure_does_not_block_local_backup(
     assert str(record_path) in reply
     assert "⚠️ Google Drive 備份失敗" in reply
     assert "https://www.notion.so/new-card" in reply
+    assert outcome == {"success": True, "reason": ""}
+
+
+@pytest.mark.asyncio
+async def test_business_card_empty_notion_page_id_counts_as_failure(
+    monkeypatch, tmp_path
+):
+    runner = _make_runner()
+    client = _FakeNotionClient(page_id="")
+    _fields, image_path, _hermes_home = _patch_business_card_dependencies(
+        monkeypatch, tmp_path, client
+    )
+    outcome = {}
+
+    await runner._process_business_card_ocr(
+        "王小明 綠能科技 02-1234-5678 ming@example.com",
+        [str(image_path)],
+        _outcome=outcome,
+    )
+
+    assert outcome == {"success": False, "reason": "Notion 未回傳頁面 ID"}
+    assert runner._pending_namecard_correction_choices() == {}
+
+
+@pytest.mark.asyncio
+async def test_business_card_batch_sends_processing_notice_before_work(monkeypatch):
+    runner = _make_runner()
+    source = _source()
+    session_key = runner._session_key_for_source(source)
+    runner._pending_image_ocr_by_session[session_key] = {
+        "source": source,
+        "image_paths": ["/tmp/card-1.jpg", "/tmp/card-2.jpg"],
+        "created_at": time.time(),
+    }
+    event = _text_event("2", source)
+    notices = []
+    calls = []
+
+    async def fake_notice(_source, content):
+        notices.append(content)
+
+    async def fake_batch(image_paths, *, source):
+        calls.append((image_paths, source))
+        return "批次完成"
+
+    async def fake_direct_reply(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runner, "_deliver_platform_notice", fake_notice)
+    monkeypatch.setattr(runner, "_process_business_card_batch", fake_batch)
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+
+    assert await runner._handle_pending_image_ocr_choice(event) == ""
+    assert calls == [(["/tmp/card-1.jpg", "/tmp/card-2.jpg"], source)]
+    assert notices == ["收到 2 張名片，正在批次處理中，請稍候..."]
 
 
 @pytest.mark.asyncio

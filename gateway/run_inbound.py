@@ -13,13 +13,16 @@ import asyncio
 import concurrent.futures
 import dataclasses
 import json
+import mimetypes
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import time
 from contextlib import suppress
+from datetime import datetime
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType
 from gateway.run_common import _UNSET
@@ -28,6 +31,7 @@ from gateway.session import (
 )
 from gateway.turn_lease import TurnLeaseTimeoutError
 from typing import Any, Dict, List, Optional, Tuple
+from hermes_constants import get_hermes_home
 
 if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
     from gateway.run import GatewayRunner  # noqa: F401
@@ -35,6 +39,14 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
+
+_NAMECARD_NOTION_API_BASE = "https://api.notion.com/v1"
+_NAMECARD_NOTION_VERSION = "2025-09-03"
+_NAMECARD_NOTION_DATA_SOURCE_ID = "c13e29d0-66e6-4ec0-9835-39a788617fa3"
+_NAMECARD_GDRIVE_DIR = Path("/mnt/gdrive/AI/namecards")
+_NAMECARD_FIELDS = (
+    "姓名", "公司名稱", "電話", "手機", "Email", "傳真", "地址", "統編", "備註",
+)
 
 try:
     from telegram import InlineKeyboardMarkup
@@ -2420,6 +2432,8 @@ class GatewayInboundMixin:
             return ""
         if normalized == "news":
             reply_text = await self._format_news_ocr_reply(ocr_text)
+        elif normalized == "business_card":
+            reply_text = await self._process_business_card_ocr(ocr_text, image_paths)
         else:
             reply_text = self._format_tesseract_image_ocr_reply(ocr_text, mode=normalized)
         await self._deliver_direct_image_ocr_reply(
@@ -2489,6 +2503,460 @@ class GatewayInboundMixin:
             text = self._normalize_ocr_text(proc.stdout)
             if text:
                 texts.append(f"[Image {index}]\n{text}" if len(image_paths) > 1 else text)
+        return "\n\n".join(texts).strip()
+
+    @staticmethod
+    def _normalize_ocr_text(text: str) -> str:
+        lines = []
+        for raw_line in (text or "").splitlines():
+            line = re.sub(r"[ \t]+", " ", raw_line).strip()
+            if line:
+                lines.append(line)
+        return "\n".join(lines).strip()
+
+    async def _process_business_card_ocr(
+        self, ocr_text: str, image_paths: List[str]
+    ) -> str:
+        """Extract, back up, and persist one business-card OCR result.
+
+        Local persistence is deliberately attempted before Notion.  A remote
+        failure must not discard the only copy of the OCR audit trail or leave
+        the user without a useful response.
+        """
+        extraction_error = ""
+        try:
+            fields = await self._extract_business_card_fields(ocr_text)
+        except Exception as exc:
+            logger.warning("Business-card constrained extraction failed: %s", exc)
+            fields = {field: "" for field in _NAMECARD_FIELDS}
+            extraction_error = str(exc)
+
+        local_backup = {}
+        try:
+            local_backup = await asyncio.to_thread(
+                self._save_business_card_local_backup,
+                ocr_text,
+                fields,
+                image_paths,
+            )
+        except Exception as exc:
+            logger.exception("Business-card local backup failed: %s", exc)
+            local_backup = {"error": str(exc)}
+
+        notion_result = {}
+        notion_error = ""
+        if not extraction_error:
+            try:
+                notion_result = await self._save_business_card_to_notion(
+                    fields=fields,
+                    image_paths=image_paths,
+                )
+            except Exception as exc:
+                logger.exception("Business-card Notion save failed: %s", exc)
+                notion_error = str(exc)
+        else:
+            notion_error = "結構化擷取失敗，未寫入 Notion"
+
+        return self._format_business_card_reply(
+            ocr_text=ocr_text,
+            fields=fields,
+            local_backup=local_backup,
+            notion_result=notion_result,
+            notion_error=notion_error,
+        )
+
+    async def _extract_business_card_fields(self, ocr_text: str) -> Dict[str, str]:
+        """Use the existing bounded auxiliary LLM lane for field extraction.
+
+        This is JSON extraction, not a summarization request.  The prompt is
+        intentionally explicit that an empty value is preferable to a guess.
+        ``title_generation`` is an existing auxiliary slot, so this feature
+        does not add a new model/configuration surface.
+        """
+        from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                field: {"type": ["string", "null"]} for field in _NAMECARD_FIELDS
+            },
+            "required": list(_NAMECARD_FIELDS),
+        }
+        prompt = (
+            "你正在處理一張名片的 Tesseract OCR 原文。請只做受限欄位擷取，"
+            "不要摘要、不要補完、不要上網、不要依常識推測。\n"
+            "每一個值都必須能在下方 OCR 原文中逐字找到；看不清楚、無法判定"
+            "欄位或原文沒有的資訊一律填空字串。電話號碼、Email、地址、統編"
+            "請保留原文可辨識的字元；不要修正或創造數字。若有職稱或其他不在"
+            "欄位中的明確文字，原樣放入備註；不要把職稱猜成姓名或公司。\n"
+            "只能輸出一個 JSON object，不要 markdown code fence，不要其他文字。"
+            "所有欄位值只能是 string 或 null；null 代表空值。\n\n"
+            "欄位（鍵名必須完全相同）："
+            + ", ".join(_NAMECARD_FIELDS)
+            + "\n\nOCR 原文：\n"
+            + (ocr_text or "")
+        )
+        response = await async_call_llm(
+            task="title_generation",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=700,
+            timeout=90,
+            extra_body={
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "business_card_fields",
+                        "strict": True,
+                        "schema": schema,
+                    },
+                }
+            },
+        )
+        content = extract_content_or_reasoning(response).strip()
+        if not content:
+            raise ValueError("auxiliary extraction returned no content")
+        try:
+            parsed = json.loads(self._strip_json_code_fences(content))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("auxiliary extraction returned invalid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("auxiliary extraction returned a non-object JSON value")
+
+        fields: Dict[str, str] = {}
+        for field in _NAMECARD_FIELDS:
+            value = parsed.get(field)
+            if value is None:
+                fields[field] = ""
+            elif isinstance(value, str):
+                fields[field] = value.strip()
+            else:
+                raise ValueError(f"extracted field {field} is not a string or null")
+        return fields
+
+    @staticmethod
+    def _strip_json_code_fences(content: str) -> str:
+        text = (content or "").strip()
+        if text.startswith("```") and text.endswith("```"):
+            lines = text.splitlines()
+            if len(lines) >= 3:
+                return "\n".join(lines[1:-1]).strip()
+        return text
+
+    @staticmethod
+    def _namecard_slug(fields: Dict[str, str], timestamp: datetime) -> str:
+        values = [fields.get("姓名", ""), fields.get("公司名稱", "")]
+        stem = "-".join(value.strip() for value in values if value.strip()) or "未命名名片"
+        safe_chars = []
+        for char in stem:
+            if char.isalnum() or char in "._-" or "\u3400" <= char <= "\u9fff":
+                safe_chars.append(char)
+            elif char.isspace():
+                safe_chars.append("-")
+            else:
+                safe_chars.append("-")
+        safe_stem = re.sub(r"-+", "-", "".join(safe_chars)).strip(".-") or "未命名名片"
+        return f"{safe_stem[:90]}-{timestamp.strftime('%Y%m%d-%H%M%S-%f')}"
+
+    @staticmethod
+    def _business_card_image_path(image_paths: List[str]) -> Optional[Path]:
+        for image_path in image_paths or []:
+            candidate = Path(image_path).expanduser()
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _save_business_card_local_backup(
+        self,
+        ocr_text: str,
+        fields: Dict[str, str],
+        image_paths: List[str],
+    ) -> Dict[str, str]:
+        now = datetime.now().astimezone()
+        slug = self._namecard_slug(fields, now)
+        namecard_root = Path(get_hermes_home()) / "namecards"
+        record_dir = namecard_root / "records" / now.strftime("%Y-%m-%d")
+        image_dir = namecard_root / "images"
+        record_dir.mkdir(parents=True, exist_ok=True)
+        image_dir.mkdir(parents=True, exist_ok=True)
+
+        source_image = self._business_card_image_path(image_paths)
+        image_path = ""
+        gdrive_image_path = ""
+        extension = ".bin"
+        if source_image is not None:
+            extension = source_image.suffix.lower()
+            if not extension or len(extension) > 10 or not re.fullmatch(r"\.[a-z0-9]+", extension):
+                extension = ".bin"
+            local_image = image_dir / f"{slug}{extension}"
+            shutil.copy2(source_image, local_image)
+            image_path = str(local_image)
+
+        record_path = record_dir / f"{slug}.md"
+        event_time = now.isoformat()
+        fields_lines = [f"- {field}: {fields.get(field, '') or '（空）'}" for field in _NAMECARD_FIELDS]
+        raw_for_markdown = (ocr_text or "").replace("~~~", "~ ~ ~")
+        record = (
+            "# 名片紀錄\n\n"
+            "- event_name: 整理名片\n"
+            f"- event_time: {event_time}\n"
+            f"- upload_time: {event_time}\n"
+            f"- image_path: {image_path}\n"
+            f"- gdrive_image_path: {gdrive_image_path}\n\n"
+            "## 結構化欄位\n\n"
+            + "\n".join(fields_lines)
+            + "\n\n## Raw OCR\n\n~~~text\n"
+            + raw_for_markdown
+            + "\n~~~\n"
+        )
+        record_path.write_text(record, encoding="utf-8")
+        backup = {
+            "record_path": str(record_path),
+            "image_path": image_path,
+        }
+
+        # The local record and image are the primary audit trail.  A mounted
+        # Drive mirror is best-effort and must not make that local backup fail.
+        if source_image is not None:
+            try:
+                gdrive_dir = Path(_NAMECARD_GDRIVE_DIR)
+                gdrive_dir.mkdir(parents=True, exist_ok=True)
+                gdrive_image = gdrive_dir / f"{slug}{extension}"
+                if source_image.resolve() != gdrive_image.resolve():
+                    shutil.copy2(source_image, gdrive_image)
+                backup["gdrive_image_path"] = str(gdrive_image)
+            except OSError as exc:
+                logger.warning("Business-card Google Drive mirror failed: %s", exc)
+                backup["gdrive_error"] = str(exc)
+        return backup
+
+    async def _save_business_card_to_notion(
+        self,
+        *,
+        fields: Dict[str, str],
+        image_paths: List[str],
+    ) -> Dict[str, Any]:
+        """Query duplicates, upload the source image, and create the page."""
+        import httpx
+
+        api_key = (os.environ.get("NOTION_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError("NOTION_API_KEY is not configured")
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Notion-Version": _NAMECARD_NOTION_VERSION,
+        }
+        json_headers = {**headers, "Content-Type": "application/json"}
+        base_url = _NAMECARD_NOTION_API_BASE.rstrip("/")
+        duplicates: List[Dict[str, str]] = []
+
+        async with httpx.AsyncClient(timeout=75) as client:
+            name = fields.get("姓名", "").strip()
+            company = fields.get("公司名稱", "").strip()
+            if name and company:
+                query_response = await client.post(
+                    f"{base_url}/data_sources/{_NAMECARD_NOTION_DATA_SOURCE_ID}/query",
+                    headers=json_headers,
+                    json={
+                        "filter": {
+                            "and": [
+                                {"property": "姓名", "rich_text": {"equals": name}},
+                                {"property": "公司名稱", "rich_text": {"equals": company}},
+                            ]
+                        },
+                        "page_size": 10,
+                    },
+                )
+                query_response.raise_for_status()
+                query_data = query_response.json()
+                duplicates = self._notion_duplicate_summaries(query_data)
+
+            source_image = self._business_card_image_path(image_paths)
+            uploaded_file = None
+            if source_image is not None:
+                filename = source_image.name
+                content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                create_upload_response = await client.post(
+                    f"{base_url}/file_uploads",
+                    headers=json_headers,
+                    json={
+                        "mode": "single_part",
+                        "filename": filename,
+                        "content_type": content_type,
+                    },
+                )
+                create_upload_response.raise_for_status()
+                upload_data = create_upload_response.json()
+                upload_id = str(upload_data.get("id") or "").strip()
+                if not upload_id:
+                    raise RuntimeError("Notion file upload did not return an id")
+                if upload_data.get("status") != "uploaded":
+                    upload_url = upload_data.get("upload_url") or (
+                        f"{base_url}/file_uploads/{upload_id}/send"
+                    )
+                    with source_image.open("rb") as image_file:
+                        send_response = await client.post(
+                            upload_url,
+                            headers=headers,
+                            files={
+                                "file": (
+                                    filename,
+                                    image_file,
+                                    content_type,
+                                )
+                            },
+                        )
+                    send_response.raise_for_status()
+                    send_data = send_response.json()
+                    if send_data.get("status") not in (None, "uploaded"):
+                        raise RuntimeError(
+                            f"Notion file upload returned status {send_data.get('status')}"
+                        )
+                uploaded_file = {
+                    "type": "file_upload",
+                    "file_upload": {"id": upload_id},
+                    "name": filename,
+                }
+
+            title = fields.get("姓名", "").strip() or fields.get("公司名稱", "").strip()
+            if not title:
+                title = f"未命名名片 {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
+            properties: Dict[str, Any] = {
+                "名片名稱": {"title": [{"type": "text", "text": {"content": title}}]},
+                "聯繫情形": {"select": {"name": "未聯繫"}},
+            }
+            for field in _NAMECARD_FIELDS:
+                value = fields.get(field, "").strip()
+                if not value:
+                    continue
+                if field == "Email":
+                    properties[field] = {"email": value}
+                else:
+                    properties[field] = {
+                        "rich_text": [{"type": "text", "text": {"content": value}}]
+                    }
+            if uploaded_file is not None:
+                properties["名片圖檔"] = {"files": [uploaded_file]}
+
+            page_response = await client.post(
+                f"{base_url}/pages",
+                headers=json_headers,
+                json={
+                    "parent": {"data_source_id": _NAMECARD_NOTION_DATA_SOURCE_ID},
+                    "properties": properties,
+                },
+            )
+            page_response.raise_for_status()
+            page_data = page_response.json()
+
+        page_url = str(page_data.get("url") or "").strip()
+        if not page_url and page_data.get("id"):
+            page_url = f"https://www.notion.so/{str(page_data['id']).replace('-', '')}"
+        return {"url": page_url, "duplicates": duplicates}
+
+    @staticmethod
+    def _notion_duplicate_summaries(query_data: Any) -> List[Dict[str, str]]:
+        summaries = []
+        for page in (query_data or {}).get("results", []) if isinstance(query_data, dict) else []:
+            if not isinstance(page, dict):
+                continue
+            title = "現有名片"
+            title_property = (page.get("properties") or {}).get("名片名稱") or {}
+            title_items = title_property.get("title") or []
+            if title_items:
+                title = str(
+                    title_items[0].get("plain_text")
+                    or ((title_items[0].get("text") or {}).get("content"))
+                    or title
+                ).strip()
+            url = str(page.get("url") or "").strip()
+            summaries.append({"title": title or "現有名片", "url": url})
+        return summaries
+
+    def _format_business_card_reply(
+        self,
+        *,
+        ocr_text: str,
+        fields: Dict[str, str],
+        local_backup: Dict[str, str],
+        notion_result: Dict[str, Any],
+        notion_error: str,
+    ) -> str:
+        display_fields = [
+            (field, fields.get(field, "").strip())
+            for field in _NAMECARD_FIELDS
+            if fields.get(field, "").strip()
+        ]
+        field_lines = "\n".join(f"{field}：{value}" for field, value in display_fields)
+        if not field_lines:
+            field_lines = "（未擷取到可確認的結構化欄位）"
+
+        lines = ["📇 名片已整理", "", field_lines, ""]
+        record_path = local_backup.get("record_path")
+        image_path = local_backup.get("image_path")
+        gdrive_path = local_backup.get("gdrive_image_path")
+        if record_path:
+            lines.append(f"✅ 本機紀錄：{record_path}")
+        if image_path:
+            lines.append(f"✅ 本機圖片：{image_path}")
+        if gdrive_path:
+            lines.append(f"✅ Google Drive 備份：{gdrive_path}")
+        elif local_backup.get("gdrive_error"):
+            lines.append(f"⚠️ Google Drive 備份失敗：{local_backup['gdrive_error']}")
+        elif local_backup.get("error"):
+            lines.append(f"⚠️ 本機備份失敗：{local_backup['error']}")
+
+        notion_url = notion_result.get("url")
+        if notion_url:
+            lines.append(f"✅ Notion：{notion_url}")
+        if notion_result.get("duplicates"):
+            duplicate = notion_result["duplicates"][0]
+            existing = duplicate["title"]
+            if duplicate.get("url"):
+                existing += f"／{duplicate['url']}"
+            lines.append(f"⚠️ 疑似重複：{existing}")
+        if notion_error:
+            lines.extend(["", f"⚠️ Notion 未寫入：{notion_error}", "📌 OCR 原文（供備援）", ocr_text])
+        return "\n".join(lines).strip()
+
+    def _extract_images_text_with_tesseract(self, image_paths: List[str]) -> str:
+        texts: list[str] = []
+        for index, image_path in enumerate(image_paths, start=1):
+            try:
+                proc = subprocess.run(
+                    [
+                        "tesseract",
+                        image_path,
+                        "stdout",
+                        "-l",
+                        "chi_tra+chi_sim+eng",
+                        "--psm",
+                        "6",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                )
+            except Exception as exc:
+                logger.warning("Tesseract OCR failed for %s: %s", image_path, exc)
+                continue
+            if proc.returncode != 0:
+                logger.warning(
+                    "Tesseract OCR returned %s for %s: %s",
+                    proc.returncode,
+                    image_path,
+                    (proc.stderr or "").strip()[:500],
+                )
+                continue
+            text = self._normalize_ocr_text(proc.stdout)
+            if text:
+                if len(image_paths) > 1:
+                    texts.append(f"[Image {index}]\n{text}")
+                else:
+                    texts.append(text)
         return "\n\n".join(texts).strip()
 
     @staticmethod

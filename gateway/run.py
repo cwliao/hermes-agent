@@ -14,9 +14,11 @@ import concurrent.futures
 import dataclasses
 import json
 import logging
+import mimetypes
 import os
 import re
 import shlex
+import shutil
 import site
 import sys
 import signal
@@ -64,6 +66,26 @@ _STALL_NOTIFY_SEND_TIMEOUT_SECONDS = 15.0
 _GATEWAY_PROXY_SSE_BUFFER_MAX_CHARS = 16 * 1024 * 1024
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 _GATEWAY_HYGIENE_PLATFORM = "gateway_hygiene"
+
+# The business-card workflow is intentionally kept local to this gateway
+# module.  These are data destinations, not user-facing configuration knobs:
+# the Notion data source is the fixed personal address book and the mounted
+# directory is the operator's local Drive mirror.
+_NAMECARD_NOTION_API_BASE = "https://api.notion.com/v1"
+_NAMECARD_NOTION_VERSION = "2025-09-03"
+_NAMECARD_NOTION_DATA_SOURCE_ID = "c13e29d0-66e6-4ec0-9835-39a788617fa3"
+_NAMECARD_GDRIVE_DIR = Path("/mnt/gdrive/AI/namecards")
+_NAMECARD_FIELDS = (
+    "姓名",
+    "公司名稱",
+    "電話",
+    "手機",
+    "Email",
+    "傳真",
+    "地址",
+    "統編",
+    "備註",
+)
 
 
 def _is_kanban_transactional_turn(message: Any) -> bool:

@@ -298,6 +298,77 @@ async def test_telegram_image_choice_news_uses_tesseract_and_skips_vision(monkey
     assert "台積電新聞標題" in sent["reply"]
     assert session_key not in runner._pending_image_ocr_by_session
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice", ["1", "2", "3"])
+async def test_expired_image_choice_replies_instead_of_falling_through(monkeypatch, choice):
+    runner = _make_runner()
+    source = _source()
+    event = MessageEvent(
+        text=choice,
+        message_type=MessageType.TEXT,
+        source=source,
+    )
+    sent = {}
+
+    async def fake_direct_reply(src, enriched_text, *, already_formatted=False):
+        sent["source"] = src
+        sent["reply"] = enriched_text
+        sent["already_formatted"] = already_formatted
+
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+
+    result = await runner._handle_pending_image_ocr_choice(event)
+
+    assert result == ""
+    assert sent == {
+        "source": source,
+        "reply": "圖片選單已過期，麻煩重新傳一次圖片。",
+        "already_formatted": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_image_choice_falls_through_when_last30days_choice_is_pending(monkeypatch):
+    runner = _make_runner()
+    source = _source()
+    runner._pending_last30days_choices()[runner._last30days_choice_key(source)] = {
+        "source": source,
+        "topic": "AI agent",
+        "step": "choose_mode",
+        "created_at": 1.0,
+    }
+    event = MessageEvent(
+        text="1",
+        message_type=MessageType.TEXT,
+        source=source,
+    )
+
+    async def fail_direct_reply(*_args, **_kwargs):
+        pytest.fail("last30days choices must not receive an expired OCR reply")
+
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fail_direct_reply)
+
+    assert await runner._handle_pending_image_ocr_choice(event) is None
+
+
+@pytest.mark.asyncio
+async def test_non_choice_message_still_falls_through_when_image_choice_is_missing(monkeypatch):
+    runner = _make_runner()
+    event = MessageEvent(
+        text="這是一則普通訊息",
+        message_type=MessageType.TEXT,
+        source=_source(),
+    )
+
+    async def fail_direct_reply(*_args, **_kwargs):
+        pytest.fail("non-choice messages must not receive an expired-menu reply")
+
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fail_direct_reply)
+
+    assert await runner._handle_pending_image_ocr_choice(event) is None
+
+
 @pytest.mark.asyncio
 async def test_news_ocr_postprocess_normalizes_simplified_chinese(monkeypatch):
     runner = _make_runner()

@@ -27782,7 +27782,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         key = self._image_ocr_choice_key(source)
         pending = self._pending_image_ocr_choices().pop(key, None)
         if not pending:
-            return None
+            if self._pending_last30days_choices().get(
+                self._last30days_choice_key(source)
+            ):
+                return None
+            await self._deliver_direct_image_ocr_reply(
+                source,
+                "圖片選單已過期，麻煩重新傳一次圖片。",
+                already_formatted=True,
+            )
+            return ""
         image_paths = pending.get("image_paths") or []
         if not image_paths:
             return None

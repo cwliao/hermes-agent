@@ -75,6 +75,9 @@ _NAMECARD_NOTION_API_BASE = "https://api.notion.com/v1"
 _NAMECARD_NOTION_VERSION = "2025-09-03"
 _NAMECARD_NOTION_DATA_SOURCE_ID = "c13e29d0-66e6-4ec0-9835-39a788617fa3"
 _NAMECARD_GDRIVE_DIR = Path("/mnt/gdrive/AI/namecards")
+# The correction pointer is intentionally ephemeral: it is a convenience for
+# correcting the card just saved in this chat, not a durable record index.
+_NAMECARD_CORRECTION_TTL_SECS = 30 * 60
 _NAMECARD_FIELDS = (
     "姓名",
     "公司名稱",
@@ -2168,6 +2171,7 @@ from gateway.run_startup import GatewayStartupMixin
 from gateway.run_watchers import GatewaySessionWatchersMixin
 from gateway.run_notifications import GatewayNotificationsMixin
 from gateway.run_inbound import GatewayInboundMixin
+from gateway.run_inbound import _NAMECARD_GDRIVE_DIR as _NAMECARD_GDRIVE_DIR
 from gateway.run_goals import GatewayGoalsMixin
 from gateway.run_agent_cache import GatewayAgentCacheMixin
 from gateway.platforms.base import (

@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -484,6 +485,69 @@ class _FakeNotionClient:
         raise AssertionError(f"unexpected Notion URL: {url}")
 
 
+class _FakeCorrectionNotionClient:
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.calls: list[dict] = []
+
+    async def __aenter__(self) -> "_FakeCorrectionNotionClient":
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def patch(self, url: str, **kwargs: object) -> _FakeNotionResponse:
+        self.calls.append({"url": url, **kwargs})
+        if self.fail:
+            import httpx
+
+            request = httpx.Request("PATCH", url)
+            response = httpx.Response(500, request=request)
+            raise httpx.HTTPStatusError(
+                "simulated Notion PATCH failure", request=request, response=response
+            )
+        return _FakeNotionResponse({"id": "page-123"})
+
+
+def _patch_namecard_correction_dependencies(monkeypatch, client, extracted):
+    calls = []
+
+    async def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        response_format = kwargs["extra_body"]["response_format"]
+        assert response_format["type"] == "json_schema"
+        assert response_format["json_schema"]["name"] == "business_card_correction"
+        payload = {
+            field: extracted.get(field)
+            for field in _business_card_fields()
+        }
+        return _auxiliary_response(json.dumps(payload, ensure_ascii=False))
+
+    monkeypatch.setattr("agent.auxiliary_client.async_call_llm", fake_call_llm)
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setenv("NOTION_API_KEY", "test-notion-key")
+    return calls
+
+
+def _set_pending_namecard_correction(runner, tmp_path, *, saved_at=None):
+    source = _source()
+    record_path = tmp_path / "namecard.md"
+    record_path.write_text("原始名片紀錄\n", encoding="utf-8")
+    runner._pending_namecard_correction_by_session = {
+        runner._image_ocr_choice_key(source): {
+            "page_id": "page-123",
+            "fields": {"公司名稱": "舊公司", "Email": "old@example.com"},
+            "record_path": str(record_path),
+            "saved_at": time.time() if saved_at is None else saved_at,
+        }
+    }
+    return source, record_path
+
+
+def _text_event(text: str, source: SessionSource) -> MessageEvent:
+    return MessageEvent(text=text, message_type=MessageType.TEXT, source=source)
+
+
 def _patch_business_card_dependencies(monkeypatch, tmp_path: Path, client):
     fields = _business_card_fields()
     hermes_home = tmp_path / "hermes-home"
@@ -667,6 +731,234 @@ async def test_business_card_ocr_notion_failure_keeps_local_backup_and_ocr(
     assert ocr_text in reply
     assert "⚠️ Notion 未寫入" in reply
     assert record_path.is_file()
+
+
+@pytest.mark.asyncio
+async def test_pending_namecard_correction_patches_notion_and_clears_pointer(
+    monkeypatch, tmp_path
+):
+    runner = _make_runner()
+    source, record_path = _set_pending_namecard_correction(runner, tmp_path)
+    client = _FakeCorrectionNotionClient()
+    llm_calls = _patch_namecard_correction_dependencies(
+        monkeypatch,
+        client,
+        {"公司名稱": "新綠能股份有限公司", "Email": "new@example.com"},
+    )
+    sent = {}
+
+    async def fake_direct_reply(src, content, *, already_formatted=False):
+        sent.update(source=src, reply=content, already_formatted=already_formatted)
+
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+    event = _text_event(
+        "名片的公司名稱應該改成新綠能股份有限公司，Email 改成 new@example.com",
+        source,
+    )
+
+    assert await runner._handle_pending_namecard_correction(event) == ""
+
+    assert len(llm_calls) == 1
+    assert len(client.calls) == 1
+    patch_call = client.calls[0]
+    assert patch_call["url"] == "https://api.notion.com/v1/pages/page-123"
+    assert patch_call["json"] == {
+        "properties": {
+            "公司名稱": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {"content": "新綠能股份有限公司"},
+                    }
+                ]
+            },
+            "Email": {"email": "new@example.com"},
+        }
+    }
+    assert sent["source"] == source
+    assert sent["already_formatted"] is True
+    assert "公司名稱：舊公司 → 新綠能股份有限公司" in sent["reply"]
+    assert "Email：old@example.com → new@example.com" in sent["reply"]
+    assert "https://www.notion.so/page123" in sent["reply"]
+    assert runner._pending_namecard_correction_by_session == {}
+    assert "## 修正紀錄" in record_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_pending_namecard_correction_requires_field_and_correction_cue(
+    monkeypatch, tmp_path
+):
+    runner = _make_runner()
+    source, _record_path = _set_pending_namecard_correction(runner, tmp_path)
+    client = _FakeCorrectionNotionClient()
+    llm_calls = _patch_namecard_correction_dependencies(monkeypatch, client, {})
+    event = _text_event("這個人的電話我待會會打", source)
+
+    assert await runner._handle_pending_namecard_correction(event) is None
+    assert llm_calls == []
+    assert client.calls == []
+    assert runner._pending_namecard_correction_by_session
+
+
+@pytest.mark.asyncio
+async def test_pending_namecard_correction_ignores_slash_command(
+    monkeypatch, tmp_path
+):
+    runner = _make_runner()
+    source, _record_path = _set_pending_namecard_correction(runner, tmp_path)
+    client = _FakeCorrectionNotionClient()
+    llm_calls = _patch_namecard_correction_dependencies(
+        monkeypatch, client, {"公司名稱": "新公司"}
+    )
+    event = _text_event("/plan 名片公司名稱改成新公司", source)
+
+    assert await runner._handle_pending_namecard_correction(event) is None
+    assert llm_calls == []
+    assert client.calls == []
+    assert runner._pending_namecard_correction_by_session
+
+
+@pytest.mark.asyncio
+async def test_pending_namecard_name_correction_updates_notion_title(
+    monkeypatch, tmp_path
+):
+    runner = _make_runner()
+    source, _record_path = _set_pending_namecard_correction(runner, tmp_path)
+    runner._pending_namecard_correction_by_session[
+        runner._image_ocr_choice_key(source)
+    ]["fields"] = {"姓名": "舊姓名", "公司名稱": "舊公司"}
+    client = _FakeCorrectionNotionClient()
+    llm_calls = _patch_namecard_correction_dependencies(
+        monkeypatch, client, {"姓名": "新姓名"}
+    )
+
+    async def fake_direct_reply(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+    event = _text_event("名片姓名改成新姓名", source)
+
+    assert await runner._handle_pending_namecard_correction(event) == ""
+
+    assert len(llm_calls) == 1
+    assert client.calls[0]["json"] == {
+        "properties": {
+            "姓名": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": "新姓名"}}
+                ]
+            },
+            "名片名稱": {
+                "title": [{"type": "text", "text": {"content": "新姓名"}}]
+            },
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_pending_namecard_correction_ignores_non_correction_message(monkeypatch, tmp_path):
+    runner = _make_runner()
+    source, _record_path = _set_pending_namecard_correction(runner, tmp_path)
+    client = _FakeCorrectionNotionClient()
+    llm_calls = _patch_namecard_correction_dependencies(monkeypatch, client, {})
+    event = _text_event("今天台北天氣不錯", source)
+
+    assert await runner._handle_pending_namecard_correction(event) is None
+    assert llm_calls == []
+    assert client.calls == []
+    assert runner._pending_namecard_correction_by_session
+
+
+@pytest.mark.asyncio
+async def test_namecard_correction_falls_through_without_pending_pointer(monkeypatch):
+    runner = _make_runner()
+    source = _source()
+    client = _FakeCorrectionNotionClient()
+    llm_calls = _patch_namecard_correction_dependencies(monkeypatch, client, {})
+    event = _text_event("請幫我安排明天的會議", source)
+
+    assert await runner._handle_pending_namecard_correction(event) is None
+    assert llm_calls == []
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_strong_namecard_correction_without_pending_pointer_replies_not_found(
+    monkeypatch,
+):
+    runner = _make_runner()
+    source = _source()
+    client = _FakeCorrectionNotionClient()
+    llm_calls = _patch_namecard_correction_dependencies(monkeypatch, client, {})
+    sent = {}
+
+    async def fake_direct_reply(src, content, *, already_formatted=False):
+        sent.update(source=src, reply=content, already_formatted=already_formatted)
+
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+    event = _text_event("名片資料不對，請更正公司名稱", source)
+
+    assert await runner._handle_pending_namecard_correction(event) == ""
+    assert sent["source"] == source
+    assert sent["already_formatted"] is True
+    assert "找不到最近儲存的名片紀錄" in sent["reply"]
+    assert llm_calls == []
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_namecard_correction_patch_failure_keeps_local_record_unchanged(
+    monkeypatch, tmp_path
+):
+    runner = _make_runner()
+    source, record_path = _set_pending_namecard_correction(runner, tmp_path)
+    original_record = record_path.read_text(encoding="utf-8")
+    client = _FakeCorrectionNotionClient(fail=True)
+    _patch_namecard_correction_dependencies(
+        monkeypatch, client, {"公司名稱": "新公司"}
+    )
+    sent = {}
+
+    async def fake_direct_reply(src, content, *, already_formatted=False):
+        sent.update(source=src, reply=content, already_formatted=already_formatted)
+
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+    event = _text_event("名片公司名稱改成新公司", source)
+
+    assert await runner._handle_pending_namecard_correction(event) == ""
+    assert "名片修正失敗" in sent["reply"]
+    assert "Notion 沒有更新" in sent["reply"]
+    assert sent["already_formatted"] is True
+    assert record_path.read_text(encoding="utf-8") == original_record
+    assert runner._pending_namecard_correction_by_session
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_namecard_correction_pointer_replies_not_found(monkeypatch, tmp_path):
+    from gateway.run import _NAMECARD_CORRECTION_TTL_SECS
+
+    runner = _make_runner()
+    source, _record_path = _set_pending_namecard_correction(
+        runner,
+        tmp_path,
+        saved_at=time.time() - _NAMECARD_CORRECTION_TTL_SECS - 1,
+    )
+    client = _FakeCorrectionNotionClient()
+    llm_calls = _patch_namecard_correction_dependencies(monkeypatch, client, {})
+    sent = {}
+
+    async def fake_direct_reply(src, content, *, already_formatted=False):
+        sent.update(source=src, reply=content, already_formatted=already_formatted)
+
+    monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
+    event = _text_event("名片資料不對，請改成正確資料", source)
+
+    assert await runner._handle_pending_namecard_correction(event) == ""
+    assert "找不到最近儲存的名片紀錄" in sent["reply"]
+    assert runner._pending_namecard_correction_by_session == {}
+    assert llm_calls == []
+    assert client.calls == []
 
 
 @pytest.mark.asyncio

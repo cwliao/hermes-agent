@@ -78,6 +78,7 @@ _NAMECARD_GDRIVE_DIR = Path("/mnt/gdrive/AI/namecards")
 # The correction pointer is intentionally ephemeral: it is a convenience for
 # correcting the card just saved in this chat, not a durable record index.
 _NAMECARD_CORRECTION_TTL_SECS = 30 * 60
+_IMAGE_OCR_CHOICE_TTL_SECS = 10 * 60
 _NAMECARD_FIELDS = (
     "姓名",
     "公司名稱",

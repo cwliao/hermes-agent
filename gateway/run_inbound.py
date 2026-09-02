@@ -45,6 +45,7 @@ _NAMECARD_NOTION_VERSION = "2025-09-03"
 _NAMECARD_NOTION_DATA_SOURCE_ID = "c13e29d0-66e6-4ec0-9835-39a788617fa3"
 _NAMECARD_GDRIVE_DIR = Path("/mnt/gdrive/AI/namecards")
 _NAMECARD_CORRECTION_TTL_SECS = 30 * 60
+_IMAGE_OCR_CHOICE_TTL_SECS = 10 * 60
 _NAMECARD_FIELDS = (
     "姓名", "公司名稱", "電話", "手機", "Email", "傳真", "地址", "統編", "備註",
 )
@@ -2402,19 +2403,35 @@ class GatewayInboundMixin:
         session_key: str,
         image_paths: List[str],
     ) -> None:
-        self._pending_image_ocr_choices()[session_key] = {
-            "source": dataclasses.replace(source),
-            "image_paths": list(image_paths),
-            "created_at": time.time(),
-        }
-        await self._deliver_platform_notice(
-            source,
-            "請選擇這張圖片要怎麼處理：\n"
-            "1. OCR + 整理文字\n"
-            "2. 整理名片\n"
-            "3. 整理新聞\n\n"
-            "請直接回覆 1、2 或 3。",
-        )
+        pending_store = self._pending_image_ocr_choices()
+        pending = pending_store.get(session_key)
+        if pending is not None:
+            try:
+                pending_age = time.time() - float(pending.get("created_at") or 0)
+            except (TypeError, ValueError):
+                pending_age = float("inf")
+            if pending_age > _IMAGE_OCR_CHOICE_TTL_SECS:
+                pending_store.pop(session_key, None)
+                pending = None
+        if pending is None:
+            pending_store[session_key] = pending = {
+                "source": dataclasses.replace(source),
+                "image_paths": list(image_paths),
+                "created_at": time.time(),
+            }
+            send_choice_prompt = True
+        else:
+            pending.setdefault("image_paths", []).extend(image_paths)
+            send_choice_prompt = False
+        if send_choice_prompt:
+            await self._deliver_platform_notice(
+                source,
+                "請選擇這張圖片要怎麼處理：\n"
+                "1. OCR + 整理文字\n"
+                "2. 整理名片\n"
+                "3. 整理新聞\n\n"
+                "請直接回覆 1、2 或 3。",
+            )
 
     async def _handle_pending_image_ocr_choice(self, event: MessageEvent) -> Optional[str]:
         source = getattr(event, "source", None)
@@ -2430,6 +2447,16 @@ class GatewayInboundMixin:
         image_paths = pending.get("image_paths") or []
         if not image_paths:
             return None
+        if normalized == "business_card" and len(image_paths) > 1:
+            self._pending_namecard_correction_choices().pop(key, None)
+            await self._deliver_platform_notice(
+                source, f"收到 {len(image_paths)} 張名片，正在批次處理中，請稍候..."
+            )
+            reply_text = await self._process_business_card_batch(image_paths, source=source)
+            await self._deliver_direct_image_ocr_reply(
+                source, reply_text, already_formatted=True
+            )
+            return ""
         ocr_text = await asyncio.to_thread(self._extract_images_text_with_tesseract, image_paths)
         if not ocr_text:
             enriched = await self._enrich_message_with_vision("", image_paths, ocr_translate=True)
@@ -2521,12 +2548,62 @@ class GatewayInboundMixin:
                 lines.append(line)
         return "\n".join(lines).strip()
 
+    async def _process_business_card_batch(
+        self,
+        image_paths: List[str],
+        *,
+        source: SessionSource,
+    ) -> str:
+        """Process each image in a business-card batch independently."""
+        successful = 0
+        failures: List[str] = []
+
+        for index, image_path in enumerate(image_paths, start=1):
+            display_name = Path(image_path).name or f"第{index}張"
+            outcome: Dict[str, Any] = {}
+            try:
+                ocr_text = await asyncio.to_thread(
+                    self._extract_images_text_with_tesseract, [image_path]
+                )
+                if not ocr_text:
+                    raise ValueError("OCR 未擷取到文字")
+                await self._process_business_card_ocr(
+                    ocr_text,
+                    [image_path],
+                    source=source,
+                    _allow_correction_pointer=False,
+                    _outcome=outcome,
+                )
+                if outcome.get("success", True):
+                    successful += 1
+                else:
+                    failures.append(f"{display_name}（{outcome.get('reason', '處理失敗')}）")
+            except Exception as exc:
+                logger.exception(
+                    "Business-card batch item %d (%s) failed",
+                    index,
+                    image_path,
+                )
+                reason = str(exc).strip() or type(exc).__name__
+                failures.append(f"{display_name}（{reason}）")
+
+        total = len(image_paths)
+        lines = [
+            f"📇 名片批次處理完成：共 {total} 張，成功 {successful} 張，失敗 {len(failures)} 張。"
+        ]
+        if failures:
+            lines.extend(["", "失敗項目：", *[f"- {failure}" for failure in failures]])
+        lines.extend(["", "批次儲存的名片不提供快速修正；如需修改，請提供對應的 Notion 連結。"])
+        return "\n".join(lines)
+
     async def _process_business_card_ocr(
         self,
         ocr_text: str,
         image_paths: List[str],
         *,
         source: Optional[SessionSource] = None,
+        _allow_correction_pointer: bool = True,
+        _outcome: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Extract, back up, and persist one business-card OCR result.
 
@@ -2535,14 +2612,17 @@ class GatewayInboundMixin:
         the user without a useful response.
         """
         extraction_error = ""
+        extraction_failure_reason = ""
         try:
             fields = await self._extract_business_card_fields(ocr_text)
         except Exception as exc:
             logger.warning("Business-card constrained extraction failed: %s", exc)
             fields = {field: "" for field in _NAMECARD_FIELDS}
             extraction_error = str(exc)
+            extraction_failure_reason = type(exc).__name__
 
         local_backup = {}
+        local_backup_failure_reason = ""
         try:
             local_backup = await asyncio.to_thread(
                 self._save_business_card_local_backup,
@@ -2553,9 +2633,11 @@ class GatewayInboundMixin:
         except Exception as exc:
             logger.exception("Business-card local backup failed: %s", exc)
             local_backup = {"error": str(exc)}
+            local_backup_failure_reason = type(exc).__name__
 
         notion_result = {}
         notion_error = ""
+        notion_failure_reason = ""
         if not extraction_error:
             try:
                 notion_result = await self._save_business_card_to_notion(
@@ -2565,17 +2647,39 @@ class GatewayInboundMixin:
             except Exception as exc:
                 logger.exception("Business-card Notion save failed: %s", exc)
                 notion_error = str(exc)
+                notion_failure_reason = type(exc).__name__
         else:
             notion_error = "結構化擷取失敗，未寫入 Notion"
 
+        # Keep only the pointer needed for the immediate correction UX.  The
+        # Notion page must have been created successfully before this exists.
         page_id = str(notion_result.get("page_id") or "").strip()
-        if source is not None and page_id:
-            self._pending_namecard_correction_choices()[self._image_ocr_choice_key(source)] = {
+        if _allow_correction_pointer and source is not None and page_id:
+            self._pending_namecard_correction_choices()[
+                self._image_ocr_choice_key(source)
+            ] = {
                 "page_id": page_id,
                 "fields": dict(fields),
                 "record_path": str(local_backup.get("record_path") or ""),
                 "saved_at": time.time(),
             }
+
+        if _outcome is not None:
+            failure_reasons = []
+            if extraction_failure_reason:
+                failure_reasons.append(f"欄位擷取失敗（{extraction_failure_reason}）")
+            if local_backup_failure_reason or local_backup.get("error"):
+                failure_reasons.append(
+                    f"本機備份失敗（{local_backup_failure_reason or 'Error'}）"
+                )
+            if notion_failure_reason:
+                failure_reasons.append(f"Notion 寫入失敗（{notion_failure_reason}）")
+            elif not extraction_error and not page_id:
+                failure_reasons.append("Notion 未回傳頁面 ID")
+            _outcome.update(
+                success=not failure_reasons,
+                reason="、".join(failure_reasons) or "",
+            )
 
         return self._format_business_card_reply(
             ocr_text=ocr_text,

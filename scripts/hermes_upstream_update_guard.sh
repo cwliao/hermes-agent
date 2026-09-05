@@ -38,60 +38,6 @@ REVIEW_SCRIPT="$HERMES_HOME/scripts/hermes_upstream_review.py"
 REPORT_SCRIPT="$HERMES_HOME/scripts/hermes_upstream_report.py"
 [[ -x "$REPORT_SCRIPT" ]] || REPORT_SCRIPT="$REPO/scripts/hermes_upstream_report.py"
 
-# Shared read-only gate. Prefer the installed runtime copy, but fall back to
-# the checkout copy while the local cron-script installer catches up.
-PREFLIGHT_SCRIPT="$HERMES_HOME/scripts/hermes_upstream_preflight.py"
-if [[ ! -x "$PREFLIGHT_SCRIPT" ]]; then
-  PREFLIGHT_SCRIPT="$REPO/scripts/hermes_upstream_preflight.py"
-fi
-if [[ ! -x "$PREFLIGHT_SCRIPT" ]]; then
-  printf '[%s] FAIL: 找不到 upstream preflight script，為安全起見不執行 review。\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" >> "$LOG"
-  exit 0
-fi
-
-PREFLIGHT_STATE_DIR="$HERMES_HOME/hermes-upstream-state"
-preflight_output=""
-if ! preflight_output="$("$PREFLIGHT_SCRIPT" \
-    --repo "$REPO" \
-    --state-dir "$PREFLIGHT_STATE_DIR" \
-    --mode review \
-    --json 2>&1)"; then
-  {
-    printf '[%s] upstream preflight blocked/failed; review body skipped\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
-    printf '%s\n' "$preflight_output"
-  } >> "$LOG"
-  printf '🔍 Hermes upstream preflight 報告 %s\n%s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$preflight_output"
-  exit 0
-fi
-REVIEW_SCRIPT="$HERMES_HOME/scripts/hermes_upstream_review.py"
-if [[ ! -x "$REVIEW_SCRIPT" ]]; then
-  REVIEW_SCRIPT="$REPO/scripts/hermes_upstream_review.py"
-fi
-if [[ ! -x "$REVIEW_SCRIPT" ]]; then
-  printf '[%s] FAIL: 找不到 upstream review script，為安全起見不執行 review。\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" >> "$LOG"
-  exit 0
-fi
-
-review_output=""
-if ! review_output="$("$REVIEW_SCRIPT" \
-    --repo "$REPO" \
-    --state-dir "$PREFLIGHT_STATE_DIR" \
-    --run-id "$(date -u '+%Y%m%d-%H%M%S')" \
-    --json 2>&1)"; then
-  {
-    printf '[%s] upstream review blocked/failed\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
-    printf '%s\n' "$review_output"
-  } >> "$LOG"
-  printf '🔍 Hermes upstream review 報告 %s\n%s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$review_output"
-  exit 0
-fi
-{
-  printf '[%s] upstream review completed\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
-  printf '%s\n' "$review_output"
-} >> "$LOG"
-printf '%s\n' "$review_output"
-exit 0
-
 now() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 log() { printf '[%s] %s\n' "$(now)" "$*" >> "$LOG"; }
 

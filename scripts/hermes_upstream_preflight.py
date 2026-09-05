@@ -404,6 +404,14 @@ def _check_lock(state_dir: Path, now: datetime, issues: list[Issue]) -> dict[str
     expires = _parse_time(metadata.get("expires_at"))
     required = ("owner", "run_id", "pid", "expires_at")
     missing = [key for key in required if metadata.get(key) in (None, "")]
+    if not missing and expires is not None and expires > now:
+        _issue(
+            issues,
+            "LOCKED",
+            "BLOCKED",
+            f"已有未過期的 upstream update lock：{path}；本次流程不會並行執行。",
+            "等待目前流程完成，或確認 owner/pid 後依 runbook 處理。",
+        )
     if missing or expires is None or expires <= now:
         reason = "已過期" if expires is not None and expires <= now else "欄位缺失或時間格式無效"
         _issue(

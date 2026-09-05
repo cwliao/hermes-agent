@@ -249,13 +249,13 @@ def review(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             metadata["error_code"] = exc.code
         _write_json(candidate_path, metadata)
         _git_try(repo, ["update-ref", "-d", review_ref])
-        return 1, {"phase": "review", "status": metadata["status"], "run_id": run_id, "candidate": metadata}
+        return 1, {"phase": "review", "status": metadata["status"], "run_id": run_id, "candidate": metadata, "next_step": "依 error_code 修正後重新執行 review-only；不要 apply。"}
     finally:
         if worktree is not None:
             _git_try(repo, ["worktree", "remove", "--force", str(worktree)])
             shutil.rmtree(worktree, ignore_errors=True)
 
-    return 0, {"phase": "review", "status": "PENDING", "run_id": run_id, "candidate": metadata}
+    return 0, {"phase": "review", "status": "PENDING", "run_id": run_id, "candidate": metadata, "next_step": f"檢查 candidate diff，人工核准後以 run_id={run_id} 執行 apply。"}
 
 
 def main(argv: list[str] | None = None) -> int:

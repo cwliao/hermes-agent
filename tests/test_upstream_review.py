@@ -35,6 +35,9 @@ def repo_fixture(tmp_path: Path) -> tuple[Path, Path]:
     (repo / "README.md").write_text("baseline\n", encoding="utf-8")
     git(repo, "add", "README.md")
     git(repo, "commit", "-m", "baseline")
+    (repo / "history.txt").write_text("history\n", encoding="utf-8")
+    git(repo, "add", "history.txt")
+    git(repo, "commit", "-m", "history")
     subprocess.run(["git", "init", "--bare", str(upstream)], check=True, stdout=subprocess.DEVNULL)
     git(repo, "remote", "add", "upstream", str(upstream))
     git(repo, "push", "upstream", "main")
@@ -69,6 +72,7 @@ def run_review(repo: Path, state: Path, *extra: str) -> tuple[int, dict]:
 def push_upstream_change(upstream: Path, tmp_path: Path, content: str) -> None:
     clone = tmp_path / "upstream-clone"
     subprocess.run(["git", "clone", str(upstream), str(clone)], check=True, stdout=subprocess.DEVNULL)
+    git(clone, "switch", "-c", "main", "--track", "origin/main")
     git(clone, "config", "user.email", "test@example.invalid")
     git(clone, "config", "user.name", "Hermes test")
     (clone / "README.md").write_text(content, encoding="utf-8")

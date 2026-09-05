@@ -170,7 +170,7 @@ def _check_upstream(
     issues: list[Issue],
 ) -> dict[str, Any]:
     try:
-        url = _git(repo, ["remote", "get-url", remote])
+        _git(repo, ["remote", "get-url", remote])
     except GitProbeError:
         _issue(
             issues,
@@ -195,7 +195,7 @@ def _check_upstream(
             f"重試：git -C {repo} ls-remote --heads {remote} {ref}",
             "確認網路、DNS、remote 權限與 upstream branch 名稱後再重跑。",
         )
-        return {"remote": remote, "ref": ref, "url": url, "reachable": False}
+        return {"remote": remote, "ref": ref, "reachable": False}
 
     upstream_sha = output.split()[0] if output.split() else None
     if not _valid_sha(upstream_sha):
@@ -206,11 +206,10 @@ def _check_upstream(
             f"{remote}/{ref} 回傳格式無法辨識；未更新任何 local ref。",
             f"人工檢查：git -C {repo} ls-remote --heads {remote} {ref}",
         )
-        return {"remote": remote, "ref": ref, "url": url, "reachable": False}
+        return {"remote": remote, "ref": ref, "reachable": False}
     return {
         "remote": remote,
         "ref": ref,
-        "url": url,
         "reachable": True,
         "remote_sha": upstream_sha,
     }

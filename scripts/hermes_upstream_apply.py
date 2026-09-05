@@ -59,7 +59,7 @@ def apply(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     state = Path(args.state_dir).expanduser().resolve()
     candidate_path = state / "candidates" / f"{args.run_id}.json"
     candidate = _load(candidate_path)
-    result: dict[str, Any] = {"phase": "apply", "run_id": args.run_id, "release_id": candidate.get("release_id"), "status": "FAILED", "dry_run": not args.execute}
+    result: dict[str, Any] = {"phase": "apply", "run_id": args.run_id, "candidate_path": str(candidate_path), "release_id": candidate.get("release_id"), "status": "FAILED", "dry_run": not args.execute}
 
     if str(candidate.get("status")).upper() != "APPROVED":
         result.update(status="BLOCKED", error_code="NOT_APPROVED", next_step="取得人工 approval 後重試 apply")
@@ -75,7 +75,7 @@ def apply(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     )
     preflight_code, preflight = run_preflight(preflight_args)
     if preflight_code:
-        return 1, {**result, "status": preflight.get("status", "BLOCKED"), "error_code": "APPLY_PREFLIGHT", "preflight": preflight}
+        return 1, {**result, "status": preflight.get("status", "BLOCKED"), "error_code": "APPLY_PREFLIGHT", "preflight_artifact": preflight.get("artifact_path"), "preflight": preflight}
 
     source_sha = _git(repo, ["rev-parse", "refs/heads/main"])
     if source_sha != candidate.get("source_sha"):
@@ -120,7 +120,7 @@ def apply(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         identity = _run(["systemctl", "--user", "show", args.systemd_unit, "-p", "WorkingDirectory", "-p", "Environment"])
         if active.returncode != 0 or destination.as_posix() not in identity.stdout or str(candidate["candidate_sha"]) not in identity.stdout:
             raise RuntimeError("post-restart health or release identity check failed")
-        result.update(status="DONE", candidate_sha=candidate["candidate_sha"], release_path=str(destination), verification=identity.stdout)
+        result.update(status="DONE", candidate_sha=candidate["candidate_sha"], release_path=str(destination), verification=identity.stdout, next_step="保留 rollback artifacts，檢查 systemd effective identity 與 health logs")
         candidate["status"] = "DONE"
         candidate["applied_main_sha"] = source_sha
         candidate["applied_at_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

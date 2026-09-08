@@ -48,6 +48,71 @@ def write_candidate(repo: Path, state: Path, *, created: str, status: str = "APP
     return path
 
 
+def write_done_candidate_with_ref(repo: Path, state: Path, *, run_id: str, status: str) -> str:
+    """Write a terminal-status (DONE/SUPERSEDED) candidate whose metadata
+    still names a real refs/upstream/review/<run_id> ref, and create that
+    ref in the repo -- mirroring what a completed real update leaves behind
+    (see docs/plans/2026-09-06-upstream-preflight-orphan-ref-001.md)."""
+    review_ref = f"refs/upstream/review/{run_id}"
+    head = git(repo, "rev-parse", "HEAD")
+    git(repo, "update-ref", review_ref, head)
+    path = state / "candidates" / f"{run_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = {
+        "run_id": run_id, "status": status, "created_at_utc": "2026-09-06T05:03:37Z",
+        "candidate_sha": head, "source_sha": head, "parent_sha": git(repo, "rev-parse", "HEAD^"),
+        "release_id": f"release-{run_id}", "review_branch": review_ref,
+    }
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return review_ref
+
+
+def test_done_candidate_ref_is_not_flagged_as_orphan(tmp_path: Path):
+    """Regression test for UPSTREAM-PREFLIGHT-ORPHAN-REF-001: a review ref
+    left behind by a candidate that finished DONE (successfully applied) or
+    SUPERSEDED must not be reported as an orphan -- its metadata still
+    exists and explains it; it just isn't PENDING/APPROVED any more."""
+    repo = make_repo(tmp_path)
+    state = tmp_path / "state"
+    (state / "candidates").mkdir(parents=True)
+    write_done_candidate_with_ref(repo, state, run_id="20260906-050337", status="DONE")
+
+    result = subprocess.run(
+        ["python3", str(Path(__file__).parents[1] / "scripts/hermes_upstream_preflight.py"),
+         "--repo", str(repo), "--state-dir", str(state), "--now", "2026-09-08T10:00:00Z", "--json"],
+        text=True, stdout=subprocess.PIPE, check=False,
+    )
+    payload = json.loads(result.stdout)
+    orphan_issues = [
+        item for item in payload["issues"]
+        if item["code"] == "STALE_REVIEW_CANDIDATE" and "沒有 metadata 對應" in item["message"]
+    ]
+    assert orphan_issues == [], orphan_issues
+
+
+def test_ref_with_no_metadata_at_all_is_still_flagged_as_orphan(tmp_path: Path):
+    """A review ref with genuinely no backing candidate file anywhere must
+    still fail closed -- the fix must not weaken true-orphan detection."""
+    repo = make_repo(tmp_path)
+    state = tmp_path / "state"
+    (state / "candidates").mkdir(parents=True)
+    head = git(repo, "rev-parse", "HEAD")
+    git(repo, "update-ref", "refs/upstream/review/no-metadata-at-all", head)
+
+    result = subprocess.run(
+        ["python3", str(Path(__file__).parents[1] / "scripts/hermes_upstream_preflight.py"),
+         "--repo", str(repo), "--state-dir", str(state), "--now", "2026-09-08T10:00:00Z", "--json"],
+        text=True, stdout=subprocess.PIPE, check=False,
+    )
+    payload = json.loads(result.stdout)
+    orphan_issues = [
+        item for item in payload["issues"]
+        if item["code"] == "STALE_REVIEW_CANDIDATE" and "沒有 metadata 對應" in item["message"]
+    ]
+    assert len(orphan_issues) == 1
+    assert "no-metadata-at-all" in orphan_issues[0]["message"]
+
+
 def test_expired_candidate_is_blocked(tmp_path: Path):
     repo = make_repo(tmp_path)
     state = tmp_path / "state"

@@ -331,15 +331,31 @@ def _check_candidates(
 
     # Reserved review refs must always have a matching metadata record. This
     # check is read-only and intentionally leaves orphan refs for review.
+    #
+    # Fix for UPSTREAM-PREFLIGHT-ORPHAN-REF-001 (docs/plans/2026-09-06-
+    # upstream-preflight-orphan-ref-001.md): this scan must always consider
+    # the FULL candidate directory, never narrowed by --run-id (a run_id
+    # only scopes which single candidate is validated as the active/approved
+    # one above -- it must not also scope which refs count as "known" here).
+    # It must also treat ANY existing metadata file as "known" regardless of
+    # its status: a candidate that finished as DONE (successfully applied)
+    # or SUPERSEDED is not an orphan -- its ref simply documents completed
+    # history, and only a ref with genuinely NO backing metadata file is a
+    # true orphan that should fail closed and block.
     try:
         refs = _git(repo, ["for-each-ref", "--format=%(refname)", "refs/upstream/review"]).splitlines()
     except GitProbeError:
         refs = []
-    known_refs = {
-        _review_ref(metadata.get("review_branch"))
-        for _, metadata in active
-        if _review_ref(metadata.get("review_branch"))
-    }
+    known_refs: set[str] = set()
+    for path in _candidate_files(candidate_dir, None):
+        if not path.exists():
+            continue
+        metadata = _load_json(path)
+        if metadata is None:
+            continue
+        ref = _review_ref(metadata.get("review_branch"))
+        if ref:
+            known_refs.add(ref)
     for ref in refs:
         if ref not in known_refs:
             _issue(

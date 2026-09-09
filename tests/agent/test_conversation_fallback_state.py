@@ -244,7 +244,7 @@ def test_housekeeping_only_turn_still_sets_fallback():
     ]
 
     with (
-        patch("run_agent.handle_function_call", return_value="ok"),
+        patch("model_tools.handle_function_call", return_value="ok"),
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
         patch.object(agent, "_cleanup_task_resources"),

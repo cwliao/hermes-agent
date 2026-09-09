@@ -80,6 +80,16 @@ def is_stall_guard_repeatable(tool_name: str) -> bool:
     return tool_name in STALL_GUARD_REPEATABLE_TOOLS or tool_name.endswith(_STALL_GUARD_REPEATABLE_SUFFIXES)
 
 
+DETERMINISTIC_BLOCKER_CLASSES = frozenset(
+    {"missing_target", "permission", "invalid_workdir", "malformed_input"}
+)
+_TARGET_KEYS = frozenset({
+    "path", "file", "file_path", "filename", "target", "destination", "dest", "source", "src",
+    "workdir", "cwd", "directory", "url", "key", "name", "job_id", "message_id", "chat_id",
+    "channel", "ref", "element", "goal", "script",
+})
+
+
 def _is_non_interactive_platform(platform: str | None) -> bool:
     """True for gateway/cron sessions where tool loops are unattended."""
     if not isinstance(platform, str) or not platform.strip():

@@ -169,8 +169,9 @@ def _read_swarm_completion_state(payload: Mapping[str, Any]) -> Mapping[str, Any
     """
     try:
         from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_db_connect as kbc
 
-        conn = kb.connect()
+        conn = kbc.connect()
         try:
             verifier = kb.get_task(conn, str(payload["verifier_id"]))
             synthesizer = kb.get_task(conn, str(payload["synthesizer_id"]))
@@ -325,10 +326,10 @@ def _has_control_escape(value: Any) -> bool:
 def _find_active_swarms_for_session() -> list[dict[str, Any]]:
     """Return active (non-terminal) swarm topologies belonging to the current session."""
     try:
-        from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_db_connect as kbc
         from hermes_cli.kanban_swarm import find_active_swarms_for_session
 
-        conn = kb.connect()
+        conn = kbc.connect()
         try:
             return find_active_swarms_for_session(conn)
         finally:

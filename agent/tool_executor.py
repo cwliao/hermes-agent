@@ -1602,13 +1602,10 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
 
     # Registry tools: post hook is owned by this executor (inner observer suppressed).
     def _execute(next_args: dict) -> Any:
-        # Resolve through run_agent's compatibility alias at call time so
-        # legacy plugin/test patches remain effective.
-        from run_agent import handle_function_call
         import model_tools
 
         with model_tools.suppress_post_tool_call_hook():
-            return handle_function_call(
+            return model_tools.handle_function_call(
                 function_name,
                 next_args,
                 effective_task_id,

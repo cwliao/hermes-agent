@@ -3274,7 +3274,7 @@ class TestRunConversation:
             )
 
         with (
-            patch("run_agent.handle_function_call", side_effect=_dispatch),
+            patch("model_tools.handle_function_call", side_effect=_dispatch),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),

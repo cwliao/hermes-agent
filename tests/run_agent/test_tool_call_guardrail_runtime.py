@@ -302,7 +302,7 @@ def test_worker_terminal_success_drains_later_calls_in_same_batch(monkeypatch):
         return json.dumps({"ok": True, "task_id": "t_done", "run_id": 7})
 
     messages = []
-    with patch("run_agent.handle_function_call", side_effect=fake_handle):
+    with patch("model_tools.handle_function_call", side_effect=fake_handle):
         agent._execute_tool_calls(
             SimpleNamespace(content="", tool_calls=calls), messages, "t_done"
         )

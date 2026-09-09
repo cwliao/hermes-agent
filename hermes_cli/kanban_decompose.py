@@ -316,7 +316,7 @@ def decompose_task(
             "Task carries a [swarm:contract] marker; refusing to auto-decompose/"
             "rewrite to avoid corrupting swarm state. Needs human triage."
         )
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             kb.record_swarm_stall_diagnostic(
                 conn, task_id, reason=reason,
                 stall_key=f"triage-refused:{task_id}",

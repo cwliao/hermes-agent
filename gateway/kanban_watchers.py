@@ -528,7 +528,9 @@ class GatewayKanbanWatchersMixin:
             # waiting for a human, not a stuck dispatcher; probing it here would
             # fire a false "dispatcher stuck" warning that never clears. Shares
             # the exact gate the dispatcher uses so the two can't drift.
-            _review_probe = _kb.review_dispatch_enabled()
+            from hermes_cli import kanban_db_connect as _kbc
+            from hermes_cli import kanban_db_dispatch as _kbd
+            _review_probe = _kbd.review_dispatch_enabled()
             try:
                 boards = _kb.list_boards(include_archived=False)
             except Exception:
@@ -537,10 +539,10 @@ class GatewayKanbanWatchersMixin:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
                 conn = None
                 try:
-                    conn = _kb.connect(board=slug)
-                    if _kb.has_spawnable_ready(conn):
+                    conn = _kbc.connect(board=slug)
+                    if _kbd.has_spawnable_ready(conn):
                         return True
-                    if _review_probe and _kb.has_spawnable_review(conn):
+                    if _review_probe and _kbd.has_spawnable_review(conn):
                         return True
                 except Exception:
                     continue
@@ -769,6 +771,7 @@ class GatewayKanbanWatchersMixin:
             return
         try:
             from hermes_cli import kanban_db as _kb
+            from hermes_cli import kanban_db_connect as _kbc
         except Exception:
             logger.warning("kanban swarm supervisor: kanban_db not importable; skip tick")
             return
@@ -780,7 +783,7 @@ class GatewayKanbanWatchersMixin:
             slug = board.get("slug") or _kb.DEFAULT_BOARD
             conn = None
             try:
-                conn = _kb.connect(board=slug)
+                conn = _kbc.connect(board=slug)
                 _supervise_swarm_stalls(conn, now=now)
             except Exception:
                 logger.exception(

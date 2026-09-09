@@ -889,7 +889,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_nsub.add_argument(
         "--delivery-mode",
         # Single source of truth shared with the DB/watcher enum.
-        choices=kb._NOTIFY_DELIVERY_MODES,
+        choices=kbn._NOTIFY_DELIVERY_MODES,
         default=None,
         help="How the kanban-notifier reacts to terminal events for this "
              "subscription: 'notify' (passive message only; default), "
@@ -2534,7 +2534,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             # predicate: only clean, fully-pushed worktrees are removed.
             wt_path = row["workspace_path"]
             if wt_path and Path(wt_path).is_dir():
-                kb._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"])
+                kbw._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"])
                 if not Path(wt_path).is_dir():
                     removed_ws += 1
             continue

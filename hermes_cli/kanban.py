@@ -1331,7 +1331,7 @@ def _cmd_watcher(args: argparse.Namespace) -> int:
         )
         return 2
     if action == "list":
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             data = kb.list_external_watchers(
                 conn, include_expired=bool(getattr(args, "include_expired", False))
             )
@@ -1358,7 +1358,7 @@ def _cmd_watcher(args: argparse.Namespace) -> int:
                 if not isinstance(decoded, dict):
                     raise ValueError("--metadata must be a JSON object")
                 metadata = decoded
-            with kb.connect_closing() as conn:
+            with kbc.connect_closing() as conn:
                 expires_at = kb.register_external_watcher(
                     conn,
                     assignee=args.assignee,
@@ -1375,7 +1375,7 @@ def _cmd_watcher(args: argparse.Namespace) -> int:
                 "expires_at": expires_at,
             }
         elif action == "heartbeat":
-            with kb.connect_closing() as conn:
+            with kbc.connect_closing() as conn:
                 expires_at = kb.heartbeat_external_watcher(
                     conn,
                     assignee=args.assignee,
@@ -1397,7 +1397,7 @@ def _cmd_watcher(args: argparse.Namespace) -> int:
                 "expires_at": expires_at,
             }
         elif action == "unregister":
-            with kb.connect_closing() as conn:
+            with kbc.connect_closing() as conn:
                 removed = kb.unregister_external_watcher(
                     conn, assignee=args.assignee, watcher_id=watcher_id
                 )
@@ -2588,7 +2588,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         # Everything below this point deletes derived data. A dry run must
         # not reach it -- an earlier version ran the purges first and then
         # reported that nothing had been touched.
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             graphs = kb.find_dead_graphs(
                 conn,
                 older_than_seconds=getattr(args, "dead_graph_days", 7) * 24 * 3600,
@@ -2603,7 +2603,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
 
     scratch_root = kb.workspaces_root()
     removed_ws = 0
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         rows = conn.execute(
             "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
             "WHERE status = 'archived'"
@@ -2637,7 +2637,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
 
     event_days = getattr(args, "event_retention_days", 30)
     log_days = getattr(args, "log_retention_days", 30)
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         removed_events = kb.gc_events(
             conn, older_than_seconds=event_days * 24 * 3600,
         )
@@ -2662,7 +2662,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         if max_dead_graphs < 0:
             print("--max-dead-graphs must be a non-negative integer", file=sys.stderr)
             return 2
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             graphs = kb.find_dead_graphs(
                 conn,
                 older_than_seconds=getattr(args, "dead_graph_days", 7) * 24 * 3600,

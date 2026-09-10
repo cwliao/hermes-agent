@@ -1,7 +1,18 @@
 # Project Handover - hermes-agent
 
+> **UPDATE 2026-09-10 (Asia/Taipei):** This entire handover document,
+> including "Verified runtime and deployment state" and "Ticket and gate
+> state" below, is a **superseded historical snapshot** from 2026-08-17 —
+> the active release, service PID, and ticket statuses it names no longer
+> exist or are ancient by commit-count. See `docs/ROADMAP-HERMES-DGX.md`'s
+> "Current state, 2026-09-10" section (added the same day as this notice)
+> for what's actually live now: current `main` HEAD, live gateway
+> deployment identity, and the Telegram-delivery gate this document lists
+> as unverified (§4 "Next gate") — which is now closed and verified. The
+> rest of this file is left exactly as it was on 2026-08-17.
+
 **Plan key:** hermes-agent  
-**Last verified:** 2026-08-17 (Asia/Taipei)
+**Last verified:** 2026-08-17 (Asia/Taipei) — superseded, see notice above
 **Handover owner/session:** Codex  
 **Authoritative project log:** `docs/ROADMAP-HERMES-DGX.md`
 

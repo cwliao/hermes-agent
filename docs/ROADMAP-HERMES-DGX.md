@@ -1,5 +1,65 @@
 # Hermes Architecture Roadmap
 
+> **UPDATE 2026-09-10 (Asia/Taipei):** Everything below this notice is a
+> **superseded historical snapshot** from 2026-08-17, kept for history —
+> ARCH-002/003/004 and the tickets below are ancient by commit-count now
+> (hundreds of commits and roughly three weeks have passed). Do not treat
+> the "Current topology" table, "Ticket status" table, or "Current next
+> lane" section below as live. See the new **"Current state, 2026-09-10"**
+> section immediately after this notice for what's actually true today;
+> everything from `## Source-of-truth rules` onward is the original
+> 2026-08-17 text, unedited.
+>
+> ## Current state, 2026-09-10
+>
+> - **`main` HEAD:** `961630ab6f5f5ce522e28f73c05f4c83ec5fea5d` (2026-09-10).
+>   As of the last check this same day, local `main` is 11 commits behind
+>   the true upstream tip (`NousResearch/hermes-agent`, remote `upstream`)
+>   — upstream merges very fast, so this number is stale by the time you
+>   read it. Re-check with `git fetch upstream main && git rev-list
+>   --left-right --count HEAD...upstream/main` rather than trusting any
+>   number written here or in `hermes --version` (the latter compares
+>   against `origin/main`, the user's own fork mirror, which can itself go
+>   stale for a long time — see AgentMemory
+>   `projects/LLMINFRA/design-notes/LLMINFRA-design-hermes-upstream-sync-202609-final.md`).
+> - **Live gateway:** `hermes-gateway.service`, deployed via the systemd
+>   drop-in + release-snapshot procedure documented in
+>   `docs/operations/hermes-upstream-updater.md`'s sibling note below, and
+>   in AgentMemory `LLMINFRA-design-hermes-deploy-procedure-202609-final.md`.
+>   Verified live and connected to Telegram as of this update.
+> - **Telegram user-visible delivery — the gate this roadmap's 2026-08-17
+>   snapshot lists as `NEXT_GATE`/unverified — is now CLOSED.** Verified
+>   for real on 2026-09-09: a live Telegram message triggered an instamem
+>   MCP tool call from Hermes's own main agent loop, independently
+>   confirmed via direct `sqlite3` query against the target database with
+>   timestamps cross-referenced against the gateway's own journal log for
+>   the same turn. Full record:
+>   `~/project/instamem/docs/architecture/ticket-hermes-main-loop-instamem-unverified.md`.
+> - **This session's upstream syncs were done manually** (`git fetch
+>   upstream` + `git rebase upstream/main` + hand-resolved conflicts +
+>   `git push --force-with-lease origin main` + manual
+>   `scripts/release_snapshot.py` + systemd drop-in swap), **not** through
+>   this repo's own formal `scripts/hermes_upstream_{preflight,review,apply}.py`
+>   tool documented in `docs/operations/hermes-upstream-updater.md`. That
+>   tool has a real prior track record (see
+>   `~/.hermes/hermes-upstream-state/candidates/*.json`) but its own
+>   preflight was `BLOCKED` on a `STALE_REVIEW_CANDIDATE` (an orphaned
+>   `refs/upstream/review/20260906-050337` ref) as of its last scheduled
+>   run (2026-09-09 20:30 UTC / 2026-09-10 04:30 Asia/Taipei, via the daily
+>   "Hermes upstream update guard" cron job) — this predates and is
+>   unrelated to today's manual syncs, but means the tool's own state may
+>   now be out of sync with reality after two manual force-pushes to
+>   `origin/main`. Reconcile that tool's state (or at minimum clear the
+>   orphan ref per its own runbook) before trusting it for the next sync.
+> - A fork-specific bug found and fixed today, unrelated to any of the
+>   above tickets: external watcher leases (`hermes kanban watcher
+>   register`) weren't checked against the default board when a task was
+>   created on a different, explicitly-named board — see AgentMemory
+>   `LLMINFRA-design-hermes-rebase-conflict-patterns-202609-final.md` for
+>   the full root cause. Fixed in commit `961630ab6f`.
+>
+> --- original 2026-08-17 snapshot below, unedited ---
+>
 > Snapshot: 2026-08-17 (Asia/Taipei). `main` is the canonical Hermes
 > integration line; DGX release snapshots are deployable evidence only.
 > Runtime service health, Telegram inbound polling, outbound delivery, and

@@ -1,7 +1,12 @@
 # External agent availability and MoA quorum
 
 **Scope:** DGX Spark host `55-0940189-03` and Hermes runtime operations
-**Last verified:** 2026-08-23 (Asia/Taipei)
+**Last verified:** 2026-08-23 (Asia/Taipei) — **stale as of 2026-09-10**;
+noticed during an unrelated upstream-sync documentation pass, not
+re-probed. The "Current probe result" column below is ~2.5 weeks old and
+this class of state (auth status, API keys, route stability) is exactly
+the kind that drifts silently — re-run the probes in "Agent inventory"
+before relying on this table for a real quorum decision.
 
 This is operational memory for future agents. It records how to select real
 external agents; it is not a claim that every installed binary is currently

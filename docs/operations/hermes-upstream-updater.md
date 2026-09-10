@@ -1,5 +1,30 @@
 # Hermes upstream updater runbook
 
+> **UPDATE 2026-09-10:** Two upstream syncs on 2026-09-09 and 2026-09-10
+> (43 commits, then 329 commits) were done **manually** — plain `git fetch
+> upstream main` + `git rebase upstream/main` + hand-resolved conflicts +
+> `git push --force-with-lease origin main` + manual
+> `scripts/release_snapshot.py` + a systemd drop-in swap — bypassing this
+> runbook's tool entirely. Both syncs are recorded in AgentMemory
+> (`projects/LLMINFRA/design-notes/LLMINFRA-design-hermes-deploy-procedure-202609-final.md`,
+> `LLMINFRA-design-hermes-upstream-sync-202609-final.md`,
+> `LLMINFRA-design-hermes-rebase-conflict-patterns-202609-final.md`).
+>
+> Separately, and predating both of those manual syncs: the tool's own
+> daily preflight (run by the "Hermes upstream update guard" cron job,
+> 04:30 Asia/Taipei) has been reporting `status: BLOCKED` /
+> `STALE_REVIEW_CANDIDATE` since at least 2026-09-09 20:30 UTC, over an
+> orphaned `refs/upstream/review/20260906-050337` ref with no matching
+> candidate metadata found by its own scan. The tool does have a real
+> prior track record (see `~/.hermes/hermes-upstream-state/candidates/*.json`,
+> e.g. an applied candidate from 2026-09-06) — it isn't unused or
+> decorative, just currently blocked and now also two manual force-pushes
+> behind whatever state it last modeled. **Before relying on this tool
+> again:** clean up the orphan ref per the "State and recovery matrix"
+> below, then run a fresh `--mode review` preflight to re-baseline it
+> against the current `origin/main`/`main` before trusting its next
+> candidate.
+
 ## Contract
 
 The updater uses **rebase-based review candidate + snapshot promotion**.

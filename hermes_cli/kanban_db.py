@@ -1356,7 +1356,17 @@ def list_external_watchers(
 def external_watcher_available(
     conn: sqlite3.Connection, assignee: str, *, now: Optional[int] = None
 ) -> bool:
-    """Return true only when an external watcher lease is currently alive."""
+    """Return true only when an external watcher lease is currently alive.
+
+    Leases live in whichever board's DB was ambient when ``hermes kanban
+    watcher register`` ran (it never takes a ``--board``, so almost every
+    real registration lands in the *default* board). A task can be created
+    on a different, explicitly-named board, whose own DB has no such row.
+    Check ``conn``'s own board first (honors a watcher that intentionally
+    registered against a non-default board), then fall back to the default
+    board's table so the common case (register once, dispatch anywhere)
+    keeps working.
+    """
     raw_assignee = str(assignee or "").strip()
     if not raw_assignee:
         return False
@@ -1367,6 +1377,27 @@ def external_watcher_available(
         "WHERE assignee=? AND expires_at > ? LIMIT 1",
         (assignee, now),
     ).fetchone()
+    if row is not None:
+        return True
+    default_path = kanban_db_path(board=None)
+    try:
+        if Path(conn.execute("PRAGMA database_list").fetchone()["file"]).resolve() == default_path.resolve():
+            return False
+    except (sqlite3.Error, OSError):
+        pass
+    try:
+        from hermes_cli.kanban_db_connect import connect as _connect
+        default_conn = _connect(default_path)
+    except Exception:
+        return False
+    try:
+        row = default_conn.execute(
+            "SELECT 1 FROM kanban_assignee_watchers "
+            "WHERE assignee=? AND expires_at > ? LIMIT 1",
+            (assignee, now),
+        ).fetchone()
+    finally:
+        default_conn.close()
     return row is not None
 
 

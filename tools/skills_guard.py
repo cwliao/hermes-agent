@@ -586,10 +586,13 @@ def _shell_tokens(line: str) -> List[str]:
                         tokens.append(token[0])
                         token = token[1:]
             else:
-                # A leading/trailing backtick marks a JS/TS template-literal boundary
-                # (`dig +short A ${host}`), not part of the shell token itself --
-                # strip it so an embedded shell command tokenizes the same way it
-                # would in a real shell line.
+                # Backtick is POSIX command substitution (`` `cmd` `` == ``$(cmd)``),
+                # which shlex does not treat as a quote character, so a substituted
+                # command's name arrives glued to a stray backtick (`` `dig `` stays
+                # ``"`dig"``, never matching ``_DNS_LOOKUP_COMMANDS``). Stripping it
+                # from token edges only (never mid-token) also incidentally covers a
+                # JS/TS template literal used to embed a shell one-liner
+                # (`` `dig +short A ${host}` ``) — same shape, same risk.
                 tokens.append(token.strip("`"))
         return tokens
     except ValueError:
@@ -735,6 +738,8 @@ def _dns_command_uses_variable_tokens(tokens: List[str], literal: bool = False) 
             return True
         start = end + 1
     return False
+
+
 
 # Text extensions to scan; known binary extensions that should NOT be in a skill; script types allowed +x.
 SCANNABLE_EXTENSIONS = {

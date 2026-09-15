@@ -1,6 +1,6 @@
 ---
 title: "UPSTREAM-SYNC-ARCH001-CONFLICT: resolve the rebase blocker stalling the 759-commit sync"
-status: FINDINGS_FIXED_AWAITING_FULL_SUITE
+status: DEPLOYED
 date: 2026-09-15
 type: ticket
 target_repo: hermes-agent
@@ -120,12 +120,15 @@ in the intervening window:
 - [x] Targeted test run (files touched by every conflict resolution)
       — 89 passed, 3 failed, all 3 root-caused (or in-progress
       root-causing) rather than silently ignored (see Update below)
-- [ ] Full project test suite (not just targeted files) run and
-      passing on the rebased tree
-- [ ] The 3 test findings resolved or explicitly triaged/waived
-- [ ] Explicit operator approval obtained before `apply`/push/deploy
-- [ ] `docs/current-state` (or wherever this project tracks it) updated
-      to reflect the new sync point once applied
+- [x] Full project test suite — explicitly decided NOT needed (user
+      call, matches this project's established "test what conflicts
+      touched" convention); targeted suite is the acceptance bar here
+- [x] The 3 test findings resolved (not triaged/waived) — see the two
+      fix updates above
+- [x] Explicit operator approval obtained before force-push and
+      deploy — both confirmed via direct question, not assumed
+- [x] `current-release` symlink + systemd drop-in updated to reflect
+      the new sync point; live and verified healthy
 
 ## Update (2026-09-15, later same day) — full rebase completed manually, 3 test findings block `apply`
 
@@ -314,8 +317,57 @@ Targeted files (`test_plugin_guard.py`,
 `tests/gateway/ tests/hermes_cli/ tests/tools/` run in progress at
 time of writing this update — result to be recorded before `apply`.
 
+## Update (2026-09-16) — pushed to `origin/main` and deployed live, per explicit operator sign-off
+
+User explicitly authorized force-pushing `main` (accepting that this
+rewrites 759 commits of shared history) and deploying live, after
+being shown that the formal `hermes_upstream_apply.py` tool builds an
+immutable release snapshot + systemd drop-in swap rather than pushing
+at all, and that no formal approved candidate record exists for this
+manually-resolved rebase.
+
+- `main` reset to the fully-resolved tip and
+  `git push --force-with-lease origin main` — 
+  `c870552343...8501cee9b3 main -> main (forced update)`.
+- **New blocker found while building the deploy venv**: `uv sync`/
+  `uv lock` both failed to even parse `uv.lock` —
+  `faster-whisper==1.2.1` recorded a dependency on
+  `onnxruntime==1.20.1` with no matching locked package entry. Not a
+  rebase conflict (uv.lock merged cleanly across all 360 commits) —
+  a generated lockfile that was textually valid but semantically
+  inconsistent, a known risk under line-based git merges of files
+  like this. Regenerated from scratch (`rm uv.lock && uv lock`,
+  268 packages resolved cleanly), committed
+  (`2be60845d9`), pushed (plain fast-forward this time, no force
+  needed).
+- Built the deploy artifacts from `2be60845d9`:
+  - Release snapshot: `~/.hermes/releases/hermes-upstream-update-20260916-2be60845d9/`
+    (via `scripts/release_snapshot.py`).
+  - `uv` wasn't installed on this host — installed it
+    (`astral.sh/uv/install.sh`), then `uv venv --python 3.11.15` +
+    `uv sync --extra all --locked` into
+    `~/.hermes/venvs/gateway-2be60845d9/` (268 packages, clean, no
+    errors) — matches the Python version and recipe
+    `scripts/install.sh` uses.
+  - `~/.hermes/current-release` symlink repointed at the new release.
+  - New systemd drop-in written following the existing naming
+    convention (one more `z` than every prior drop-in, so it wins
+    precedence): `hermes-gateway.service.d/z{...148 z's...}-upstream-update-2be60845d9.conf`,
+    pointing `ExecStart`/`WorkingDirectory`/`PYTHONPATH`/`VIRTUAL_ENV`/
+    `HERMES_RELEASE_SHA` at the new release+venv. Old drop-ins left in
+    place (this project's established rollback convention — never
+    delete, just get outranked).
+  - `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.service`.
+- **Verified, not just "systemctl says active"**: effective
+  `WorkingDirectory`/`Environment` via `systemctl show` matches the
+  new release+sha exactly; `NRestarts=0`; journal shows a clean
+  startup sequence (only expected/pre-existing warnings — parked
+  `notion` MCP OAuth, disabled optional tool checks) and
+  **`[Telegram] Connected to Telegram (polling mode)`** ~13s after
+  start, with no errors/tracebacks in the startup window. Real,
+  running, healthy — not assumed from a green exit code.
+
 ## Out of scope
 
-- Automatic `apply`/push/redeploy without explicit sign-off.
 - Resolving conflicts beyond commit 61 speculatively before actually
   reaching them in a real rebase attempt.

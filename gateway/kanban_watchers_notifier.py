@@ -363,14 +363,21 @@ def _first_line(text: str, limit: int) -> str:
     return lines[0][:limit] if lines else text[:limit]
 
 
+def _is_synthesizer_result_delivery(task) -> bool:
+    """A completed synthesizer whose result IS the exact user-facing deliverable.
+
+    Shared by ``_fmt_completed`` (suppresses the wake-handoff summary text) and
+    ``build_wake_text`` (must ALSO suppress the wake turn itself — a summary
+    with no text still woke the creator with a generic "task completed" ping,
+    which could invent/rewrite content on top of an already-delivered result)."""
+    return bool(task and 'role = "synthesizer"' in (task.body or "") and task.result)
+
+
 def _fmt_completed(ev, n) -> tuple:
     # Prefer the run summary from the event payload; fall back to task.result for legacy rows.
     wake_handoff = None
     payload_summary = _payload(ev, "summary")
-    is_synthesizer = bool(
-        n.task and 'role = "synthesizer"' in (n.task.body or "")
-    )
-    if is_synthesizer and n.task and n.task.result:
+    if _is_synthesizer_result_delivery(n.task):
         # The synthesizer result is already the exact user-facing deliverable;
         # do not prepend status text or send it through a wake turn that could
         # rewrite it.
@@ -572,6 +579,11 @@ class _KanbanNotification:
         """Set ``wake_kinds`` / ``session_key`` / ``synth`` for the wake paths."""
         task, sub = self.task, self.sub
         self.wake_kinds = {ev.kind for ev in self.d["events"] if ev.kind in _WAKE_KINDS} if self.wake_agent else set()
+        if _is_synthesizer_result_delivery(task):
+            # ``completed`` is a normal _WAKE_KINDS entry, but a synthesizer's
+            # completion is already delivered verbatim by _fmt_completed — no
+            # wake turn may run on top of it (it could invent/rewrite content).
+            self.wake_kinds.discard("completed")
         self.wake_diagnostic = all(diagnostic_event(ev) for ev in self.d["events"] if ev.kind in self.wake_kinds)
         if not self.wake_kinds:
             return

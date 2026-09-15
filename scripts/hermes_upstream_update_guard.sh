@@ -54,34 +54,62 @@ if ! preflight_output="$("$PREFLIGHT_SCRIPT" \
     --state-dir "$STATE_DIR" \
     --mode review \
     --json 2>&1)"; then
-  printf '⚠️ Hermes upstream 每日檢查被 gate 阻擋（未 deploy、未 restart、未 push）。\n%s\n' "$preflight_output"
   log "preflight blocked/failed"
   log "$preflight_output"
+  # Concise summary (code + message per issue), not the full JSON -- same
+  # "don't flood Telegram with raw candidate/preflight JSON" fix as the
+  # review-blocked path below. Falls back to a short fixed message if the
+  # output isn't parseable JSON (e.g. a Python traceback from a crash).
+  summary="$(printf '%s' "$preflight_output" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+issues = data.get("issues") or []
+lines = []
+for item in issues:
+    if isinstance(item, dict):
+        lines.append("- " + str(item.get("code", "?")) + ": " + str(item.get("message", "")))
+print("\n".join(lines) if lines else "status=" + str(data.get("status", "?")))
+' 2>/dev/null || true)"
+  if [[ -n "$summary" ]]; then
+    printf '⚠️ Hermes upstream 每日檢查被 gate 阻擋（未 deploy、未 restart、未 push）。\n%s\n完整輸出在 log。\n' "$summary"
+  else
+    printf '⚠️ Hermes upstream 每日檢查被 gate 阻擋（未 deploy、未 restart、未 push）。詳見 log。\n'
+  fi
   exit 0
 fi
 
 run_id="$(date -u '+%Y%m%d-%H%M%S')"
 review_output=""
-if ! review_output="$("$REVIEW_SCRIPT" \
+review_rc=0
+review_output="$("$REVIEW_SCRIPT" \
     --repo "$REPO" \
     --state-dir "$STATE_DIR" \
     --run-id "$run_id" \
-    --json 2>&1)"; then
-  printf '⚠️ Hermes upstream review 未通過（未 deploy、未 restart、未 push）。\n%s\n' "$review_output"
-  log "review blocked/failed for run_id=$run_id"
-  log "$review_output"
-  exit 0
-fi
+    --json 2>&1)" || review_rc=$?
 
 candidate_path="$STATE_DIR/candidates/$run_id.json"
+log "review exit=$review_rc for run_id=$run_id"
+log "$review_output"
+
 if [[ ! -f "$candidate_path" ]]; then
-  printf '❌ Hermes upstream review 沒有產生 candidate metadata（run_id=%s）；未 deploy。\n' "$run_id"
-  log "missing candidate metadata for run_id=$run_id"
+  # No candidate metadata at all (e.g. review.py crashed before writing it) --
+  # this is the one case with nothing structured to render concisely from, so
+  # it's the only path that still surfaces raw output. Full detail stays in
+  # the log either way.
+  printf '❌ Hermes upstream review 沒有產生 candidate metadata（run_id=%s）；未 deploy。詳見 log。\n' "$run_id"
   exit 0
 fi
-
-log "review completed for run_id=$run_id"
-log "$review_output"
+# A non-zero exit with a candidate file present means review.py hit a known,
+# structured outcome (e.g. BLOCKED/REBASE_CONFLICT) -- fall through to the
+# report script below, which renders a concise message for that case too
+# (see _render_blocked in hermes_upstream_report.py). Only dumping raw JSON
+# on a truly unstructured failure was the actual cause of past flooding: a
+# rebase conflict is the expected daily steady-state for a long-lived fork,
+# not something that needs its full candidate JSON (commit-id arrays and
+# all) reposted to Telegram every morning.
 
 # The report helper reads only candidate metadata and Git history/diff. Its
 # stdout is intentionally the Telegram payload for this no-agent cron job.

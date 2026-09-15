@@ -110,11 +110,38 @@ def _render_noop(metadata: dict[str, Any]) -> str:
     )
 
 
+def _render_blocked(metadata: dict[str, Any], checked_at: str) -> str:
+    # Deliberately short: a rebase conflict is the expected steady-state for a
+    # long-lived fork (upstream moves daily; local commits pile up between manual
+    # syncs), not an anomaly worth a wall of raw JSON every morning. No commit-id
+    # arrays, no full candidate dump -- those stay in the log file for whoever
+    # actually resolves it.
+    error_code = metadata.get("error_code") or "UNKNOWN"
+    local_commit_ids = metadata.get("local_commit_ids")
+    local_count = len(local_commit_ids) if isinstance(local_commit_ids, list) else "?"
+    replayed = metadata.get("replayed_local_commit_count")
+    progress = f"{replayed}/{local_count}" if isinstance(replayed, int) else f"?/{local_count}"
+    return "\n".join(
+        [
+            "🚧 Hermes upstream 每日檢查：rebase 卡住（沒有新資訊就不會每天重複提醒完整內容）",
+            f"檢查時間：{checked_at}",
+            f"upstream/main：{_short(metadata.get('upstream_sha'))}",
+            f"本地領先：{local_count} commit(s)，卡在第 {progress} 個",
+            f"錯誤代碼：{error_code}",
+            "",
+            "這是長期 fork 的正常狀態，不代表新問題；需要人工用 code workflow 手動解衝突。",
+            "完整細節在 ~/.hermes/logs/hermes_upstream_update_guard.log，不重複貼進 Telegram。",
+        ]
+    )
+
+
 def render_report(repo: Path, metadata: dict[str, Any], checked_at: str | None = None) -> str:
     checked_at = checked_at or datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
     checks = metadata.get("checks") if isinstance(metadata.get("checks"), dict) else {}
     if bool(checks.get("noop")):
         return _render_noop(metadata)
+    if str(metadata.get("status", "")).upper() == "BLOCKED":
+        return _render_blocked(metadata, checked_at)
 
     source_sha = metadata.get("source_sha")
     candidate_sha = metadata.get("candidate_sha")

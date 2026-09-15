@@ -484,7 +484,14 @@ def _shell_tokens(line: str) -> List[str]:
                         tokens.append(token[0])
                         token = token[1:]
             else:
-                tokens.append(token)
+                # Backtick is POSIX command substitution (`` `cmd` `` == ``$(cmd)``),
+                # which shlex does not treat as a quote character, so a substituted
+                # command's name arrives glued to a stray backtick (`` `dig `` stays
+                # ``"`dig"``, never matching ``_DNS_LOOKUP_COMMANDS``). Stripping it
+                # from token edges only (never mid-token) also incidentally covers a
+                # JS/TS template literal used to embed a shell one-liner
+                # (`` `dig +short A ${host}` ``) — same shape, same risk.
+                tokens.append(token.strip("`"))
         return tokens
     except ValueError:
         # An unterminated quote is not a valid executable shell command. The
@@ -571,14 +578,12 @@ def _unwrap_shell_command(
     return tokens, index, end
 
 
-def _dns_command_uses_variable(line: str) -> bool:
-    """Detect a DNS lookup command whose arguments interpolate a variable.
+_BACKTICK_SPAN_RE = re.compile(r"`([^`]*)`")
 
-    Detection is command-position aware. It accepts absolute and quoted
-    executable paths and common wrappers, while not treating a mere mention
-    of ``host`` in another command's arguments as execution.
-    """
-    tokens = _shell_tokens(line)
+
+def _dns_command_tokens_flag(tokens: List[str]) -> bool:
+    """Core detector over an already-tokenized command line (see
+    :func:`_dns_command_uses_variable`)."""
     if not tokens:
         return False
 
@@ -604,6 +609,29 @@ def _dns_command_uses_variable(line: str) -> bool:
             return True
         start = end + 1
     return False
+
+
+def _dns_command_uses_variable(line: str) -> bool:
+    """Detect a DNS lookup command whose arguments interpolate a variable.
+
+    Detection is command-position aware. It accepts absolute and quoted
+    executable paths and common wrappers, while not treating a mere mention
+    of ``host`` in another command's arguments as execution.
+
+    A backtick span (`` `cmd` ``) is POSIX command substitution — real shell
+    executes its content as its own command line regardless of what
+    surrounds it (``` result=`dig $x` ```). The same shape also covers a
+    JS/TS template literal used to embed a one-line shell command (```const
+    lookup = `dig +short A ${host}`;```): tokenizing the WHOLE line there
+    would see ``const lookup = ...`` as the command (JS assignment syntax
+    isn't recognized shell wrapper syntax), so each backtick span's content
+    is analyzed on its own, in addition to the whole line."""
+    if _dns_command_tokens_flag(_shell_tokens(line)):
+        return True
+    return any(
+        _dns_command_tokens_flag(_shell_tokens(inner))
+        for inner in _BACKTICK_SPAN_RE.findall(line)
+    )
 
 # Text extensions to scan; known binary extensions that should NOT be in a skill; script types allowed +x.
 SCANNABLE_EXTENSIONS = {

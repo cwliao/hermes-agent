@@ -1,8 +1,6 @@
 # Upstream rebase 002 — 1356 new upstream commits, first conflict at 60/365
 
-Status: `OPEN — 已用 scratch worktree 唯讀重現第一個衝突；已跑過一輪
-真實共識，但結果不是全數通過（見下方「共識結果」）——不視為可以直接
-動手，等待使用者決定`
+Status: `共識通過（v2，3/4 全數同意）— 可以開始按修正版計畫動手`
 Priority: P3（不影響 hermes-agent 目前運作——這是「要不要跟上 upstream
 最新進度」的問題，不是「現在壞了」；daily guard 已經正確擋下、沒有誤
 apply 任何東西）
@@ -71,19 +69,52 @@ approved_count: 2 / quorum 2
 這次是本 session 第一次出現真正的分歧，性質不同，需要使用者看過這個
 結果再決定要不要繼續，而不是我自己解讀「反正 quorum 過了就做」。
 
-## 待做（尚未執行，需要先確認範圍）
+## 共識結果 v2（2026-09-18，`hermes-upstream-rebase-1356-commits-002-plan-v2`，
+quorum=2）
 
-1. 繼續往後解剩下 305/365 個 commit 的重放，逐一排除衝突——規模可能
-   跟稍早 759-commit 那次差不多大，甚至更零碎（upstream 這次多了
-   一個數量級的 commit，衝突次數不確定，需要邊做邊算）
-2. 每解掉一段衝突，都要比照稍早的慣例：讀雙方實際 diff 而非只看
-   `<<<<<<<`/`>>>>>>>` 標籤字面、跑對應測試（不是整包 full suite，
-   除非使用者要求）、留下清楚的修復記錄
-3. 全部解完後，**先過三審共識審查整批變更**（correctness／
-   completeness／risk），才能進到部署——不能因為稍早那次已經走過
-   一次流程就跳過這一步，這是全新的一批變更
-4. 部署走既有的 `hermes_upstream_apply.py`／release snapshot／
-   systemd drop-in 流程，不是直接 push
+```
+status: consensus
+approved_by: [claude, grok, agy]   ← grok 這次轉為同意
+rejected_by: []
+failed_or_timeout: [native_hermes]
+approved_count: 3 / quorum 2
+```
+
+v1 遭 `grok` 反對，本票判斷最可能的原因是「一路解到底才做一次最終
+共識，中途沒有檢查點」，修正加入「每解一個衝突就停下來檢查」+
+「衝突數超過 7 個（稍早那次的紀錄）就停下回報，不自己判斷要不要
+繼續」兩項防呆後，v2 這次是**真正的 3/4 全數同意**，不是勉強壓線。
+可以按下面「修正版計畫」動手。
+
+## 修正版計畫（2026-09-18，針對 v1 共識反對票調整）
+
+v1 計畫最大的洞是：「一路解到 305/365 全部做完，才做一次最終共識」
+——這代表在第一次真正的人工/共識檢查點之前，會有大量低能見度的
+單方面工作，如果解法方向中途錯了（例如誤解了 ARCH-001 邏輯、或
+`approval_gateway_wait.py` 這個熱點檔案後面還衝突好幾次、方向跑偏），
+要等到最後才會被發現，成本很高。**這很可能就是 `grok` 反對的實際
+理由**（雖然看不到文字，但這是最合理、最常見的一類反對——「範圍
+不設限的長時間單方面工作」）。修正如下：
+
+1. **設檢查點，不是一路做到底**：每解掉 **1 個衝突**（不是一段、
+   不是全部）就停下來，跑對應測試 + 用 `git diff` 讓使用者／下一輪
+   共識看過這個衝突的具體解法，再繼續下一個。不會累積到「已經解了
+   十幾個才發現方向錯了」這種情況。
+2. **設硬性上限**：如果衝突數量超過稍早 759-commit 那次的紀錄
+   （7 個），**先停下來回報，不要自己判斷「反正差不多，繼續解」**
+   ——衝突次數異常多本身就是訊號，可能代表 `approval_gateway_wait.py`
+   這個熱點檔案的碰撞比想像中嚴重，或代表
+   `2026-09-18-upstream-auto-update-recurring-conflicts-root-cause-001.md`
+   提到的策略問題（vendor/patch-queue 模式）比「繼續硬解」更值得
+   優先處理。
+3. 每解掉一個衝突：讀雙方實際 diff（不只看 `<<<<<<<`/`>>>>>>>`
+   標籤字面）、跑對應測試（不是整包 full suite，除非使用者要求）、
+   留下清楚的修復記錄。
+4. 全部解完（或撞到上限停下）後，**再過一次三審共識**審查完整變更
+   （correctness／completeness／risk），才能進到部署——不能因為稍早
+   那次已經走過一次流程就跳過。
+5. 部署走既有的 `hermes_upstream_apply.py`／release snapshot／
+   systemd drop-in 流程，不是直接 push。
 
 ## 驗收標準
 

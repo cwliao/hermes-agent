@@ -1,6 +1,7 @@
 # Upstream rebase 002 — 1356 new upstream commits, first conflict at 60/365
 
-Status: `共識通過（v2，3/4 全數同意）— 可以開始按修正版計畫動手`
+Status: `執行中 — 已解到第 7 個衝突（306/367 commit 重放成功），第 8 個
+衝突觸發共識設定的 7 個上限，依計畫停下回報，等待使用者指示`
 Priority: P3（不影響 hermes-agent 目前運作——這是「要不要跟上 upstream
 最新進度」的問題，不是「現在壞了」；daily guard 已經正確擋下、沒有誤
 apply 任何東西）
@@ -115,6 +116,72 @@ v1 計畫最大的洞是：「一路解到 305/365 全部做完，才做一次�
    那次已經走過一次流程就跳過。
 5. 部署走既有的 `hermes_upstream_apply.py`／release snapshot／
    systemd drop-in 流程，不是直接 push。
+
+## 執行進度（2026-09-18，停在第 8 個衝突，觸發上限回報）
+
+實際工作目錄：`~/.hermes/worktrees/upstream-rebase-1356-002`（獨立
+worktree，分支 `upstream-rebase-1356-002`）——`~/.hermes/hermes-agent`
+主 checkout 跟正在跑的 gateway service **完全沒被動到**，這個 rebase
+全程在隔離的 worktree 裡進行。
+
+已成功重放 **306/367** 個本地 commit。解掉的 7 個真實衝突：
+
+1. `tools/approval_gateway_wait.py`——ARCH-001 runtime-state lease
+   vs upstream 的 `settle`/`cancelled` 機制，跟今天稍早那次同一個
+   衝突模式，合併 `__slots__`／`__init__`／`_drop_entry` 三處
+2. `plugins/platforms/telegram/adapter.py`——純 docstring 用字衝突
+   （"Jittered exponential back-off" vs 舊描述），合併保留兩邊資訊
+3. `gateway/run_turn.py`——`scheduled_heartbeat` 參數 vs
+   `event_metadata` 參數，兩者都保留；**發現一個已知、稍後會自動修好
+   的暫時性缺口**：我方commit `5352ca2ec9` 呼叫的
+   `_thread_metadata_for_event_data` 要到 357/367（`c497c27c56`
+   「fix: restore event_metadata/message threading dropped during
+   upstream rebase」）才會真正定義完整，中間這段目標測試會因
+   `NameError: name 'event_metadata' is not defined` 失敗——這是我方
+   歷史上真實發生過、也真實修過一次的已知缺口（commit 訊息本身就是
+   證據），不是本次解衝突造成的新問題，重放到 357 之後應該會自己
+   恢復正常，**尚待實際驗證**
+4. `gateway/kanban_watchers.py`——`dispatcher.*` 新版 API vs 舊版
+   bare function + 詳細計數器邏輯，合併成「用新版 API 呼叫、保留
+   詳細計數器」，並移除因此變成無用引用的 `_log_spawn_results` import
+5. `gateway/run_turn_runner.py` + `hermes_cli/kanban_db.py`（一個
+   commit 兩個檔案）——`scheduled_heartbeat` 導致的 stream/interim
+   訊息旗標 vs kanban transactional turn 覆寫邏輯；`kanban_db.py` 純
+   新增 `kanban_assignee_watchers` 表格與索引，唯讀補齊
+6. `agent/turn_finalizer.py` + `hermes_cli/kanban.py` +
+   `hermes_cli/kanban_db.py` + 一份測試檔（一個 commit 四個檔案）
+   ——`is_dispatcher_owned_worker_context()` 守門 vs
+   `kanban_terminal_success` 判斷合併；`LiveClaimError` vs
+   `CompletionEvidenceError` 兩個例外類別都保留。**這裡真的犯過一次
+   錯**：把 `CREATE INDEX idx_tasks_assignee_status` 誤放進
+   `kanban_db.py` 的 `SCHEMA_SQL` 裡，被跑測試抓到
+   （`test_connect_heals_reduced_tasks_schema_seeded_by_external_harness`
+   失敗）——查證後發現這個索引本來就該只放在
+   `kanban_db_connect.py::_migrate_add_optional_columns()`（該函式
+   自己就有註解解釋為什麼：`executescript` 會在 legacy board 補欄位
+   之前就先執行到這個索引，缺欄位直接炸掉），已修正並重新跑測試
+   確認全綠
+7. `hermes_cli/kanban_db_dispatch.py`——`UNVERIFIED_WORKER_FINGERPRINT`
+   守門 vs `is_synth`/`grace_seconds` 邏輯合併；`worker_started_at =
+   NULL` 補進動態 `fields` 字串，跟今天稍早那次的
+   `grace_seconds`/`_poll_worker_exit` 衝突是同一類模式
+
+每個衝突都有跑對應測試（不是整包 full suite），全數通過（除了上面
+第 3 點那個已知、預期會自己恢復的暫時性缺口）。
+
+**第 8 個衝突**（`hermes_cli/kanban_db.py`，commit
+`c5250b521f fix(kanban): worker response deadline with needs_input
+surfacing (SWARM-WORKER-DEADLINE-001)`）——**觸發共識設定的 7 個上限，
+依計畫停在這裡，尚未查看內容、尚未解**。Rebase 目前處於暫停狀態
+（`git status` 顯示 `interactive rebase in progress; onto
+0a8d4caef4`），worktree 保留現狀，等使用者決定：
+
+- 要不要提高上限、繼續往下解（還剩 61/367 個 commit）
+- 還是先在這裡停住，把已經解好的 306 個 commit 的狀態記錄下來，
+  之後再排時間繼續
+- 或是重新檢視這整批衝突的密度（7 個衝突集中在 kanban 相關子系統，
+  呼應姊妹票提到的「雙方都在同一批熱點檔案上活躍開發」）是否代表
+  應該優先處理策略層面的問題，而不是繼續逐一硬解
 
 ## 驗收標準
 

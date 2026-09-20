@@ -553,4 +553,3 @@ def test_decompose_refuses_task_with_malformed_contract(kanban_home):
         assert len(events) == 1
 
 
-

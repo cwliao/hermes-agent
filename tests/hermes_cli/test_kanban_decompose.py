@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json as jsonlib
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -32,7 +32,7 @@ def kanban_home(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _mock_needle_prefilter(monkeypatch):
     """Keep the pre-existing decomposer tests on their original no-hint path."""
-    monkeypatch.setattr(needle_worker, "extract_triage_hints", AsyncMock(return_value=None))
+    monkeypatch.setattr(needle_worker, "extract_triage_hints", MagicMock(return_value=None))
 
 
 def _fake_aux_response(content: str):
@@ -127,12 +127,12 @@ def test_decompose_injects_high_confidence_needle_hint_into_aux_prompt(kanban_ho
     }
     with patch(
         "tools.needle_worker.extract_triage_hints",
-        new=AsyncMock(return_value=hint),
+        new=MagicMock(return_value=hint),
     ) as extract_mock:
         outcome, prompt = _run_with_captured_aux_prompt(tid, _single_task_llm_payload())
 
     assert outcome.ok, outcome.reason
-    extract_mock.assert_awaited_once()
+    extract_mock.assert_called_once()
     assert hint["intent"] in prompt
     assert "Hsinchu fab, SCADA, energy dashboard" in prompt
     assert "Dashboard drops telemetry after overnight restart" in prompt
@@ -154,7 +154,7 @@ def test_decompose_ignores_none_confidence_needle_hint(kanban_home):
     }
     with patch(
         "tools.needle_worker.extract_triage_hints",
-        new=AsyncMock(return_value=hint_with_unknown_confidence),
+        new=MagicMock(return_value=hint_with_unknown_confidence),
     ):
         outcome, prompt = _run_with_captured_aux_prompt(tid, _single_task_llm_payload())
 
@@ -175,12 +175,12 @@ def test_decompose_falls_back_when_needle_prefilter_raises(kanban_home):
 
     with patch(
         "tools.needle_worker.extract_triage_hints",
-        new=AsyncMock(side_effect=TimeoutError("Needle timed out")),
+        new=MagicMock(side_effect=TimeoutError("Needle timed out")),
     ) as extract_mock:
         outcome, prompt = _run_with_captured_aux_prompt(tid, _single_task_llm_payload())
 
     assert outcome.ok, outcome.reason
-    extract_mock.assert_awaited_once()
+    extract_mock.assert_called_once()
     assert "Auto-extracted hint" not in prompt
     assert "Investigate an intermittent API timeout" in prompt
 

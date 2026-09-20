@@ -17,7 +17,6 @@ up with ``assignee=None``.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -312,7 +311,7 @@ def _extract_triage_hint(task: kb.Task) -> Optional[dict]:
     if not text:
         return None
     try:
-        return asyncio.run(extract_triage_hints(text))
+        return extract_triage_hints(text)
     except Exception:
         logger.warning("decompose: needle pre-filter raised unexpectedly", exc_info=True)
         return None

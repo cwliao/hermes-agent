@@ -12,7 +12,7 @@ tickets, not a single conversation.
 
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
 import contextlib
 import logging
 import os
@@ -87,7 +87,7 @@ def _extract_sync(text: str) -> Optional[dict]:
     }
 
 
-async def extract_triage_hints(text: str) -> Optional[dict]:
+def extract_triage_hints(text: str) -> Optional[dict]:
     """Best-effort ``{"intent", "entities", "confidence"}`` for kanban triage
     enrichment, or ``None`` on any failure, timeout, or low/absent confidence
     (``confidence=None`` — e.g. LoRA-fine-tuned weights — is fail-safe "needs
@@ -95,11 +95,19 @@ async def extract_triage_hints(text: str) -> Optional[dict]:
     available, proceed unchanged"; this never raises."""
     if not text or not text.strip():
         return None
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="needle_worker")
     try:
-        result = await asyncio.wait_for(asyncio.to_thread(_extract_sync, text), timeout=_TIMEOUT_SECONDS)
-    except Exception as exc:
-        logger.warning("needle_worker: extraction failed or timed out: %s", exc)
+        future = executor.submit(_extract_sync, text)
+        result = future.result(timeout=_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        logger.warning("needle_worker: extraction timed out after %.1fs", _TIMEOUT_SECONDS)
         return None
+    except Exception as exc:
+        logger.warning("needle_worker: extraction failed: %s", exc)
+        return None
+    finally:
+        executor.shutdown(wait=False)
+
     if result is None:
         return None
     confidence = result.get("confidence")

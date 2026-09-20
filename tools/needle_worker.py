@@ -12,10 +12,10 @@ tickets, not a single conversation.
 
 from __future__ import annotations
 
-import concurrent.futures
 import contextlib
 import logging
 import os
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -95,18 +95,29 @@ def extract_triage_hints(text: str) -> Optional[dict]:
     available, proceed unchanged"; this never raises."""
     if not text or not text.strip():
         return None
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="needle_worker")
-    try:
-        future = executor.submit(_extract_sync, text)
-        result = future.result(timeout=_TIMEOUT_SECONDS)
-    except concurrent.futures.TimeoutError:
+    outcome: list[tuple[Optional[dict], Optional[Exception]]] = []
+
+    def _worker() -> None:
+        try:
+            outcome.append((_extract_sync(text), None))
+        except Exception as exc:
+            outcome.append((None, exc))
+
+    thread = threading.Thread(target=_worker, daemon=True, name="needle_worker")
+    thread.start()
+    thread.join(timeout=_TIMEOUT_SECONDS)
+
+    if thread.is_alive():
         logger.warning("needle_worker: extraction timed out after %.1fs", _TIMEOUT_SECONDS)
         return None
-    except Exception as exc:
+
+    if not outcome:
+        return None
+
+    result, exc = outcome[0]
+    if exc is not None:
         logger.warning("needle_worker: extraction failed: %s", exc)
         return None
-    finally:
-        executor.shutdown(wait=False)
 
     if result is None:
         return None

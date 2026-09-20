@@ -12,7 +12,7 @@ from tools import needle_worker
 
 def test_extract_triage_hints_hard_timeout_safety(monkeypatch):
     """Regression test: when the underlying native extraction hangs or runs long (8s),
-    extract_triage_hints must return None within the bounded ~5s budget (under ~6-7s)
+    extract_triage_hints must return None within the bounded ~5s budget (under ~6s)
     without blocking for the full duration of the underlying call."""
     def slow_extract_sync(text: str):
         time.sleep(8.0)
@@ -24,9 +24,11 @@ def test_extract_triage_hints_hard_timeout_safety(monkeypatch):
     elapsed = time.monotonic() - t0
 
     assert result is None
-    # 5s timeout plus generous margin, well under the 8s sleep duration
+    # 5.0s timeout with a 1.0s margin: local runs measure ~5.001s-5.002s;
+    # 6.0s provides ample headroom for scheduler/GIL jitter while staying well
+    # under the 8.0s simulated hang duration.
     assert elapsed >= 4.8
-    assert elapsed < 7.0
+    assert elapsed < 6.0
 
 
 def test_extract_triage_hints_empty_or_whitespace():

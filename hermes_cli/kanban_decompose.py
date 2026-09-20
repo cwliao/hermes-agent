@@ -17,6 +17,7 @@ up with ``assignee=None``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -98,7 +99,7 @@ _USER_TEMPLATE = """Task id: {task_id}
 Title: {title}
 Body:
 {body}
-
+{triage_hint}
 Available profiles (assignees you may pick from):
 {roster}
 
@@ -300,6 +301,41 @@ def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) ->
     )
 
 
+def _extract_triage_hint(task: kb.Task) -> Optional[dict]:
+    """Best-effort Needle 3 pre-filter hint (``{"intent", "entities", "confidence"}``)
+    for the decomposer prompt, or ``None`` on any failure/timeout/low confidence.
+
+    Purely additive speed/quality optimisation — never blocks or alters
+    ``decompose_task``'s existing fallback behaviour on raw title/body."""
+    from tools.needle_worker import extract_triage_hints
+    text = f"{task.title or ''}\n{task.body or ''}".strip()
+    if not text:
+        return None
+    try:
+        return asyncio.run(extract_triage_hints(text))
+    except Exception:
+        logger.warning("decompose: needle pre-filter raised unexpectedly", exc_info=True)
+        return None
+
+
+def _format_triage_hint(hint: Optional[dict]) -> str:
+    """``""`` when there's no usable hint, else a labelled block the decomposer
+    prompt can take or leave — never a substitute for the raw title/body above it."""
+    if not hint or hint.get("confidence") is None:
+        return ""
+    intent = (hint.get("intent") or "").strip()
+    if not intent:
+        return ""
+    entities = [e for e in (hint.get("entities") or []) if isinstance(e, str) and e.strip()]
+    lines = [
+        "Auto-extracted hint (Needle pre-filter, confidence-gated — a hint, not ground truth):",
+        f"  Intent: {intent}",
+    ]
+    if entities:
+        lines.append(f"  Entities: {', '.join(entities)}")
+    return "\n".join(lines) + "\n"
+
+
 def decompose_task(
     task_id: str,
     *,
@@ -328,6 +364,8 @@ def decompose_task(
             )
         return DecomposeOutcome(task_id, False, reason)
 
+    triage_hint = _extract_triage_hint(task)
+
     routing = _load_routing(root_assignee=task.assignee)
     raw, reason = _call_aux(
         "decompose", task_id, aux_task="kanban_decomposer", system=_SYSTEM_PROMPT,
@@ -335,6 +373,7 @@ def decompose_task(
             **_task_prompt_fields(task),
             roster=_format_roster(routing.roster),
             default_assignee=routing.default_assignee,
+            triage_hint=_format_triage_hint(triage_hint),
         ),
         max_tokens=4000, timeout=timeout or 180, log=logger,
     )

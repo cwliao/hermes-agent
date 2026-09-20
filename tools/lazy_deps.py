@@ -182,6 +182,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # ─── Tools ─────────────────────────────────────────────────────────────
     # ACP adapter (VS Code / Zed / JetBrains)
     "tool.acp": ("agent-client-protocol==0.9.0",),
+    # Needle 3 local structured-extraction pre-filter (tools/needle_worker.py,
+    # kanban_decompose.decompose_task only — never a hard dependency).
+    "tool.needle": ("cactus-needle==3.0.3",),
     "tool.dashboard": (
         "fastapi==0.133.1",
         "uvicorn[standard]==0.41.0",

@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json as jsonlib
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_decompose as decomp
+from tools import needle_worker
 
 
 @pytest.fixture
@@ -26,6 +27,12 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     return home
+
+
+@pytest.fixture(autouse=True)
+def _mock_needle_prefilter(monkeypatch):
+    """Keep the pre-existing decomposer tests on their original no-hint path."""
+    monkeypatch.setattr(needle_worker, "extract_triage_hints", AsyncMock(return_value=None))
 
 
 def _fake_aux_response(content: str):
@@ -74,6 +81,108 @@ def _patch_list_profiles(names: list[str]):
         patch("hermes_cli.profiles.profile_exists", side_effect=lambda x: x in names),
         patch("hermes_cli.profiles.get_active_profile_name", return_value=names[0] if names else "default"),
     ]
+
+
+def _single_task_llm_payload() -> str:
+    return jsonlib.dumps({
+        "fanout": False,
+        "rationale": "single unit",
+        "title": "Tightened title",
+        "body": "Concrete worker instructions.",
+    })
+
+
+def _run_with_captured_aux_prompt(task_id: str, llm_payload: str):
+    captured = MagicMock(return_value=_fake_aux_response(llm_payload))
+    patches = _patch_list_profiles(["orchestrator"])
+    for p in patches:
+        p.start()
+    try:
+        with patch("agent.auxiliary_client.call_llm", new=captured):
+            outcome = decomp.decompose_task(task_id, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+    messages = captured.call_args.kwargs["messages"]
+    return outcome, messages[1]["content"]
+
+
+def test_decompose_injects_high_confidence_needle_hint_into_aux_prompt(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Dashboard drops telemetry after overnight restart",
+            body=(
+                "The Hsinchu fab energy dashboard intermittently loses SCADA data after a "
+                "nightly restart. Identify the likely integration failure and propose a "
+                "recovery check, but keep the production service unchanged."
+            ),
+            triage=True,
+        )
+
+    hint = {
+        "intent": "diagnose SCADA telemetry loss and propose a safe recovery check",
+        "entities": ["Hsinchu fab", "SCADA", "energy dashboard"],
+        "confidence": 0.91,
+    }
+    with patch(
+        "tools.needle_worker.extract_triage_hints",
+        new=AsyncMock(return_value=hint),
+    ) as extract_mock:
+        outcome, prompt = _run_with_captured_aux_prompt(tid, _single_task_llm_payload())
+
+    assert outcome.ok, outcome.reason
+    extract_mock.assert_awaited_once()
+    assert hint["intent"] in prompt
+    assert "Hsinchu fab, SCADA, energy dashboard" in prompt
+    assert "Dashboard drops telemetry after overnight restart" in prompt
+
+
+def test_decompose_ignores_none_confidence_needle_hint(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Refresh the weekly carbon-capture summary",
+            body="Use the existing source data and preserve the current reporting format.",
+            triage=True,
+        )
+
+    hint_with_unknown_confidence = {
+        "intent": "rewrite the carbon-capture summary",
+        "entities": ["weekly report"],
+        "confidence": None,
+    }
+    with patch(
+        "tools.needle_worker.extract_triage_hints",
+        new=AsyncMock(return_value=hint_with_unknown_confidence),
+    ):
+        outcome, prompt = _run_with_captured_aux_prompt(tid, _single_task_llm_payload())
+
+    assert outcome.ok, outcome.reason
+    assert "Auto-extracted hint" not in prompt
+    assert hint_with_unknown_confidence["intent"] not in prompt
+    assert "Refresh the weekly carbon-capture summary" in prompt
+
+
+def test_decompose_falls_back_when_needle_prefilter_raises(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Investigate an intermittent API timeout",
+            body="Reproduce the timeout and document the existing retry behaviour.",
+            triage=True,
+        )
+
+    with patch(
+        "tools.needle_worker.extract_triage_hints",
+        new=AsyncMock(side_effect=TimeoutError("Needle timed out")),
+    ) as extract_mock:
+        outcome, prompt = _run_with_captured_aux_prompt(tid, _single_task_llm_payload())
+
+    assert outcome.ok, outcome.reason
+    extract_mock.assert_awaited_once()
+    assert "Auto-extracted hint" not in prompt
+    assert "Investigate an intermittent API timeout" in prompt
 
 
 def test_decompose_with_fanout_creates_children(kanban_home):
@@ -349,6 +458,5 @@ def test_decompose_refuses_task_with_malformed_contract(kanban_home):
         assert task.body == body_with_malformed
         events = [e for e in kb.list_events(conn, tid) if e.kind == "verifier_gate_rejected"]
         assert len(events) == 1
-
 
 

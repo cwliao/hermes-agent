@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from hermes_cli.config import cfg_get, load_config
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
@@ -1561,6 +1562,8 @@ def _maybe_auto_subscribe_swarm(
     platform = ""
     chat_id = ""
     try:
+        import logging
+
         from gateway.session_context import get_session_env
         platform = get_session_env("HERMES_SESSION_PLATFORM", "")
         chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")

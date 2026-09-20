@@ -171,17 +171,21 @@ print_todo_section() {
     if ! todo_lines="$($VENV_PY - <<'PY'
 import json
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 API_URL = (
     "https://api.notion.com/v1/data_sources/"
-    "ce5f4bd9-9f86-4dda-937d-c751abc83983/query"
+    "215d7bc8-d15a-47f8-816c-258d8e5a4766/query"
 )
 MAX_TASKS = 15
+RECENT_WINDOW_DAYS = 7
+NOTES_MAX_CHARS = 40
 TODAY = datetime.now(ZoneInfo("Asia/Taipei")).date()
+WINDOW_END = TODAY + timedelta(days=RECENT_WINDOW_DAYS)
+PRIORITY_EMOJI = {"🔴 High": "🔴", "🟡 Medium": "🟡", "🟢 Low": "🟢"}
 
 
 def compact(value):
@@ -241,6 +245,29 @@ def title_from_property(property_value):
     return compact("".join(pieces))
 
 
+def rich_text_from_property(property_value):
+    if not isinstance(property_value, dict):
+        return ""
+    parts = property_value.get("rich_text")
+    if not isinstance(parts, list):
+        return ""
+    pieces = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("plain_text")
+        if isinstance(text, str):
+            pieces.append(text)
+    return compact("".join(pieces))
+
+
+def select_name(property_value):
+    if not isinstance(property_value, dict):
+        return None
+    data = property_value.get("select")
+    return data.get("name") if isinstance(data, dict) else None
+
+
 def task_from_page(page):
     if not isinstance(page, dict):
         return None
@@ -249,10 +276,8 @@ def task_from_page(page):
         return None
 
     name = title_from_property(properties.get("Name")) or "（無標題）"
-    status_property = properties.get("Status")
-    status_data = status_property.get("select") if isinstance(status_property, dict) else None
-    status = status_data.get("name") if isinstance(status_data, dict) else None
-    if status not in {"To Do", "Doing"}:
+    status = select_name(properties.get("Status"))
+    if status not in {"Not started", "In progress"}:
         return None
 
     due_property = properties.get("Due Date")
@@ -262,14 +287,30 @@ def task_from_page(page):
         due_date = parse_due_date(due_start) if due_start else None
     except (TypeError, ValueError, OverflowError):
         return None
-    return {"name": name, "status": status, "due_date": due_date}
+    if due_date is None or due_date > WINDOW_END:
+        return None
+
+    priority = select_name(properties.get("Priority"))
+    notes = rich_text_from_property(properties.get("Notes"))
+    return {
+        "name": name,
+        "status": status,
+        "due_date": due_date,
+        "priority": priority,
+        "notes": notes,
+    }
 
 
 payload = {
     "filter": {
-        "or": [
-            {"property": "Status", "select": {"equals": "To Do"}},
-            {"property": "Status", "select": {"equals": "Doing"}},
+        "and": [
+            {
+                "or": [
+                    {"property": "Status", "select": {"equals": "Not started"}},
+                    {"property": "Status", "select": {"equals": "In progress"}},
+                ]
+            },
+            {"property": "Due Date", "date": {"on_or_before": WINDOW_END.isoformat()}},
         ]
     },
     "sorts": [{"property": "Due Date", "direction": "ascending"}],
@@ -291,26 +332,35 @@ while True:
         raise RuntimeError("Malformed Notion pagination response")
     payload["start_cursor"] = cursor
 
-# Notion's server-side null ordering is not relied on: explicitly put tasks
-# without a due date last before applying the rendering cap.
-tasks.sort(key=lambda task: (task["due_date"] is None, task["due_date"] or date.max))
+# Notion's server-side ordering already puts earlier due dates first; keep an
+# explicit client-side sort as a safety net against any ordering surprises.
+tasks.sort(key=lambda task: task["due_date"])
 if not tasks:
-    print("- 目前沒有待辦事項 🎉")
+    print(f"- 近 {RECENT_WINDOW_DAYS} 天內沒有到期的待辦事項 🎉")
     raise SystemExit(0)
 
 lines = []
 for task in tasks[:MAX_TASKS]:
     due_date = task["due_date"]
-    if due_date is None:
-        prefix = "-"
-    elif due_date < TODAY:
-        prefix = f"- ⚠️ [逾期 {due_date:%m/%d}]"
+    if due_date < TODAY:
+        prefix = f"- ⚠️ [逾期 {(TODAY - due_date).days} 天，{due_date:%m/%d}]"
     elif due_date == TODAY:
         prefix = "- 🔴 [今天到期]"
     else:
-        prefix = f"- [到期: {due_date:%m/%d}]"
-    suffix = "（進行中）" if task["status"] == "Doing" else ""
-    lines.append(f"{prefix} {task['name']}{suffix}")
+        prefix = f"- [還有 {(due_date - TODAY).days} 天，{due_date:%m/%d}]"
+
+    priority_emoji = PRIORITY_EMOJI.get(task["priority"] or "", "")
+    suffix = "（進行中）" if task["status"] == "In progress" else ""
+
+    segment = " ".join(part for part in (priority_emoji, f"{task['name']}{suffix}") if part)
+    line = f"{prefix} {segment}"
+
+    notes = task["notes"]
+    if notes:
+        if len(notes) > NOTES_MAX_CHARS:
+            notes = notes[:NOTES_MAX_CHARS] + "…"
+        line += f" — {notes}"
+    lines.append(line)
 
 if len(tasks) > MAX_TASKS:
     lines.append(f"...還有 {len(tasks) - MAX_TASKS} 筆")
@@ -338,9 +388,7 @@ if echo "$TAIPEI_WEATHER" | grep -q "🌧\|☁"; then
     RAINY="是，午後可能有雷雨"
 fi
 
-echo "=========================================="
-echo "📅 ${WEEKDAY} (${TODAY}) 每日早報"
-echo "=========================================="
+echo "## 📅 ${WEEKDAY} (${TODAY}) 每日早報"
 echo ""
 
 print_calendar_section
@@ -353,5 +401,3 @@ echo "| 地區 | 天氣 | 溫度 | 降雨機率 | 穿搭建議 |"
 echo "|------|------|------|----------|----------|"
 echo "| 台北 | ${TAIPEI_WEATHER%%:*} | ${TAIPEI_TEMP:-N/A} | ${RAINY} | 薄長袖 + 備傘 |"
 echo "| 新竹/竹東 (ITRI) | ${HSINCHU_WEATHER%%:*} | ${HSINCHU_TEMP:-N/A} | ${RAINY} | 輕薄外套 + 雨具備用 |"
-echo ""
-echo "=========================================="

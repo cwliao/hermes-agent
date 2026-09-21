@@ -1087,14 +1087,18 @@ def _decision(status, should_continue: bool, prompt: Optional[str], verdict: str
 
 
 def classify_goal_notice_type(decision: Dict[str, Any]) -> str:
-    """Normalize a judge/loop decision into the persisted status-notice type."""
+    """Normalize a judge/loop decision into the persisted status-notice type.
+
+    Status wins: a budget/judge auto-pause still carries verdict ``continue``, but the
+    outbound notice is a pause and must be reply-to-resume eligible.
+    """
+    status = str(decision.get("status") or "").lower()
     verdict = str(decision.get("verdict") or "").lower()
+    if status == "paused":
+        return "blocked" if verdict == "blocked" else "pause"
     mapped = _NOTICE_TYPE_FROM_VERDICT.get(verdict)
     if mapped:
         return mapped
-    status = str(decision.get("status") or "").lower()
-    if status == "paused":
-        return "pause"
     if status == "done":
         return "done"
     if decision.get("should_continue"):

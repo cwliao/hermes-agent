@@ -1358,6 +1358,12 @@ class GatewayInboundMixin:
         if _reply is not None:
             return _reply
 
+        # Reply to a persisted pause/blocked/waiting goal-status notice: resume with the reply
+        # text as context. Ineligible/stale/unauthorized/errors fall through to quote-context.
+        _reply = await self._hm_goal_status_notice_reply(event, source, _quick_key)
+        if _reply is not None:
+            return _reply
+
         # A numeric reply to the image-purpose prompt is consumed before the normal command and
         # agent pipeline. The handler intentionally returns None after sending its direct reply,
         # so check whether it matches a pending choice before invoking it.

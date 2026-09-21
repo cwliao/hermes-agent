@@ -53,6 +53,18 @@ DEFAULT_GATE_MAX_RETRIES = 3
 # Longest a pid/session wait barrier may hold the loop before judging resumes. Timed barriers
 # (``waiting_until``) carry their own deadline and are exempt.
 _MAX_BARRIER_WAIT_S = 30 * 60
+# How long a sent pause/blocked/waiting status notice stays a reply-to-resume target. Same
+# order of magnitude as credential dead-manual prune (24h): a human may reply the next day;
+# after this they use /goal resume. Shorter than that would drop overnight blocked-goal replies.
+STATUS_NOTICE_TTL_S = 24 * 60 * 60
+RESUME_ELIGIBLE_NOTICE_TYPES = frozenset({"pause", "blocked", "waiting"})
+_NOTICE_TYPE_FROM_VERDICT = {
+    "blocked": "blocked",
+    "wait": "waiting",
+    "waiting": "waiting",
+    "done": "done",
+    "continue": "continue",
+}
 # Bounded tail of a failed gate's combined stdout/stderr fed back to the agent.
 _GATE_OUTPUT_TAIL_CHARS = 3000
 
@@ -63,6 +75,12 @@ CONTINUATION_PROMPT_TEMPLATE = (
     "Continue working toward this goal. Take the next concrete step. "
     "If you believe the goal is complete, state so explicitly and stop. "
     "If you are blocked and need input from the user, say so clearly and stop."
+)
+
+# Appended to the canonical continuation when /goal was resumed from a user's reply to a
+# pause/blocked/waiting notice. Must APPEND: ``_is_goal_continuation_event`` keys on the prefix.
+RESUME_USER_CONTEXT_TEMPLATE = (
+    "\n\nThe user replied to the pause/blocked/waiting notice with this guidance:\n{context}"
 )
 
 # With a completion contract: the block tells the agent what "done" means, how to prove it, what
@@ -428,6 +446,12 @@ class GoalState:
     contract: GoalContract = field(default_factory=GoalContract)
     # /goal gate add <cmd>: ALL must pass before the judge may declare done.
     gates: List[GoalGate] = field(default_factory=list)
+    # Latest outbound gateway status notice. Lives on the goal row so reply-to-resume
+    # correlation survives a gateway restart (same SessionDB state_meta as the rest of the goal).
+    status_notice_message_id: Optional[str] = None
+    status_notice_chat_id: Optional[str] = None
+    status_notice_type: Optional[str] = None  # pause | blocked | waiting | continue | done | loop
+    status_notice_sent_at: float = 0.0
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -437,7 +461,9 @@ class GoalState:
         data = json.loads(raw)
         raw_subgoals = data.get("subgoals") or []
         ints = {k: int(data.get(k) or 0) for k in ("turns_used", "consecutive_parse_failures", "consecutive_transport_failures", "waiting_on_delegations")}
-        floats = {k: float(data.get(k) or 0.0) for k in ("created_at", "last_turn_at", "waiting_until", "waiting_since")}
+        floats = {k: float(data.get(k) or 0.0) for k in (
+            "created_at", "last_turn_at", "waiting_until", "waiting_since", "status_notice_sent_at",
+        )}
         return cls(
             goal=data.get("goal", ""),
             status=data.get("status", "active"),
@@ -449,6 +475,9 @@ class GoalState:
             waiting_on_pid=(int(data["waiting_on_pid"]) if data.get("waiting_on_pid") else None),
             waiting_on_session=(str(data["waiting_on_session"]) if data.get("waiting_on_session") else None),
             waiting_reason=data.get("waiting_reason"),
+            status_notice_message_id=(str(data["status_notice_message_id"]) if data.get("status_notice_message_id") else None),
+            status_notice_chat_id=(str(data["status_notice_chat_id"]) if data.get("status_notice_chat_id") else None),
+            status_notice_type=(str(data["status_notice_type"]) if data.get("status_notice_type") else None),
             contract=GoalContract.from_dict(data.get("contract")),
             gates=[
                 GoalGate.from_dict(g) for g in (data.get("gates") or [])
@@ -1057,6 +1086,26 @@ def _decision(status, should_continue: bool, prompt: Optional[str], verdict: str
             "verdict": verdict, "reason": reason, "message": message}
 
 
+def classify_goal_notice_type(decision: Dict[str, Any]) -> str:
+    """Normalize a judge/loop decision into the persisted status-notice type."""
+    verdict = str(decision.get("verdict") or "").lower()
+    mapped = _NOTICE_TYPE_FROM_VERDICT.get(verdict)
+    if mapped:
+        return mapped
+    status = str(decision.get("status") or "").lower()
+    if status == "paused":
+        return "pause"
+    if status == "done":
+        return "done"
+    if decision.get("should_continue"):
+        return "continue"
+    return verdict or status or "unknown"
+
+
+def notice_is_resume_eligible(notice_type: Optional[str]) -> bool:
+    return str(notice_type or "").lower() in RESUME_ELIGIBLE_NOTICE_TYPES
+
+
 _JUDGE_CONFIG_HINT = (
     "~/.hermes/config.yaml:\n  auxiliary:\n    goal_judge:\n      provider: {provider}\n      model: {model}\n"
     "Then /goal resume to continue."
@@ -1075,6 +1124,7 @@ class GoalManager:
         self.session_id = session_id
         self.default_max_turns = int(default_max_turns or DEFAULT_MAX_TURNS)
         self._state: Optional[GoalState] = load_goal(session_id)
+        self._resume_context: Optional[str] = None
 
     # --- introspection ------------------------------------------------
 
@@ -1168,15 +1218,70 @@ class GoalManager:
         self._state.clear_wait()   # a wait barrier is meaningless once paused
         return self._save()
 
-    def resume(self, *, reset_budget: bool = True) -> Optional[GoalState]:
+    def resume(self, *, reset_budget: bool = True, context: Optional[str] = None) -> Optional[GoalState]:
         if not self._state:
             return None
+        self._resume_context = (context or "").strip() or None
         self._state.status = "active"
         self._state.paused_reason = None
         self._state.clear_wait()   # resuming starts fresh
+        self._clear_status_notice()
         if reset_budget:
             self._state.turns_used = 0
         return self._save()
+
+    def resume_from_notice(self, notice_type: str, *, context: Optional[str] = None) -> Optional[GoalState]:
+        """Resume only for a pause/blocked/waiting notice whose goal is still in that state.
+
+        ``resume()`` would activate a never-paused goal and reset its budget; this wrapper
+        refuses that. Waiting notices unpark without resetting the turn budget.
+        """
+        kind = str(notice_type or "").lower()
+        if kind not in RESUME_ELIGIBLE_NOTICE_TYPES or self._state is None:
+            return None
+        if kind in {"pause", "blocked"}:
+            if self._state.status != "paused":
+                return None
+            return self.resume(context=context)
+        if not self.is_waiting():
+            return None
+        return self.resume(reset_budget=False, context=context)
+
+    def record_status_notice(
+        self, message_id: str, notice_type: str, *, chat_id: Optional[str] = None,
+    ) -> None:
+        """Persist the outbound status-notice identity for later reply correlation."""
+        if self._state is None or not message_id or not notice_type:
+            return
+        self._state.status_notice_message_id = str(message_id)
+        self._state.status_notice_type = str(notice_type)
+        self._state.status_notice_chat_id = str(chat_id) if chat_id else None
+        self._state.status_notice_sent_at = time.time()
+        self._save()
+
+    def match_status_notice(
+        self, message_id: str, *, chat_id: Optional[str] = None, now: Optional[float] = None,
+    ) -> Optional[str]:
+        """Return the persisted notice type when *message_id* matches and is not stale."""
+        s = self._state
+        if s is None or not message_id:
+            return None
+        if str(s.status_notice_message_id or "") != str(message_id):
+            return None
+        if s.status_notice_chat_id and chat_id and str(s.status_notice_chat_id) != str(chat_id):
+            return None
+        sent_at = float(s.status_notice_sent_at or 0.0)
+        if not sent_at or ((now if now is not None else time.time()) - sent_at) > STATUS_NOTICE_TTL_S:
+            return None
+        return s.status_notice_type
+
+    def _clear_status_notice(self) -> None:
+        if self._state is None:
+            return
+        self._state.status_notice_message_id = None
+        self._state.status_notice_chat_id = None
+        self._state.status_notice_type = None
+        self._state.status_notice_sent_at = 0.0
 
     def clear(self) -> None:
         if self._state is None:
@@ -1542,10 +1647,16 @@ class GoalManager:
             contract_block = s.contract.render_block()
             if s.subgoals:
                 contract_block = f"{contract_block}\n{_render_extra_criteria(s.subgoals)}"
-            return CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(goal=s.goal, contract_block=contract_block)
-        if s.subgoals:
-            return CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE.format(goal=s.goal, subgoals_block=s.render_subgoals_block())
-        return CONTINUATION_PROMPT_TEMPLATE.format(goal=s.goal)
+            prompt = CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(goal=s.goal, contract_block=contract_block)
+        elif s.subgoals:
+            prompt = CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE.format(goal=s.goal, subgoals_block=s.render_subgoals_block())
+        else:
+            prompt = CONTINUATION_PROMPT_TEMPLATE.format(goal=s.goal)
+        extra = self._resume_context
+        if extra:
+            prompt = prompt + RESUME_USER_CONTEXT_TEMPLATE.format(context=extra)
+            self._resume_context = None
+        return prompt
 
     def render_contract(self) -> str:
         """Public helper for the /goal show + /goal draft slash commands."""

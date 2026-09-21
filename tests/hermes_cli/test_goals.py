@@ -950,3 +950,82 @@ def test_goal_session_db_is_the_registry_shared_handle(hermes_home):
     finally:
         goals._DB_CACHE.clear()
         registry.release_or_close(db)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# status_notice_* persistence (reply-to-resume correlation, step 1)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestStatusNoticeSerialization:
+    def test_roundtrip_survives_every_field_including_sent_at(self):
+        from hermes_cli.goals import GoalState
+
+        state = GoalState(
+            goal="ship it",
+            status_notice_message_id="msg-123",
+            status_notice_chat_id="chat-456",
+            status_notice_type="blocked",
+            status_notice_sent_at=1700000000.123456,
+        )
+        restored = GoalState.from_json(state.to_json())
+        assert restored.status_notice_message_id == "msg-123"
+        assert restored.status_notice_chat_id == "chat-456"
+        assert restored.status_notice_type == "blocked"
+        assert restored.status_notice_sent_at == 1700000000.123456
+
+    def test_old_row_without_status_notice_loads_clean(self):
+        # A state_meta row written before this feature has no status_notice_* keys.
+        from hermes_cli.goals import GoalState
+
+        legacy = '{"goal": "old goal", "status": "active", "turns_used": 2}'
+        state = GoalState.from_json(legacy)
+        assert state.status_notice_message_id is None
+        assert state.status_notice_chat_id is None
+        assert state.status_notice_type is None
+        assert state.status_notice_sent_at == 0.0
+
+
+class TestStatusNoticeHelpers:
+    def test_recorded_notice_is_eligible_immediately(self, hermes_home):
+        from hermes_cli.goals import GoalManager, notice_is_resume_eligible
+
+        mgr = GoalManager(session_id="notice-eligible")
+        mgr.set("ship it")
+        mgr.pause("waiting on user")
+        mgr.record_status_notice("msg-1", "blocked", chat_id="chat-1")
+
+        notice_type = mgr.match_status_notice("msg-1", chat_id="chat-1")
+        assert notice_type == "blocked"
+        assert notice_is_resume_eligible(notice_type)
+
+    def test_non_resume_type_is_ineligible(self, hermes_home):
+        from hermes_cli.goals import GoalManager, notice_is_resume_eligible
+
+        mgr = GoalManager(session_id="notice-wrong-type")
+        mgr.set("ship it")
+        mgr.record_status_notice("msg-2", "continue")
+
+        notice_type = mgr.match_status_notice("msg-2")
+        assert notice_type == "continue"
+        assert not notice_is_resume_eligible(notice_type)
+
+    def test_stale_notice_beyond_ttl_is_ineligible(self, hermes_home):
+        from hermes_cli.goals import GoalManager, STATUS_NOTICE_TTL_S
+
+        mgr = GoalManager(session_id="notice-stale")
+        mgr.set("ship it")
+        mgr.pause("waiting on user")
+        mgr.record_status_notice("msg-3", "waiting")
+
+        far_future = mgr.state.status_notice_sent_at + STATUS_NOTICE_TTL_S + 1
+        assert mgr.match_status_notice("msg-3", now=far_future) is None
+
+    def test_mismatched_message_id_does_not_match(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="notice-mismatch")
+        mgr.set("ship it")
+        mgr.record_status_notice("msg-4", "blocked")
+
+        assert mgr.match_status_notice("some-other-msg") is None

@@ -53,6 +53,20 @@ class CustomProfile(ProviderProfile):
         """
         return {"enabled": True, "effort": "medium"}
 
+    def build_extra_body(self, *, session_id: str | None = None, **context: Any) -> dict[str, Any]:
+        """Sets the OpenAI-standard `user` field to this process's session_id, so any
+        OpenAI-compatible endpoint that keys conversation/session identity off `user`
+        (e.g. a local CLI-wrapping bridge with no other session signal) gets one
+        unique session per Hermes worker process instead of colliding on a shared
+        default when concurrent workers share the same model+system prompt."""
+        if session_id:
+            # Pass worker session_id as OpenAI-standard `user` so local bridges
+            # (such as clawo/agentpool) multiplexing CLI sessions get unique
+            # session isolation per Hermes worker instead of collapsing onto
+            # sha1(model + systemPrompt) or "default".
+            return {"user": session_id}
+        return {}
+
     def build_api_kwargs_extras(
         self, *, reasoning_config: dict | None = None, ollama_num_ctx: int | None = None, **ctx: Any
     ) -> tuple[dict[str, Any], dict[str, Any]]:

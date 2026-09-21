@@ -235,3 +235,79 @@ class TestCustomResponsesEffortVocabulary:
             },
         )
         assert (effort, enabled) == ("xhigh", True)
+
+
+class TestCustomExtraBodySessionIsolation:
+    """Session isolation contract for CustomProfile:
+
+    Every Hermes worker process gets a unique agent.session_id. CustomProfile sets
+    the OpenAI-standard `user` field in extra_body so that any proxy/bridge
+    (e.g., clawo/agentpool multiplexing CLI sessions) isolates concurrent workers
+    sharing the same model and system prompt.
+    """
+
+    def test_session_id_provided_returns_user_field(self, custom_profile):
+        body = custom_profile.build_extra_body(session_id="session-worker-abc-123")
+        assert body == {"user": "session-worker-abc-123"}
+
+    def test_session_id_none_returns_empty_dict(self, custom_profile):
+        body = custom_profile.build_extra_body(session_id=None)
+        assert body == {}
+
+    def test_session_id_omitted_returns_empty_dict(self, custom_profile):
+        body = custom_profile.build_extra_body()
+        assert body == {}
+
+    def test_session_id_empty_string_returns_empty_dict(self, custom_profile):
+        body = custom_profile.build_extra_body(session_id="")
+        assert body == {}
+
+    def test_extra_body_does_not_collide_with_api_kwargs_extras(self, custom_profile):
+        """build_extra_body and build_api_kwargs_extras return disjoint keys.
+
+        Verifies that merging both outputs (as ChatCompletionsTransport does)
+        neither clobbers `user` nor overwrites reasoning/options.
+        """
+        extra_body = custom_profile.build_extra_body(session_id="sess-xyz-999")
+        extras_body, top_level = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": False},
+            ollama_num_ctx=4096,
+            base_url="http://localhost:11434/v1",
+            model="qwen3",
+        )
+
+        assert "user" in extra_body
+        assert "user" not in extras_body
+        assert "user" not in top_level
+
+        # Disjoint keys between extra_body dictionaries
+        assert set(extra_body.keys()).isdisjoint(set(extras_body.keys()))
+
+        merged_extra_body = {**extra_body, **extras_body}
+        assert merged_extra_body == {
+            "user": "sess-xyz-999",
+            "options": {"num_ctx": 4096},
+            "think": False,
+        }
+        assert top_level == {"reasoning_effort": "none"}
+
+    def test_transport_integration_threads_session_id_into_wire_extra_body(self, custom_profile):
+        """End-to-end transport verification: ChatCompletionsTransport preserves
+        both session_id (in extra_body.user) and reasoning/num_ctx simultaneously.
+        """
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model="custom-cli-model",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            provider_profile=custom_profile,
+            session_id="worker-proc-777",
+            ollama_num_ctx=8192,
+            base_url="http://127.0.0.1:8080/v1",
+            provider_name="custom",
+        )
+        extra_body = kwargs.get("extra_body", {})
+        assert extra_body.get("user") == "worker-proc-777"
+        assert extra_body.get("options") == {"num_ctx": 8192}
+

@@ -210,7 +210,9 @@ class GatewayGoalsMixin:
             logger.debug("goal continuation: no adapter for %s", getattr(source, "platform", None))
         return adapter
 
-    async def _send_goal_status_notice(self, source: Any, message: str) -> None:
+    async def _send_goal_status_notice(
+        self, source: Any, message: str, *, notice_type: Optional[str] = None, session_id: Optional[str] = None,
+    ) -> None:
         """Send a /goal judge status line back to the originating chat/thread."""
         adapter = self._goal_notice_adapter(source)
         if not adapter:
@@ -223,8 +225,95 @@ class GatewayGoalsMixin:
             logger.warning(
                 "goal continuation: status send failed: %s", getattr(result, "error", "unknown error"),
             )
+            return
+        message_id = getattr(result, "message_id", None) if result is not None else None
+        if message_id and session_id and notice_type:
+            self._persist_goal_status_notice(
+                source, session_id=session_id, message_id=str(message_id), notice_type=notice_type,
+            )
 
-    async def _defer_goal_status_notice_after_delivery(self, source: Any, message: str) -> None:
+    def _persist_goal_status_notice(
+        self, source: Any, *, session_id: str, message_id: str, notice_type: str,
+    ) -> None:
+        """Record the outbound notice on the session's GoalState (survives gateway restart)."""
+        try:
+            from hermes_cli.goals import GoalManager
+            scope = self._profile_scope_for_source(source) if source is not None else nullcontext()
+            with scope:
+                GoalManager(session_id=session_id).record_status_notice(
+                    message_id, notice_type, chat_id=getattr(source, "chat_id", None),
+                )
+        except Exception:
+            logger.debug("goal continuation: status notice persist failed", exc_info=True)
+
+    async def _hm_goal_status_notice_reply(
+        self, event: "MessageEvent", source: Any, _quick_key: str,
+    ) -> Optional[str]:
+        """Resume a paused/blocked/waiting goal when the user replies to that status notice.
+
+        Fail closed: any mismatch, ineligible type, stale notice, auth failure, or error
+        returns None so the generic reply-context path still runs.
+        """
+        try:
+            return await self._try_resume_goal_from_status_reply(event, source, _quick_key)
+        except Exception:
+            logger.debug("goal status-notice reply intercept failed", exc_info=True)
+            return None
+
+    def _reply_targets_bot_status_notice(self, event: "MessageEvent", source: Any) -> bool:
+        """True when the reply is to a message this bot sent (adapter-native ownership check)."""
+        if getattr(event, "reply_to_is_own_message", False):
+            return True
+        adapter = self._delivery_adapter_for(source) if source is not None else None
+        raw = getattr(event, "raw_message", None)
+        checker = getattr(adapter, "_is_reply_to_bot", None) if adapter is not None else None
+        if raw is None or not callable(checker):
+            return False
+        try:
+            return bool(checker(raw))
+        except Exception:
+            return False
+
+    async def _try_resume_goal_from_status_reply(
+        self, event: "MessageEvent", source: Any, _quick_key: str,
+    ) -> Optional[str]:
+        if not getattr(event, "allow_gateway_control", True) or getattr(event, "internal", False):
+            return None
+        if event.get_command():
+            return None
+        reply_id = getattr(event, "reply_to_message_id", None)
+        if not reply_id or source is None:
+            return None
+        if not self._reply_targets_bot_status_notice(event, source):
+            return None
+        denied = self._check_slash_access(source, "goal")
+        if denied is not None:
+            return None
+        mgr, _session_entry = await self._get_goal_manager_for_event(event)
+        if mgr is None:
+            return None
+
+        def _resume():
+            notice_type = mgr.match_status_notice(str(reply_id), chat_id=getattr(source, "chat_id", None))
+            if not notice_type:
+                return None
+            state = mgr.resume_from_notice(notice_type, context=(event.text or "").strip() or None)
+            if state is None:
+                return None
+            return state, mgr.next_continuation_prompt()
+
+        outcome = await self._run_in_executor_with_context(_resume)
+        if outcome is None:
+            return None
+        state, prompt = outcome
+        if prompt:
+            self._enqueue_goal_turn(event, prompt, label="status-notice resume", kickoff=False)
+        from agent.i18n import t
+        return t("gateway.goal.resumed", goal=state.goal)
+
+    async def _defer_goal_status_notice_after_delivery(
+        self, source: Any, message: str, *, notice_type: Optional[str] = None, session_id: Optional[str] = None,
+    ) -> None:
         """Send a /goal status line after the main response is delivered.
 
         The adapter sends the agent response after this caller returns, so for reading order use
@@ -236,7 +325,9 @@ class GatewayGoalsMixin:
 
         async def _deliver() -> None:
             try:
-                await self._send_goal_status_notice(source, message)
+                await self._send_goal_status_notice(
+                    source, message, notice_type=notice_type, session_id=session_id,
+                )
             except Exception as exc:
                 logger.warning("goal continuation: status send failed: %s", exc, exc_info=True)
 
@@ -302,7 +393,12 @@ class GatewayGoalsMixin:
         msg = decision.get("message") or ""
         # Deferred until the visible final response is delivered, else "✓ Goal achieved" precedes it.
         if msg and source is not None:
-            await self._defer_goal_status_notice_after_delivery(source, msg)
+            from hermes_cli.goals import classify_goal_notice_type
+            await self._defer_goal_status_notice_after_delivery(
+                source, msg,
+                notice_type=classify_goal_notice_type(decision),
+                session_id=mgr.session_id,
+            )
         prompt = decision.get("continuation_prompt") or ""
         if not decision.get("should_continue") or not prompt or source is None:
             return
@@ -372,7 +468,9 @@ class GatewayGoalsMixin:
         decision = await self._run_in_executor_with_context(mgr.complete_tick, final_response or "")
         msg = decision.get("message") or ""
         if msg and source is not None:
-            await self._defer_goal_status_notice_after_delivery(source, msg)
+            await self._defer_goal_status_notice_after_delivery(
+                source, msg, notice_type="loop", session_id=getattr(mgr, "session_id", None),
+            )
 
     async def _loop_wakeup_fire_one(
         self, sid: str, state: Any, now: float, warned_no_route: set, profile: Optional[str] = None,

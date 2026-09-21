@@ -8,6 +8,8 @@ multiple times, and without an explicit pointer the agent has to guess
 which prior message the user is referencing.
 """
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.event import MessageEvent
@@ -151,4 +153,71 @@ async def test_reply_prefix_still_injected_when_text_in_history():
     assert result.startswith(f'[Replying to: "{quoted}"]')
     assert result.endswith("What's the best time to go?")
 
+
+@pytest.mark.asyncio
+async def test_unmatched_goal_status_reply_falls_through_to_generic_reply_context():
+    """An unrelated reply target must survive the goal-status intercept and keep quote context."""
+    runner = _make_runner()
+    source = _source()
+    event = MessageEvent(
+        text="please continue",
+        source=source,
+        reply_to_message_id="random-message-id",
+        reply_to_text="A normal bot reply",
+        reply_to_is_own_message=True,
+    )
+    session_key = "agent:main:telegram:123"
+
+    class _NoMatchingNotice:
+        def match_status_notice(self, message_id, *, chat_id=None):
+            assert message_id == "random-message-id"
+            assert chat_id == source.chat_id
+            return None
+
+    runner._hm_admit_event = AsyncMock(return_value=(event, source, False))
+    runner._hm_estop_gate = lambda event, source, is_internal: None
+    runner._session_key_for_source = lambda source: session_key
+    runner._hm_pending_reply_intercepts = AsyncMock(return_value=None)
+    runner._check_slash_access = lambda source, command: None
+    runner._get_goal_manager_for_event = AsyncMock(
+        return_value=(_NoMatchingNotice(), SimpleNamespace(session_id="unmatched")),
+    )
+
+    async def _run_in_executor(func, *args):
+        return func(*args)
+
+    runner._run_in_executor_with_context = _run_in_executor
+    runner._is_pending_image_ocr_choice = lambda event: False
+    runner._handle_pending_last30days_choice = AsyncMock(return_value=None)
+    runner._handle_pending_namecard_correction = AsyncMock(return_value=None)
+    runner._hm_evict_idle_stale_agent = lambda key: None
+    runner._is_session_running = lambda key: False
+    runner._hm_dispatch_idle_commands = AsyncMock(return_value=(False, None))
+    runner._is_telegram_topic_root_lobby = lambda source: False
+    runner._external_drain_active = False
+    runner._claim_active_session_slot = lambda key, source: (None, None)
+    runner._hm_rescue_orphaned_fifo = lambda event, source, is_internal, key: (
+        event, source, is_internal,
+    )
+    turn_state = SimpleNamespace(turn=SimpleNamespace(lease=None, agent=None, started_ts=None))
+    runner._session_state = lambda key: turn_state
+    runner._persist_active_agents = lambda: None
+    runner._begin_session_run_generation = lambda key: 1
+
+    async def _handle_with_agent(event, source, key, generation):
+        return await runner._prepare_inbound_message_text(
+            event=event, source=source, history=[], session_key=key,
+        )
+
+    runner._handle_message_with_agent = _handle_with_agent
+    runner._run_post_turn_hooks = AsyncMock()
+    runner._restore_pending_one_turn_model_override = lambda key, generation: None
+    runner._clear_durable_active_turn = AsyncMock(return_value=True)
+    runner._release_running_agent_state = lambda key, run_generation=None: None
+    runner._release_turn_lease = lambda key, generation: None
+    runner._consume_pending_native_image_paths = lambda key: []
+
+    result = await runner._handle_message(event)
+
+    assert result == '[Replying to your previous message: "A normal bot reply"]\n\nplease continue'
 

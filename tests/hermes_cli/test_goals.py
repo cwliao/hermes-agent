@@ -1029,3 +1029,92 @@ class TestStatusNoticeHelpers:
         mgr.record_status_notice("msg-4", "blocked")
 
         assert mgr.match_status_notice("some-other-msg") is None
+
+
+class TestResumeWithContext:
+    def test_resume_without_context_keeps_canonical_prompt(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="resume-noctx")
+        mgr.set("ship the feature")
+        mgr.pause("user-paused")
+        state = mgr.resume()
+        assert state.status == "active"
+        assert state.turns_used == 0
+        prompt = mgr.next_continuation_prompt()
+        assert prompt is not None
+        assert "ship the feature" in prompt
+        assert "pause/blocked/waiting notice" not in prompt
+
+    def test_resume_with_context_appends_guidance(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="resume-ctx")
+        mgr.set("ship the feature")
+        mgr.pause("blocked")
+        mgr.resume(context="use the staging API key instead")
+        prompt = mgr.next_continuation_prompt()
+        assert prompt.startswith("[Continuing toward your standing goal]\nGoal:")
+        assert "use the staging API key instead" in prompt
+
+    def test_resume_from_pause_notice_activates_and_resets_budget(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="resume-notice-pause")
+        mgr.set("ship it", max_turns=5)
+        mgr.state.turns_used = 4
+        mgr.pause("budget")
+        mgr.record_status_notice("n1", "pause", chat_id="c1")
+        state = mgr.resume_from_notice("pause", context="keep going")
+        assert state is not None
+        assert state.status == "active"
+        assert state.turns_used == 0
+        assert mgr.match_status_notice("n1") is None  # consumed
+        assert "keep going" in mgr.next_continuation_prompt()
+
+    def test_resume_from_waiting_notice_unparks_without_resetting_budget(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="resume-notice-wait")
+        mgr.set("ship it", max_turns=8)
+        mgr.state.turns_used = 3
+        mgr.wait_for_seconds(600, reason="cooldown")
+        assert mgr.is_waiting()
+        mgr.record_status_notice("n2", "waiting")
+        state = mgr.resume_from_notice("waiting", context="the deploy finished")
+        assert state is not None
+        assert state.status == "active"
+        assert not mgr.is_waiting()
+        assert state.turns_used == 3
+        assert "the deploy finished" in mgr.next_continuation_prompt()
+
+    def test_resume_from_continue_notice_is_a_no_op(self, hermes_home):
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="resume-notice-continue")
+        mgr.set("ship it")
+        mgr.pause("user-paused")
+        mgr.record_status_notice("n3", "continue")
+        assert mgr.resume_from_notice("continue", context="hi") is None
+        assert mgr.state.status == "paused"
+
+    def test_classify_budget_pause_is_pause_not_continue(self):
+        from hermes_cli.goals import classify_goal_notice_type, notice_is_resume_eligible
+
+        kind = classify_goal_notice_type(
+            {"status": "paused", "verdict": "continue", "should_continue": False}
+        )
+        assert kind == "pause"
+        assert notice_is_resume_eligible(kind)
+        assert classify_goal_notice_type(
+            {"status": "paused", "verdict": "blocked", "should_continue": False}
+        ) == "blocked"
+        assert classify_goal_notice_type(
+            {"status": "active", "verdict": "continue", "should_continue": True}
+        ) == "continue"
+        assert classify_goal_notice_type(
+            {"status": "active", "verdict": "wait", "should_continue": False}
+        ) == "waiting"
+        assert classify_goal_notice_type(
+            {"status": "done", "verdict": "done", "should_continue": False}
+        ) == "done"

@@ -70,5 +70,21 @@ def test_native_partial_quote_used_as_reply_to_text():
 
     assert event.reply_to_text == "Item B: rotate keys"
     assert event.reply_to_message_id == "42"
+    assert event.reply_to_is_own_message is False
+
+
+def test_reply_to_bot_sets_reply_to_is_own_message():
+    from gateway.platforms.event import MessageType
+
+    adapter = _make_adapter()
+    adapter._bot = SimpleNamespace(id=999)
+    msg = _make_message(text="keep going", reply_to_text="⏸ Goal paused")
+    msg.reply_to_message.from_user = SimpleNamespace(id=999)
+    event = adapter._build_message_event(msg, MessageType.TEXT)
+    assert event.reply_to_is_own_message is True
+
+    msg.reply_to_message.from_user = SimpleNamespace(id=42)
+    event = adapter._build_message_event(msg, MessageType.TEXT)
+    assert event.reply_to_is_own_message is False
 
 

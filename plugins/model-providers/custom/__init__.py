@@ -53,6 +53,7 @@ class CustomProfile(ProviderProfile):
         """
         return {"enabled": True, "effort": "medium"}
 
+
     def build_extra_body(self, *, session_id: str | None = None, **context: Any) -> dict[str, Any]:
         """Sets the OpenAI-standard `user` field to this process's session_id, so any
         OpenAI-compatible endpoint that keys conversation/session identity off `user`

@@ -1,6 +1,98 @@
 """Tests for the provider module registry and profiles."""
 
-from providers import get_provider_profile
+from providers import get_provider_profile, _REGISTRY
+from providers.base import ProviderProfile, OMIT_TEMPERATURE
+
+
+class TestRegistry:
+    def test_discovery_populates_registry(self):
+        p = get_provider_profile("nvidia")
+        assert p is not None
+        assert p.name == "nvidia"
+
+
+
+
+
+class TestNvidiaProfile:
+    def test_max_tokens(self):
+        p = get_provider_profile("nvidia")
+        assert p.default_max_tokens == 16384
+
+
+    def test_base_url(self):
+        p = get_provider_profile("nvidia")
+        assert "nvidia.com" in p.base_url
+
+
+    def test_prepare_messages_strips_tool_result_names(self):
+        p = get_provider_profile("nvidia")
+        msgs = [
+            {"role": "user", "content": "run a command"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "terminal",
+                "tool_name": "terminal",
+                "tool_call_id": "call_1",
+                "content": "ok",
+            },
+        ]
+
+        result = p.prepare_messages(msgs)
+
+        assert "name" not in result[2]
+        assert "tool_name" not in result[2]
+        assert result[2] == {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "ok",
+        }
+        assert msgs[2]["name"] == "terminal"
+        assert msgs[2]["tool_name"] == "terminal"
+
+    def test_prepare_messages_passthrough_without_tool_result_names(self):
+        p = get_provider_profile("nvidia")
+        msgs = [{"role": "tool", "tool_call_id": "call_1", "content": "ok"}]
+        assert p.prepare_messages(msgs) is msgs
+
+
+class TestKimiProfile:
+    def test_temperature_omit(self):
+        p = get_provider_profile("kimi")
+        assert p.fixed_temperature is OMIT_TEMPERATURE
+
+
+
+
+    def test_thinking_enabled(self):
+        # xor contract (fix ce4e74b3): an explicit recognized effort sends
+        # reasoning_effort ONLY — never paired with extra_body.thinking.
+        p = get_provider_profile("kimi")
+        eb, tl = p.build_api_kwargs_extras(reasoning_config={"enabled": True, "effort": "high"})
+        assert tl["reasoning_effort"] == "high"
+        assert "thinking" not in eb
+
+
+class TestCustomProfile:
+    def test_session_id_sets_user_field(self):
+        p = get_provider_profile("custom")
+        assert p.build_extra_body(session_id="worker-session-42") == {"user": "worker-session-42"}
+
+    def test_extra_body_empty_without_session_id(self):
+        p = get_provider_profile("custom")
+        assert p.build_extra_body() == {}
+        assert p.build_extra_body(session_id=None) == {}
 
 
 class TestOpenRouterProfile:

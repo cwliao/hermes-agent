@@ -176,8 +176,12 @@ async def test_prepare_route_identity_check_keeps_event_loop_responsive(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_telegram_image_ocr_translate_preempts_native_routing(monkeypatch):
-    """Configured Telegram OCR should produce text even for vision-capable models."""
+async def test_telegram_image_with_non_keyword_caption_prompts_for_purpose(monkeypatch):
+    """A caption that isn't one of the 1/2/3/ocr/名片/新聞 choice keywords is not a purpose
+    declaration on its own — even an instruction-looking caption like "翻譯這張圖" must still
+    go through the same 1/2/3 menu an uncaptioned photo gets, rather than letting the general
+    agent decide unilaterally (which was both slower and, for business cards, skipped the
+    dedicated pipeline's 名片圖檔 image upload)."""
     runner = _make_runner()
     source = _source()
     event = _image_event("翻譯這張圖")
@@ -190,24 +194,18 @@ async def test_telegram_image_ocr_translate_preempts_native_routing(monkeypatch)
         }
     }
 
+    sent = {}
+
+    async def fake_notice(src, content):
+        sent["source"] = src
+        sent["content"] = content
+
+    async def fail_enrich(*_args, **_kwargs):
+        pytest.fail("a non-keyword caption should only ask for purpose, not auto-enrich")
+
     monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
-    monkeypatch.setattr("agent.auxiliary_client._read_main_provider", lambda: "openai-codex")
-    monkeypatch.setattr("agent.auxiliary_client._read_main_model", lambda: "gpt-5.5")
-    monkeypatch.setattr(
-        runner,
-        "_resolve_session_agent_runtime",
-        lambda **_: ("gpt-5.5", {"provider": "openai-codex"}),
-    )
-    monkeypatch.setattr("agent.image_routing._lookup_supports_vision", lambda *_: True)
-
-    async def fake_enrich(user_text, image_paths, *, ocr_translate=False):
-        assert user_text == "翻譯這張圖"
-        assert image_paths == ["/tmp/cashback.png"]
-        assert ocr_translate is True
-        return "[ocr translated]\n\n翻譯這張圖"
-
-    monkeypatch.setattr(runner, "_enrich_message_with_vision", fake_enrich)
+    monkeypatch.setattr(runner, "_deliver_platform_notice", fake_notice)
+    monkeypatch.setattr(runner, "_enrich_message_with_vision", fail_enrich)
 
     result = await runner._prepare_inbound_message_text(
         event=event,
@@ -216,8 +214,49 @@ async def test_telegram_image_ocr_translate_preempts_native_routing(monkeypatch)
     )
 
     session_key = runner._session_key_for_source(source)
-    assert result == "[ocr translated]\n\n翻譯這張圖"
-    assert runner._pending_native_image_paths_by_session.get(session_key) is None
+    assert result == ""
+    assert sent["source"] == source
+    assert "1. OCR + 整理文字" in sent["content"]
+    assert "2. 整理名片" in sent["content"]
+    assert "3. 整理新聞" in sent["content"]
+    assert runner._pending_image_ocr_by_session[session_key]["image_paths"] == ["/tmp/cashback.png"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_image_with_business_card_caption_skips_menu(monkeypatch):
+    """A caption that IS the "名片" keyword is an explicit purpose declaration — it should
+    process immediately through the dedicated business-card pipeline, not ask again."""
+    runner = _make_runner()
+    source = _source()
+    event = _image_event("名片")
+    cfg = _auto_config()
+    cfg["gateway"] = {
+        "image_ocr_translate": {
+            "enabled": True,
+            "platforms": ["telegram"],
+            "target_language": "Traditional Chinese",
+        }
+    }
+
+    called = {}
+
+    async def fake_execute_choice(*, normalized, image_paths, source, key):
+        called["normalized"] = normalized
+        called["image_paths"] = image_paths
+        return ""
+
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
+    monkeypatch.setattr(runner, "_execute_image_ocr_choice", fake_execute_choice)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result == ""
+    assert called["normalized"] == "business_card"
+    assert called["image_paths"] == ["/tmp/cashback.png"]
 
 @pytest.mark.asyncio
 async def test_telegram_image_only_ocr_prompts_for_purpose(monkeypatch):

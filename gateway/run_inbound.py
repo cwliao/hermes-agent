@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 import asyncio
+import base64
 import concurrent.futures
 import dataclasses
 import json
@@ -2799,6 +2800,12 @@ class GatewayInboundMixin:
 
         if not extraction_error:
             try:
+                fields = await self._vision_verify_business_card_fields(image_paths, fields)
+            except Exception:
+                logger.exception("Vision-based business-card field verification failed")
+
+        if not extraction_error:
+            try:
                 low_confidence_fields = await self._typesafe_score_business_card_fields(
                     ocr_text, fields
                 )
@@ -3292,6 +3299,130 @@ class GatewayInboundMixin:
             if isinstance(noul, (int, float)) and noul < 0.5:
                 low_confidence.append(field)
         return low_confidence
+
+    async def _vision_verify_business_card_fields(
+        self, image_paths: List[str], fields: Dict[str, str]
+    ) -> Dict[str, str]:
+        """Second-pass correction using the vision-capable auxiliary model to look at the
+        actual card image(s), not just re-read the OCR text — this is the only step in the
+        pipeline that can catch a visually-similar-glyph misread (e.g. Tesseract/PaddleOCR
+        reading 巨 as 三, or 采 as 採) at all, since every earlier step (constrained
+        extraction, Jev confidence scoring) only ever sees the already-garbled OCR string and
+        can at best flag it as suspicious, never correct it.
+
+        Two-step design, not one vision call asked to output JSON directly: this fork's
+        configured local ``auxiliary.vision`` model (127.0.0.1:18003) ignores structured-
+        output instructions entirely and just returns a generic one-line scene description
+        regardless of prompt (confirmed live, 2026-09-22) — unusable for this. Instead:
+        (1) ``_vision_transcribe_image`` gets a verbatim, open-ended transcription of each
+        page from a genuinely capable vision model (OpenRouter `google/gemini-2.5-flash-
+        lite`, confirmed live to correctly read "巨思文化股份有限公司" / "Business Next Media
+        Corp." off a page the OCR engine misread as "三思"); (2) one text-only reconciliation
+        call (reliable JSON output, same aux lane as `_extract_business_card_fields`) merges
+        the OCR-based fields with the transcription(s), correcting only where the
+        transcription unambiguously disagrees with OCR — same "don't invent, blank stays
+        blank" discipline as the first extraction pass, just with better-quality evidence.
+
+        Iterates every page/image in ``image_paths`` (not just the one representative image
+        ``_business_card_image_path`` picks for local backup/Notion) — required for a
+        two-page PDF where a field only appears on the SECOND page (confirmed live: 郭采樺's
+        公司名稱 is only printed on page 2; page 1 has no company name at all).
+
+        Optional enhancement layer throughout: any failure (vision/text model unavailable,
+        malformed response, all pages unreadable) returns `fields` unchanged; never raises."""
+        transcripts: List[str] = []
+        paths = [p for p in (image_paths or []) if Path(p).expanduser().is_file()]
+        for index, image_path in enumerate(paths, start=1):
+            text = await self._vision_transcribe_image(image_path)
+            if text:
+                transcripts.append(f"[Image {index}]\n{text}" if len(paths) > 1 else text)
+        if not transcripts:
+            return fields
+        vision_text = "\n\n".join(transcripts)
+
+        try:
+            from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+
+            schema = {
+                "type": "object", "additionalProperties": False,
+                "properties": {field: {"type": ["string", "null"]} for field in _NAMECARD_FIELDS},
+                "required": list(_NAMECARD_FIELDS),
+            }
+            prompt = (
+                "你正在核對一次名片欄位擷取結果。以下有兩份資料：\n"
+                "(A) 先前用 OCR 引擎對名片圖片做文字辨識，依據 OCR 結果擷取出的欄位（JSON）。\n"
+                "(B) 另一個視覺模型直接看同一張圖片、逐字列出的文字內容——通常比 (A) 的 OCR "
+                "更準確，能看出 OCR 誤讀的相似字（例如把「巨」誤讀成「三」、「采」誤讀成"
+                "「採」），也可能包含 (A) 完全沒抓到的資訊（例如在另一頁上的公司名稱）。\n\n"
+                "任務：只有在 (B) 明確、無歧義地顯示某個欄位的正確值，且與 (A) 不同時，才用 "
+                "(B) 修正該欄位（含把 (A) 中原本空白但 (B) 清楚顯示的欄位填上）。如果 (B) 沒有"
+                "提到某欄位、或 (B) 內容含糊/與 (A) 互相矛盾看不出誰對，就維持 (A) 的原值不變"
+                "（包含維持空白）。不要用常識或外部知識猜測兩份資料都沒有清楚顯示的內容，不要"
+                "修正或創造電話、手機、統編等數字內容中無法從 (B) 確認的部分。Email 例外：如果 "
+                "(B) 顯示出完整、格式正確的 email（含 @ 與句點），且英數字部分與 (A) 吻合（只是"
+                "標點被 OCR 遺漏），可以用 (B) 補上正確格式。\n"
+                "所有中文欄位一律輸出繁體中文（台灣用語與正體字）。\n\n"
+                "(A) 目前欄位結果：\n" + json.dumps(fields, ensure_ascii=False)
+                + "\n\n(B) 視覺模型逐字讀出的內容：\n" + vision_text
+                + "\n\n只能輸出一個 JSON object，鍵名與上面完全相同，不要 markdown。"
+            )
+            response = await async_call_llm(
+                task="title_generation", messages=[{"role": "user", "content": prompt}],
+                temperature=0.0, max_tokens=700, timeout=90,
+                extra_body={"response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "business_card_fields_reconciled", "strict": True, "schema": schema},
+                }},
+            )
+            content = extract_content_or_reasoning(response).strip()
+            parsed = json.loads(self._strip_json_code_fences(content))
+            if not isinstance(parsed, dict):
+                return fields
+        except Exception as exc:
+            logger.warning(
+                "Vision-based business-card field reconciliation failed, keeping OCR result: %s",
+                exc,
+            )
+            return fields
+        return {
+            field: (parsed.get(field).strip() if isinstance(parsed.get(field), str) else fields.get(field, ""))
+            for field in _NAMECARD_FIELDS
+        }
+
+    async def _vision_transcribe_image(self, image_path: str) -> str:
+        """Verbatim, open-ended text transcription of one image via a genuinely capable
+        vision model. Deliberately NOT this fork's configured ``auxiliary.vision`` model/task
+        (local, 127.0.0.1:18003) — confirmed live (2026-09-22) to ignore instructions and
+        return only a one-line generic scene description regardless of prompt, useless for
+        transcription. OpenRouter `google/gemini-2.5-flash-lite` confirmed to work well
+        instead. ``max_tokens`` is set explicitly (this account's OpenRouter balance rejects
+        the aux lane's much larger default with a 402). Returns "" on any failure (network,
+        credits, timeout) — caller treats empty as "no evidence from this page", not an error.
+        """
+        try:
+            from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+
+            image_bytes = await asyncio.to_thread(Path(image_path).read_bytes)
+            mime = mimetypes.guess_type(image_path)[0] or "image/jpeg"
+            data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode()}"
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        "請逐字列出這張圖片上你看到的所有文字內容，包含中文與英文，"
+                        "一行一個文字區塊，盡量照抄原樣，不要摘要、不要省略、不要翻譯。"
+                    )},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }]
+            response = await async_call_llm(
+                provider="openrouter", model="google/gemini-2.5-flash-lite",
+                messages=messages, timeout=60, max_tokens=1500,
+            )
+            return extract_content_or_reasoning(response).strip()
+        except Exception as exc:
+            logger.warning("Vision transcription failed for %s: %s", image_path, exc)
+            return ""
 
     @staticmethod
     def _strip_json_code_fences(content: str) -> str:

@@ -2132,7 +2132,8 @@ class GatewayTurnMixin:
         message_text = await self._prepare_profile_scoped_inbound_message_text(
             event=event, source=source, history=history, session_key=session_key,
         )
-        if message_text is None:
+        from gateway.run_inbound import _TURN_ABORTED
+        if message_text is None or message_text is _TURN_ABORTED:
             return None, _session_env_tokens
 
         message_text, persist_user_message, persist_user_timestamp = (
@@ -3917,7 +3918,8 @@ class GatewayTurnMixin:
             next_message = await self._prepare_profile_scoped_inbound_message_text(
                 event=pending_event, source=next_source, history=updated_history, session_key=next_session_key,
             )
-            if next_message is None:
+            from gateway.run_inbound import _TURN_ABORTED
+            if next_message is None or next_message is _TURN_ABORTED:
                 return result
             from gateway.run_inbound import strip_discord_triggering_note
             next_persist_message = strip_discord_triggering_note(pending_event, next_message)

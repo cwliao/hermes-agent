@@ -56,6 +56,18 @@ _NAMECARD_FIELDS = (
     "姓名", "公司名稱", "電話", "手機", "Email", "傳真", "地址", "統編", "備註",
 )
 
+# Returned by ``_prepare_inbound_message_text`` (via ``_prepare_profile_scoped_inbound_message_text``)
+# to mean "stop, don't build a conversation turn at all" — checked by identity in run_turn.py, the
+# same pattern as ``_AGENT_PENDING_SENTINEL`` in gateway/run.py. A dedicated object (rather than
+# reusing ``None``) exists because this exact contract was broken once already (incident
+# 2026-09-22, fixed in commit f49227ed57): a code path meant to abort the turn instead returned
+# ``""``, which run_turn.py's `is None` check didn't recognize, so a stray empty-text turn fired
+# alongside the OCR-purpose menu it had just shown, and a later busy-redirect merged the user's
+# menu reply into that stray turn — producing a hallucinated response about an unrelated card. Any
+# future `return ""` written in place of this sentinel is a plain str, not `_TURN_ABORTED`, so it
+# fails loudly instead of silently regressing the same way.
+_TURN_ABORTED = object()
+
 try:
     from telegram import InlineKeyboardMarkup
     if not isinstance(InlineKeyboardMarkup, type):
@@ -1781,11 +1793,16 @@ class GatewayInboundMixin:
     async def _prepare_inbound_message_text(
         self, *, event: MessageEvent, source: SessionSource, history: List[Dict[str, Any]],
         session_key: Optional[str] = None,
-    ) -> Optional[str]:
+    ) -> Any:
         """Prepare inbound event text for the agent. Shared by the normal inbound and queued
         follow-up paths so attribution, image enrichment, STT, document notes, reply context and
         @ references behave the same. Side effect: buffers per-session native image paths when the
-        model supports native vision; the caller consumes that buffer at ``run_conversation``."""
+        model supports native vision; the caller consumes that buffer at ``run_conversation``.
+
+        Returns a ``str`` to continue the turn with that text, or the ``_TURN_ABORTED`` sentinel
+        (module-level, above) to mean "stop, this turn was already handled elsewhere — don't build
+        a conversation turn at all." Never a plain ``""``/``None`` for that purpose; see the
+        sentinel's own docstring for why."""
         _pending_stt_prepared = hasattr(event, "_gateway_pending_stt_text")
         message_text = (event._gateway_pending_stt_text if _pending_stt_prepared else event.text) or ""
         # Prefer the caller's resolved session key so this write key matches the consume key at the
@@ -1807,24 +1824,22 @@ class GatewayInboundMixin:
                 # was both slower and dropped the 名片圖檔 upload the dedicated pipeline does.
                 explicit_choice = self._normalize_image_ocr_choice((event.text or "").strip())
                 if explicit_choice is not None:
-                    # This function's return value feeds run_turn.py's turn-builder, which only
-                    # treats `None` as "abort, don't start a conversation turn" (a plain `""`
-                    # was silently proceeding as an empty user message — the actual root cause
-                    # of a stray LLM turn firing alongside every menu-triggered photo, later
-                    # busy-steering an unrelated follow-up reply into it and hallucinating).
+                    # This function's return value feeds run_turn.py's turn-builder, which
+                    # treats `_TURN_ABORTED` as "abort, don't start a conversation turn." See
+                    # the sentinel's definition above for why this isn't a plain `None`/`""`.
                     await self._execute_image_ocr_choice(
                         normalized=explicit_choice,
                         image_paths=image_paths,
                         source=source,
                         key=self._image_ocr_choice_key(source),
                     )
-                    return None
+                    return _TURN_ABORTED
                 await self._prompt_for_image_ocr_purpose(
                     source=source,
                     session_key=session_key,
                     image_paths=image_paths,
                 )
-                return None
+                return _TURN_ABORTED
             message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
         if audio_paths:
             message_text = await self._enrich_inbound_voice(event, source, message_text, audio_paths)
@@ -1833,7 +1848,7 @@ class GatewayInboundMixin:
         if "@" in message_text:
             message_text = await self._expand_inbound_context_references(source, session_key, message_text)
             if message_text is None:
-                return None
+                return _TURN_ABORTED
         # After expansion: the quoted reply is someone else's text and stays literal — an
         # ``@file:`` inside it must never read a local file on the replier's behalf.
         return self._prepend_inbound_reply_context(event, source, message_text)
@@ -1841,8 +1856,9 @@ class GatewayInboundMixin:
     async def _prepare_profile_scoped_inbound_message_text(
         self, *, event: MessageEvent, source: SessionSource, history: List[Dict[str, Any]],
         session_key: Optional[str] = None,
-    ) -> Optional[str]:
-        """Run inbound preprocessing under the routed profile when multiplexed."""
+    ) -> Any:
+        """Run inbound preprocessing under the routed profile when multiplexed. Passes through
+        ``_prepare_inbound_message_text``'s return value verbatim, including ``_TURN_ABORTED``."""
         from gateway.run import _async_profile_runtime_scope
         kwargs = dict(event=event, source=source, history=history, session_key=session_key)
         if getattr(getattr(self, "config", None), "multiplex_profiles", False):

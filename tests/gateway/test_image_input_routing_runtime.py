@@ -1,4 +1,5 @@
 import json
+import textwrap
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.run import GatewayRunner
+from gateway.run_inbound import _TURN_ABORTED
 from gateway.session import SessionSource
 
 
@@ -214,7 +216,7 @@ async def test_telegram_image_with_non_keyword_caption_prompts_for_purpose(monke
     )
 
     session_key = runner._session_key_for_source(source)
-    assert result is None
+    assert result is _TURN_ABORTED
     assert sent["source"] == source
     assert "1. OCR + 整理文字" in sent["content"]
     assert "2. 整理名片" in sent["content"]
@@ -254,7 +256,7 @@ async def test_telegram_image_with_business_card_caption_skips_menu(monkeypatch)
         history=[],
     )
 
-    assert result is None
+    assert result is _TURN_ABORTED
     assert called["normalized"] == "business_card"
     assert called["image_paths"] == ["/tmp/cashback.png"]
 
@@ -292,7 +294,7 @@ async def test_telegram_image_only_ocr_prompts_for_purpose(monkeypatch):
     )
 
     session_key = runner._session_key_for_source(source)
-    assert result is None
+    assert result is _TURN_ABORTED
     assert sent["source"] == source
     assert "1. OCR + 整理文字" in sent["content"]
     assert "2. 整理名片" in sent["content"]
@@ -1226,3 +1228,33 @@ async def test_extract_business_card_fields_raises_on_malformed_json(monkeypatch
 
     with pytest.raises(ValueError, match="invalid JSON"):
         await runner._extract_business_card_fields("王小明 綠能科技")
+
+
+def test_prepare_inbound_message_text_never_returns_bare_empty_string():
+    """Regression guard for the 2026-09-22 incident (fixed in f49227ed57, hardened with the
+    ``_TURN_ABORTED`` sentinel): a literal ``return ""`` in this function silently proceeds as a
+    real (empty) user turn instead of aborting it, because run_turn.py's turn-builder only
+    recognizes ``_TURN_ABORTED``/``None`` as "stop." A future edit that copies the "already
+    handled, return \"\"" convention used elsewhere in this file (e.g. ``_hm_clarify_reply``,
+    ``_execute_image_ocr_choice`` — a DIFFERENT, correct convention scoped to handle_message-level
+    dispatch, not to this function) would reintroduce the exact same bug. This walks the function's
+    AST and fails on any bare `return ""` / `return ''`, so that mistake is caught at test time
+    instead of live, on a real user's photo upload."""
+    import ast
+    import inspect
+
+    from gateway.run_inbound import GatewayInboundMixin
+
+    source = inspect.getsource(GatewayInboundMixin._prepare_inbound_message_text)
+    tree = ast.parse(textwrap.dedent(source))
+    offending = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Constant)
+        and node.value.value == ""
+    ]
+    assert not offending, (
+        f"_prepare_inbound_message_text has a bare `return \"\"` at relative line(s) "
+        f"{offending} — use the `_TURN_ABORTED` sentinel to abort the turn instead."
+    )

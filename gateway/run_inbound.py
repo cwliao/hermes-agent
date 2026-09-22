@@ -1807,18 +1807,24 @@ class GatewayInboundMixin:
                 # was both slower and dropped the 名片圖檔 upload the dedicated pipeline does.
                 explicit_choice = self._normalize_image_ocr_choice((event.text or "").strip())
                 if explicit_choice is not None:
-                    return await self._execute_image_ocr_choice(
+                    # This function's return value feeds run_turn.py's turn-builder, which only
+                    # treats `None` as "abort, don't start a conversation turn" (a plain `""`
+                    # was silently proceeding as an empty user message — the actual root cause
+                    # of a stray LLM turn firing alongside every menu-triggered photo, later
+                    # busy-steering an unrelated follow-up reply into it and hallucinating).
+                    await self._execute_image_ocr_choice(
                         normalized=explicit_choice,
                         image_paths=image_paths,
                         source=source,
                         key=self._image_ocr_choice_key(source),
                     )
+                    return None
                 await self._prompt_for_image_ocr_purpose(
                     source=source,
                     session_key=session_key,
                     image_paths=image_paths,
                 )
-                return ""
+                return None
             message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
         if audio_paths:
             message_text = await self._enrich_inbound_voice(event, source, message_text, audio_paths)

@@ -208,6 +208,10 @@ async def test_telegram_image_with_non_keyword_caption_prompts_for_purpose(monke
     monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
     monkeypatch.setattr(runner, "_deliver_platform_notice", fake_notice)
     monkeypatch.setattr(runner, "_enrich_message_with_vision", fail_enrich)
+    # Jev (TypeSafe) unavailable/unconfigured in tests: _extract_images_text returning ""
+    # short-circuits the eager-OCR auto-classification attempt before it ever calls Jev,
+    # keeping this test isolated from both the real OCR engine and the network.
+    monkeypatch.setattr(runner, "_extract_images_text", lambda paths: "")
 
     result = await runner._prepare_inbound_message_text(
         event=event,
@@ -286,6 +290,7 @@ async def test_telegram_image_only_ocr_prompts_for_purpose(monkeypatch):
     monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
     monkeypatch.setattr(runner, "_deliver_platform_notice", fake_notice)
     monkeypatch.setattr(runner, "_enrich_message_with_vision", fail_enrich)
+    monkeypatch.setattr(runner, "_extract_images_text", lambda paths: "")
 
     result = await runner._prepare_inbound_message_text(
         event=event,
@@ -1258,3 +1263,101 @@ def test_prepare_inbound_message_text_never_returns_bare_empty_string():
         f"_prepare_inbound_message_text has a bare `return \"\"` at relative line(s) "
         f"{offending} — use the `_TURN_ABORTED` sentinel to abort the turn instead."
     )
+
+
+@pytest.mark.asyncio
+async def test_telegram_image_jev_confident_classification_skips_menu(monkeypatch):
+    """When Jev (TypeSafe AI) confidently classifies an uncaptioned/non-keyword image's OCR
+    text, the menu is skipped entirely and the image is processed directly — the same
+    auto-routing a keyword caption gets, just decided by Jev instead of the user typing
+    "名片"."""
+    runner = _make_runner()
+    source = _source()
+    event = _image_event("翻譯這張圖")
+    cfg = _auto_config()
+    cfg["gateway"] = {
+        "image_ocr_translate": {
+            "enabled": True,
+            "platforms": ["telegram"],
+            "target_language": "Traditional Chinese",
+        }
+    }
+
+    async def fail_notice(*_args, **_kwargs):
+        pytest.fail("a confidently Jev-classified image should not fall back to the menu")
+
+    executed = {}
+
+    async def fake_execute(*, normalized, image_paths, source, key, _ocr_text_override=None):
+        executed.update(
+            normalized=normalized, image_paths=image_paths,
+            ocr_text_override=_ocr_text_override,
+        )
+        return ""
+
+    async def fake_classify(ocr_text):
+        return "business_card"
+
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
+    monkeypatch.setattr(runner, "_deliver_platform_notice", fail_notice)
+    monkeypatch.setattr(runner, "_extract_images_text", lambda paths: "吳泰中 國家科學及技術委員會")
+    monkeypatch.setattr(runner, "_typesafe_classify_image_purpose", fake_classify)
+    monkeypatch.setattr(runner, "_execute_image_ocr_choice", fake_execute)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result is _TURN_ABORTED
+    assert executed["normalized"] == "business_card"
+    assert executed["image_paths"] == ["/tmp/cashback.png"]
+    assert executed["ocr_text_override"] == "吳泰中 國家科學及技術委員會"
+
+
+@pytest.mark.asyncio
+async def test_typesafe_classify_image_purpose_below_confidence_threshold_returns_none(monkeypatch):
+    """A low-confidence Jev answer must not auto-route — the whole point of the threshold is
+    that an uncertain classification should fall back to asking the user, not guess."""
+    runner = _make_runner()
+
+    async def fake_evaluate(*, state, questions):
+        return {"purpose": {"type": "choice", "choice": "名片", "confidence": 0.4}}
+
+    monkeypatch.setattr(runner, "_typesafe_evaluate", fake_evaluate)
+
+    result = await runner._typesafe_classify_image_purpose("some ocr text")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_typesafe_evaluate_returns_none_without_api_key(monkeypatch):
+    """No TYPESAFE_API_KEY configured must silently disable the feature (no network call, no
+    exception) rather than error — this is an optional enhancement layer."""
+    runner = _make_runner()
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+
+    result = await runner._typesafe_evaluate(state="x", questions={})
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_typesafe_score_business_card_fields_flags_low_confidence(monkeypatch):
+    """Fields Jev scores below the 0.5 noul threshold come back in the low-confidence list;
+    fields it's confident about don't."""
+    runner = _make_runner()
+
+    async def fake_evaluate(*, state, questions):
+        assert set(questions) == {"姓名", "Email"}
+        return {
+            "姓名": {"type": "noul", "noul": 0.9},
+            "Email": {"type": "noul", "noul": 0.12},
+        }
+
+    monkeypatch.setattr(runner, "_typesafe_evaluate", fake_evaluate)
+
+    low_confidence = await runner._typesafe_score_business_card_fields(
+        "some ocr text", {"姓名": "吳泰中", "Email": "2601037@niarorgtW", "手機": ""}
+    )
+    assert low_confidence == ["Email"]

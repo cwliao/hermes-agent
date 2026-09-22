@@ -1842,6 +1842,34 @@ class GatewayInboundMixin:
                         key=self._image_ocr_choice_key(source),
                     )
                     return _TURN_ABORTED
+                # No keyword caption: try Jev (TypeSafe AI) auto-classification from the
+                # image's own OCR text before falling back to asking the user. Scoped to a
+                # single image — a multi-image upload still needs the menu, since "how many
+                # separate cards is this" isn't something OCR text alone can safely infer.
+                # Jev unavailable or under-confident (see _typesafe_classify_image_purpose's
+                # 0.75 threshold) returns None, and behavior is IDENTICAL to before this
+                # feature existed: show the menu. The OCR run here is deliberately reused
+                # (via _ocr_text_override) rather than repeated inside _execute_image_ocr_choice.
+                auto_ocr_text = ""
+                auto_choice = None
+                if len(image_paths) == 1:
+                    try:
+                        auto_ocr_text = await asyncio.to_thread(
+                            self._extract_images_text, image_paths
+                        )
+                    except Exception:
+                        logger.exception("Eager OCR for Jev auto-classification failed")
+                    if auto_ocr_text:
+                        auto_choice = await self._typesafe_classify_image_purpose(auto_ocr_text)
+                if auto_choice is not None:
+                    await self._execute_image_ocr_choice(
+                        normalized=auto_choice,
+                        image_paths=image_paths,
+                        source=source,
+                        key=self._image_ocr_choice_key(source),
+                        _ocr_text_override=auto_ocr_text,
+                    )
+                    return _TURN_ABORTED
                 await self._prompt_for_image_ocr_purpose(
                     source=source,
                     session_key=session_key,
@@ -2596,10 +2624,15 @@ class GatewayInboundMixin:
         image_paths: List[str],
         source: SessionSource,
         key: str,
+        _ocr_text_override: Optional[str] = None,
     ) -> str:
         """Run the chosen OCR purpose (ocr/news/business_card) against already-classified
-        image paths. Shared by the follow-up-reply path (user answered the 1/2/3 prompt)
-        and the direct-caption path (the upload's own caption already named a purpose)."""
+        image paths. Shared by the follow-up-reply path (user answered the 1/2/3 prompt),
+        the direct-caption path (the upload's own caption already named a purpose), and the
+        Jev auto-classification path (``_prepare_inbound_message_text`` already ran OCR to
+        classify the image and passes it via ``_ocr_text_override`` so it isn't run twice;
+        ignored for the multi-image business-card batch below, which OCRs each image
+        separately inside ``_process_business_card_batch``)."""
         if normalized == "business_card" and len(image_paths) > 1:
             self._pending_namecard_correction_choices().pop(key, None)
             await self._deliver_platform_notice(
@@ -2610,7 +2643,10 @@ class GatewayInboundMixin:
                 source, reply_text, already_formatted=True
             )
             return ""
-        ocr_text = await asyncio.to_thread(self._extract_images_text, image_paths)
+        ocr_text = (
+            _ocr_text_override if _ocr_text_override is not None
+            else await asyncio.to_thread(self._extract_images_text, image_paths)
+        )
         if not ocr_text:
             enriched = await self._enrich_message_with_vision("", image_paths, ocr_translate=True)
             await self._deliver_direct_image_ocr_reply(source, enriched)
@@ -2760,6 +2796,18 @@ class GatewayInboundMixin:
             fields = {field: "" for field in _NAMECARD_FIELDS}
             extraction_error = str(exc)
             extraction_failure_reason = type(exc).__name__
+
+        if not extraction_error:
+            try:
+                low_confidence_fields = await self._typesafe_score_business_card_fields(
+                    ocr_text, fields
+                )
+            except Exception:
+                logger.exception("TypeSafe (Jev) field-confidence scoring failed")
+                low_confidence_fields = []
+            if low_confidence_fields:
+                note = f"⚠️ 低信心度欄位（請人工確認）：{'、'.join(low_confidence_fields)}"
+                fields["備註"] = f"{fields['備註']}\n{note}" if fields["備註"] else note
 
         local_backup = {}
         local_backup_failure_reason = ""
@@ -3149,6 +3197,101 @@ class GatewayInboundMixin:
             else:
                 raise ValueError(f"extracted field {field} is not a string or null")
         return fields
+
+    async def _typesafe_evaluate(self, *, state: str, questions: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """POST one evaluation call to TypeSafe AI's Jev model (structured Choice/Score/Noul
+        primitives, not a chat-completion API — see https://docs.typesafe.ai/). Used as an
+        optional enhancement layer (image-purpose auto-classification, namecard field
+        confidence scoring); never raises and returns None on any failure (missing API key,
+        network error, non-2xx, malformed response) so every caller must treat None as "fall
+        back to the existing behavior," not as an error to surface to the user."""
+        api_key = (os.environ.get("TYPESAFE_API_KEY") or "").strip()
+        if not api_key:
+            return None
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    "https://api.typesafe.ai/v1/systemone",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"state": state, "model": "jev-latest", "questions": questions},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except Exception as exc:
+            logger.warning("TypeSafe (Jev) evaluation failed, falling back: %s", exc)
+            return None
+        answers = payload.get("answers")
+        return answers if isinstance(answers, dict) else None
+
+    async def _typesafe_classify_image_purpose(self, ocr_text: str) -> Optional[str]:
+        """Auto-classify an uploaded image's purpose (名片/新聞/一般文件) from its OCR text,
+        using Jev's `choice` primitive, so a confidently-classified image can skip the manual
+        1/2/3 menu. Returns a normalized value matching `_normalize_image_ocr_choice`'s output
+        ("business_card"/"news"/"ocr"), or None when Jev is unavailable OR its confidence is
+        below the threshold — both cases mean "fall back to asking the user," never a guess."""
+        if not (ocr_text or "").strip():
+            return None
+        answers = await self._typesafe_evaluate(
+            state=ocr_text,
+            questions={
+                "purpose": {
+                    "type": "choice",
+                    "instructions": "這是一張圖片的 OCR 辨識原始文字，請判斷這張圖片最可能的用途類型。",
+                    "criteria": {
+                        "名片": "這是一張商業名片/business card，內含姓名、公司、職稱、聯絡方式等資訊",
+                        "新聞": "這是一則新聞報導或新聞剪報的內容",
+                        "一般文件": "這是其他一般文件、圖表、螢幕截圖或不屬於上述兩類的內容",
+                    },
+                }
+            },
+        )
+        if not answers:
+            return None
+        answer = answers.get("purpose") or {}
+        choice = str(answer.get("choice") or "").strip()
+        confidence = answer.get("confidence")
+        if not isinstance(confidence, (int, float)) or confidence < 0.75:
+            return None
+        return {"名片": "business_card", "新聞": "news", "一般文件": "ocr"}.get(choice)
+
+    async def _typesafe_score_business_card_fields(
+        self, ocr_text: str, fields: Dict[str, str]
+    ) -> List[str]:
+        """Flag namecard fields Jev considers unreliable (`noul` primitive: probability the
+        extracted value is correct/trustworthy against the OCR text), e.g. a garbled email
+        domain that survived extraction verbatim because "keep unclear text as-is, don't
+        invent" — correct per that rule, but still worth flagging for human review (incident
+        2026-09-22: exactly this happened with an email domain). Returns field names below the
+        confidence threshold; empty list (not an error) when Jev is unavailable or every field
+        scores fine — never blocks or delays the Notion save either way."""
+        candidates = {field: value for field, value in fields.items() if value.strip()}
+        if not candidates or not (ocr_text or "").strip():
+            return []
+        questions = {
+            field: {
+                "type": "noul",
+                "instructions": (
+                    f"OCR 原文中「{field}」欄位的擷取值是「{value}」，判斷這個值是否確實、"
+                    "正確地出現在原文中（沒有被誤讀、誤植或格式明顯不合理）。"
+                ),
+                "criteria": {"true": "正確可信", "false": "不可信或無法確認"},
+            }
+            for field, value in candidates.items()
+        }
+        answers = await self._typesafe_evaluate(state=ocr_text, questions=questions)
+        if not answers:
+            return []
+        low_confidence: List[str] = []
+        for field in candidates:
+            answer = answers.get(field) or {}
+            noul = answer.get("noul")
+            if isinstance(noul, (int, float)) and noul < 0.5:
+                low_confidence.append(field)
+        return low_confidence
 
     @staticmethod
     def _strip_json_code_fences(content: str) -> str:

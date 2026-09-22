@@ -210,7 +210,18 @@ dependencies = [
   # 738 CPython reports sys_platform == 'android' and never matched.) Pre-GKI
   # devices can still slip through; they get the same resolution failure as
   # before, worked around by installing with `--no-deps` or an older release.
-  "nemo-relay>=0.8.3,<0.9; ((sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'linux' and platform_machine == 'x86_64' and 'android' not in platform_release) or (sys_platform == 'linux' and platform_machine == 'aarch64' and 'android' not in platform_release) or (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'win32' and platform_machine == 'ARM64')) and python_version >= '3.14'",]
+  "nemo-relay>=0.8.3,<0.9; ((sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'linux' and platform_machine == 'x86_64' and 'android' not in platform_release) or (sys_platform == 'linux' and platform_machine == 'aarch64' and 'android' not in platform_release) or (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'win32' and platform_machine == 'ARM64')) and python_version >= '3.14'",
+  # Business-card/general image OCR primary engine (gateway/run_inbound.py
+  # _extract_images_text_with_paddleocr), replacing Tesseract's --psm 6 uniform-block
+  # assumption, which silently dropped legible printed names on real business cards
+  # (incident 2026-09-22) — Tesseract remains as the fallback engine.
+  # Hard-pinned: paddlepaddle>=3.3 dropped manylinux aarch64 wheels (x86_64/macOS/Windows
+  # only), which breaks install on aarch64 hosts (this fork's primary dev host is a DGX
+  # Spark, aarch64 + Blackwell/sm_121 — no GPU wheel exists for that combo either way, so
+  # this installs the CPU build). 3.2.2 is the newest release with an aarch64 wheel.
+  "paddlepaddle==3.2.2; python_version >= '3.14'",
+  "paddleocr>=2.10.0; python_version >= '3.14'",
+]
 
 [project.optional-dependencies]
 # High-performance event loop — uvloop replaces the stdlib asyncio loop with

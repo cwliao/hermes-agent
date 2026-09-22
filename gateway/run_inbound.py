@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from contextlib import suppress
 from datetime import datetime
@@ -55,6 +56,13 @@ _IMAGE_OCR_CHOICE_TTL_SECS = 10 * 60
 _NAMECARD_FIELDS = (
     "姓名", "公司名稱", "電話", "手機", "Email", "傳真", "地址", "統編", "備註",
 )
+
+# Lazy-initialized PaddleOCR singleton (used by ``_extract_images_text_with_paddleocr``).
+# Init loads model weights from disk (or downloads them on first run) and takes a few
+# seconds, so it's created once per gateway process, not per call, and guarded by a lock
+# since OCR calls run concurrently via ``asyncio.to_thread``.
+_PADDLEOCR_ENGINE = None
+_PADDLEOCR_LOCK = threading.Lock()
 
 # Returned by ``_prepare_inbound_message_text`` (via ``_prepare_profile_scoped_inbound_message_text``)
 # to mean "stop, don't build a conversation turn at all" — checked by identity in run_turn.py, the
@@ -2602,7 +2610,7 @@ class GatewayInboundMixin:
                 source, reply_text, already_formatted=True
             )
             return ""
-        ocr_text = await asyncio.to_thread(self._extract_images_text_with_tesseract, image_paths)
+        ocr_text = await asyncio.to_thread(self._extract_images_text, image_paths)
         if not ocr_text:
             enriched = await self._enrich_message_with_vision("", image_paths, ocr_translate=True)
             await self._deliver_direct_image_ocr_reply(source, enriched)
@@ -2680,37 +2688,6 @@ class GatewayInboundMixin:
             text = "OCR did not return readable text from this image."
         return f"📌 圖片 OCR / 翻譯\n\n{text}"
 
-    def _extract_images_text_with_tesseract(self, image_paths: List[str]) -> str:
-        texts: list[str] = []
-        for index, image_path in enumerate(image_paths, start=1):
-            try:
-                proc = subprocess.run(
-                    ["tesseract", image_path, "stdout", "-l", "chi_tra+chi_sim+eng", "--psm", "6"],
-                    check=False, capture_output=True, text=True, timeout=45,
-                )
-            except Exception as exc:
-                logger.warning("Tesseract OCR failed for %s: %s", image_path, exc)
-                continue
-            if proc.returncode != 0:
-                logger.warning(
-                    "Tesseract OCR returned %s for %s: %s",
-                    proc.returncode, image_path, (proc.stderr or "").strip()[:500],
-                )
-                continue
-            text = self._normalize_ocr_text(proc.stdout)
-            if text:
-                texts.append(f"[Image {index}]\n{text}" if len(image_paths) > 1 else text)
-        return "\n\n".join(texts).strip()
-
-    @staticmethod
-    def _normalize_ocr_text(text: str) -> str:
-        lines = []
-        for raw_line in (text or "").splitlines():
-            line = re.sub(r"[ \t]+", " ", raw_line).strip()
-            if line:
-                lines.append(line)
-        return "\n".join(lines).strip()
-
     async def _process_business_card_batch(
         self,
         image_paths: List[str],
@@ -2726,7 +2703,7 @@ class GatewayInboundMixin:
             outcome: Dict[str, Any] = {}
             try:
                 ocr_text = await asyncio.to_thread(
-                    self._extract_images_text_with_tesseract, [image_path]
+                    self._extract_images_text, [image_path]
                 )
                 if not ocr_text:
                     raise ValueError("OCR 未擷取到文字")
@@ -3508,6 +3485,63 @@ class GatewayInboundMixin:
             if line:
                 lines.append(line)
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _get_paddleocr_engine():
+        """Lazily create (once per process) the PaddleOCR engine used for business-card /
+        general image OCR. ``chinese_cht`` covers Traditional Chinese + English; PP-OCR's
+        detector handles the mixed font sizes/styles common on business cards (stylized
+        name text especially) far better than Tesseract's uniform-block assumption
+        (--psm 6), which is what silently dropped a legible printed name on a real card
+        (incident 2026-09-22). CPU-only here: this host's paddlepaddle-gpu has no wheel for
+        this aarch64 + Blackwell (sm_121) combo, so ``paddlepaddle`` (CPU) is installed
+        instead — a few seconds per card is an acceptable trade for the accuracy gain."""
+        global _PADDLEOCR_ENGINE
+        if _PADDLEOCR_ENGINE is not None:
+            return _PADDLEOCR_ENGINE
+        with _PADDLEOCR_LOCK:
+            if _PADDLEOCR_ENGINE is None:
+                # This corporate network's TLS-inspecting proxy issues certs from a root CA
+                # that's in the system trust store but not in Python's bundled certifi store;
+                # PaddleOCR's own model-weight downloader uses requests/urllib3, which only
+                # honors REQUESTS_CA_BUNDLE/SSL_CERT_FILE, not the system store, so first-run
+                # (or a cache miss after a cleared ~/.paddleocr dir) fails TLS verification
+                # without this. setdefault: never overrides an operator's own CA config.
+                os.environ.setdefault("REQUESTS_CA_BUNDLE", "/etc/ssl/certs/ca-certificates.crt")
+                os.environ.setdefault("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
+                from paddleocr import PaddleOCR
+                _PADDLEOCR_ENGINE = PaddleOCR(use_angle_cls=True, lang="chinese_cht", show_log=False)
+        return _PADDLEOCR_ENGINE
+
+    def _extract_images_text_with_paddleocr(self, image_paths: List[str]) -> str:
+        engine = self._get_paddleocr_engine()
+        texts: list[str] = []
+        for index, image_path in enumerate(image_paths, start=1):
+            try:
+                result = engine.ocr(image_path, cls=True)
+            except Exception as exc:
+                logger.warning("PaddleOCR failed for %s: %s", image_path, exc)
+                continue
+            lines = [line[1][0] for line in (result[0] or [])] if result else []
+            text = self._normalize_ocr_text("\n".join(lines))
+            if text:
+                texts.append(f"[Image {index}]\n{text}" if len(image_paths) > 1 else text)
+        return "\n\n".join(texts).strip()
+
+    def _extract_images_text(self, image_paths: List[str]) -> str:
+        """Primary OCR entry point for all three image-purpose flows (OCR/名片/新聞). Tries
+        PaddleOCR first (see ``_get_paddleocr_engine`` for why); falls back to Tesseract on
+        any failure or empty result so a PaddleOCR regression (model-download outage,
+        missing/broken install) degrades to the previous behavior instead of losing OCR
+        entirely."""
+        try:
+            text = self._extract_images_text_with_paddleocr(image_paths)
+            if text:
+                return text
+            logger.info("PaddleOCR returned no text for %s; falling back to Tesseract", image_paths)
+        except Exception as exc:
+            logger.warning("PaddleOCR unavailable (%s); falling back to Tesseract", exc)
+        return self._extract_images_text_with_tesseract(image_paths)
 
     async def _format_news_ocr_reply(self, ocr_text: str) -> str:
         text = (ocr_text or "").strip()

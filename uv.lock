@@ -2826,7 +2826,7 @@ requires-dist = [
     { name = "opentelemetry-sdk", marker = "extra == 'otlp'", specifier = "==1.39.1" },
     { name = "openwakeword", marker = "extra == 'wake'", specifier = "==0.6.0" },
     { name = "packaging", marker = "python_full_version >= '3.14'", specifier = "==26.0" },
-    { name = "paddleocr", marker = "python_full_version >= '3.14'", specifier = ">=2.10.0" },
+    { name = "paddleocr", marker = "python_full_version >= '3.14'", specifier = "==2.10.0" },
     { name = "paddlepaddle", marker = "python_full_version >= '3.14'", specifier = "==3.2.2" },
     { name = "parallel-web", marker = "extra == 'parallel-web'", specifier = "==0.4.2" },
     { name = "pathspec", marker = "python_full_version >= '3.14'", specifier = "==1.1.1" },

@@ -219,8 +219,14 @@ dependencies = [
   # only), which breaks install on aarch64 hosts (this fork's primary dev host is a DGX
   # Spark, aarch64 + Blackwell/sm_121 — no GPU wheel exists for that combo either way, so
   # this installs the CPU build). 3.2.2 is the newest release with an aarch64 wheel.
+  # paddleocr is exact-pinned too, not just floor-pinned: paddleocr>=3.0 is a from-scratch
+  # rewrite (PP-OCRv5, `.predict()` replacing `.ocr()`, different constructor kwargs) —
+  # an unconstrained `>=2.10.0` resolves to the newest 3.x outside this project's own lock
+  # (confirmed live: a standalone `uv pip install` picked 3.7.0 while `uv lock` picked
+  # 2.10.0 for compatibility with the paddlepaddle pin above), which breaks
+  # `_extract_images_text_with_paddleocr`'s 2.x-shaped call. Bump both together deliberately.
   "paddlepaddle==3.2.2; python_version >= '3.14'",
-  "paddleocr>=2.10.0; python_version >= '3.14'",
+  "paddleocr==2.10.0; python_version >= '3.14'",
 ]
 
 [project.optional-dependencies]

@@ -1797,8 +1797,22 @@ class GatewayInboundMixin:
         message_text = self._prefix_inbound_sender_context(event, source, message_text)
         image_paths, audio_paths, audio_file_paths, video_paths = self._classify_inbound_media(event, _pending_stt_prepared)
         if image_paths:
-            image_only_ocr = self._should_ocr_translate_images_for_source(source) and not (event.text or "").strip()
-            if image_only_ocr:
+            if self._should_ocr_translate_images_for_source(source):
+                # A caption only counts as an explicit purpose when it's literally one of the
+                # 1/2/3/ocr/名片/新聞 choice keywords. Any other caption — including an
+                # instruction like "翻譯這張圖", or just a person's name on a business card —
+                # is not a reliable purpose declaration on its own, so ask via the same 1/2/3
+                # menu an uncaptioned photo gets. Deciding "this looks like a name card" on the
+                # model's own initiative (falling through to the general agent + generic tools)
+                # was both slower and dropped the 名片圖檔 upload the dedicated pipeline does.
+                explicit_choice = self._normalize_image_ocr_choice((event.text or "").strip())
+                if explicit_choice is not None:
+                    return await self._execute_image_ocr_choice(
+                        normalized=explicit_choice,
+                        image_paths=image_paths,
+                        source=source,
+                        key=self._image_ocr_choice_key(source),
+                    )
                 await self._prompt_for_image_ocr_purpose(
                     source=source,
                     session_key=session_key,
@@ -2545,20 +2559,17 @@ class GatewayInboundMixin:
                 "請直接回覆 1、2 或 3。",
             )
 
-    async def _handle_pending_image_ocr_choice(self, event: MessageEvent) -> Optional[str]:
-        source = getattr(event, "source", None)
-        if source is None or getattr(event, "media_urls", None):
-            return None
-        normalized = self._normalize_image_ocr_choice(getattr(event, "text", ""))
-        if normalized is None:
-            return None
-        key = self._image_ocr_choice_key(source)
-        pending = self._pending_image_ocr_choices().pop(key, None)
-        if not pending:
-            return None
-        image_paths = pending.get("image_paths") or []
-        if not image_paths:
-            return None
+    async def _execute_image_ocr_choice(
+        self,
+        *,
+        normalized: str,
+        image_paths: List[str],
+        source: SessionSource,
+        key: str,
+    ) -> str:
+        """Run the chosen OCR purpose (ocr/news/business_card) against already-classified
+        image paths. Shared by the follow-up-reply path (user answered the 1/2/3 prompt)
+        and the direct-caption path (the upload's own caption already named a purpose)."""
         if normalized == "business_card" and len(image_paths) > 1:
             self._pending_namecard_correction_choices().pop(key, None)
             await self._deliver_platform_notice(
@@ -2588,6 +2599,24 @@ class GatewayInboundMixin:
             already_formatted=True,
         )
         return ""
+
+    async def _handle_pending_image_ocr_choice(self, event: MessageEvent) -> Optional[str]:
+        source = getattr(event, "source", None)
+        if source is None or getattr(event, "media_urls", None):
+            return None
+        normalized = self._normalize_image_ocr_choice(getattr(event, "text", ""))
+        if normalized is None:
+            return None
+        key = self._image_ocr_choice_key(source)
+        pending = self._pending_image_ocr_choices().pop(key, None)
+        if not pending:
+            return None
+        image_paths = pending.get("image_paths") or []
+        if not image_paths:
+            return None
+        return await self._execute_image_ocr_choice(
+            normalized=normalized, image_paths=image_paths, source=source, key=key
+        )
 
     def _image_analysis_prompt(self, *, ocr_translate: bool = False) -> str:
         if not ocr_translate:

@@ -1028,13 +1028,23 @@ def _load_pool_with_credentials(provider: str, note: str = "") -> Optional[Any]:
     return pool if pool and pool.has_credentials() else None
 
 
-def _select_pool_entry(provider: str) -> Tuple[bool, Optional[Any]]:
-    """Return (pool_exists_for_provider, selected_entry)."""
+def _select_pool_entry(provider: str, *, model: Optional[str] = None) -> Tuple[bool, Optional[Any]]:
+    """Return (pool_exists_for_provider, selected_entry).
+
+    ``model`` matters: ``pool.select()``'s cooldown check treats an unscoped call
+    conservatively — ANY active per-model cooldown on an entry blocks that entry
+    entirely, even for a model that was never rate-limited. A caller that knows which
+    model it's about to request (nearly everyone — see ``_build_codex_client``, which
+    receives ``model`` as a parameter) must pass it through, or a stale cooldown on an
+    unrelated, long-abandoned model can silently block every model on that credential
+    (incident 2026-09-22: a 2026-09-20 rate-limit cooldown on `gpt-5.3-codex-spark`
+    blocked the entire openai-codex pool entry for `gpt-5.5`, which had never been
+    rate-limited, because `_build_codex_client` called this unscoped)."""
     pool = _load_pool_with_credentials(provider)
     if pool is None:
         return False, None
     try:
-        return True, pool.select()
+        return True, pool.select(model=model)
     except Exception as exc:
         logger.debug("Auxiliary client: could not select pool entry for %s: %s", provider, exc)
         return True, None
@@ -2103,13 +2113,15 @@ def _resolve_xai_oauth_for_aux() -> Optional[Tuple[str, str]]:
     return _creds_pair(creds)
 
 
-def _resolve_codex_credential_and_base() -> Tuple[Optional[str], str]:
+def _resolve_codex_credential_and_base(model: Optional[str] = None) -> Tuple[Optional[str], str]:
     """``(token, base_url)`` taken from ONE authority, so a Codex key is only ever sent to the host
     it belongs to (#121486): the profile-scoped ``HERMES_CODEX_BASE_URL`` wins; otherwise a pooled
     key goes where that pool entry routes (row URL / ``model.base_url``) and the auth.json OAuth
-    token goes to the ChatGPT default. ``(None, <base>)`` without a usable token."""
+    token goes to the ChatGPT default. ``(None, <base>)`` without a usable token. Pass ``model``
+    when known — see ``_select_pool_entry``'s docstring for why an unscoped call can be wrongly
+    blocked by an unrelated model's cooldown."""
     override = _codex_base_url_override()
-    pool_present, entry = _select_pool_entry("openai-codex")
+    pool_present, entry = _select_pool_entry("openai-codex", model=model)
     if pool_present:
         token = _pool_runtime_api_key(entry)
         if token:
@@ -2945,7 +2957,7 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
             "pass model explicitly (auxiliary.<task>.model in config.yaml)."
         )
         return None, None
-    codex_token, base_url = _resolve_codex_credential_and_base()
+    codex_token, base_url = _resolve_codex_credential_and_base(model)
     if not codex_token:
         return None, None
     logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", model)
@@ -5028,7 +5040,7 @@ def _resolve_openai_codex_branch(req: _ResolveRequest) -> _ResolveResult:
     no_token_msg = "resolve_provider_client: openai-codex requested but no Codex OAuth token found (run: hermes model)"
     if req.raw_codex:
         # Raw OpenAI client for callers needing responses.stream() (main agent loop).
-        codex_token, base_url = _resolve_codex_credential_and_base()
+        codex_token, base_url = _resolve_codex_credential_and_base(model)
         if not codex_token:
             logger.warning(no_token_msg)
             return None, None

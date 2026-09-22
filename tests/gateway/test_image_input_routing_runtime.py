@@ -686,11 +686,22 @@ def _patch_business_card_dependencies(monkeypatch, tmp_path: Path, client):
         }
         return _auxiliary_response(json.dumps(fields, ensure_ascii=False))
 
+    async def fake_vision_verify(_self, _image_paths, current_fields):
+        return current_fields
+
     monkeypatch.setattr("agent.auxiliary_client.async_call_llm", fake_call_llm)
     monkeypatch.setattr("gateway.run.get_hermes_home", lambda: str(hermes_home))
     monkeypatch.setattr("gateway.run._NAMECARD_GDRIVE_DIR", gdrive_root)
     monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: client)
     monkeypatch.setenv("NOTION_API_KEY", "test-notion-key")
+    # This fixture is about the OCR -> extraction -> Notion pipeline, not the separate
+    # vision-verification pass (added 2026-09-22) — mock it to a pass-through so its own
+    # async_call_llm shape (no `task` kwarg) doesn't trip fake_call_llm's `task` assertion
+    # above. See test_vision_verify_business_card_fields_* below for dedicated coverage.
+    monkeypatch.setattr(
+        "gateway.run_inbound.GatewayInboundMixin._vision_verify_business_card_fields",
+        fake_vision_verify,
+    )
     return fields, image_path, hermes_home
 
 
@@ -1361,3 +1372,97 @@ async def test_typesafe_score_business_card_fields_flags_low_confidence(monkeypa
         "some ocr text", {"姓名": "吳泰中", "Email": "2601037@niarorgtW", "手機": ""}
     )
     assert low_confidence == ["Email"]
+
+
+@pytest.mark.asyncio
+async def test_vision_transcribe_image_returns_empty_on_failure(monkeypatch, tmp_path):
+    """Any failure (network, credits, timeout) in the vision transcription call must yield
+    "" — the caller treats that as "no evidence from this page," never an error."""
+    runner = _make_runner()
+    image_path = tmp_path / "card.jpg"
+    image_path.write_bytes(b"fake jpeg bytes")
+
+    async def fake_call_llm(**_kwargs):
+        raise RuntimeError("simulated OpenRouter 402")
+
+    monkeypatch.setattr("agent.auxiliary_client.async_call_llm", fake_call_llm)
+
+    result = await runner._vision_transcribe_image(str(image_path))
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_vision_verify_business_card_fields_corrects_from_second_page(monkeypatch, tmp_path):
+    """Real 2026-09-22 incident, minimized: a 2-page card whose company name is only visible
+    on page 2. The vision pass must transcribe both pages and let the reconciliation call
+    correct the OCR-garbled company name using page 2's evidence, even though page 1 has no
+    company name to contribute at all."""
+    runner = _make_runner()
+    page1 = tmp_path / "page-1.jpg"
+    page2 = tmp_path / "page-2.jpg"
+    page1.write_bytes(b"fake page 1")
+    page2.write_bytes(b"fake page 2")
+
+    transcribe_calls = []
+
+    async def fake_transcribe(_self, image_path):
+        transcribe_calls.append(image_path)
+        if image_path == str(page1):
+            return "郭采樺\nVivian Kuo\n0978-262703"
+        return "巨思文化股份有限公司\nBusiness Next Media Corp.\nvivian.kuo@bnext.com.tw"
+
+    async def fake_call_llm(**kwargs):
+        assert kwargs["task"] == "title_generation"
+        assert "巨思文化股份有限公司" in kwargs["messages"][0]["content"]
+        assert "[Image 1]" in kwargs["messages"][0]["content"]
+        assert "[Image 2]" in kwargs["messages"][0]["content"]
+        corrected = {
+            "姓名": "郭采樺", "公司名稱": "巨思文化股份有限公司", "電話": "886-2-87739808",
+            "手機": "0978-262703", "Email": "vivian.kuo@bnext.com.tw", "傳真": "886-2-87739608",
+            "地址": "", "統編": "16780474", "備註": "",
+        }
+        return _auxiliary_response(json.dumps(corrected, ensure_ascii=False))
+
+    monkeypatch.setattr(
+        "gateway.run_inbound.GatewayInboundMixin._vision_transcribe_image", fake_transcribe
+    )
+    monkeypatch.setattr("agent.auxiliary_client.async_call_llm", fake_call_llm)
+
+    original_fields = {
+        "姓名": "郭採樺", "公司名稱": "三思文化股份有限公司", "電話": "886-2-87739808",
+        "手機": "0978-262703", "Email": "", "傳真": "886-2-87739608",
+        "地址": "", "統編": "16780474", "備註": "",
+    }
+    corrected = await runner._vision_verify_business_card_fields(
+        [str(page1), str(page2)], original_fields
+    )
+
+    assert transcribe_calls == [str(page1), str(page2)]
+    assert corrected["姓名"] == "郭采樺"
+    assert corrected["公司名稱"] == "巨思文化股份有限公司"
+    assert corrected["Email"] == "vivian.kuo@bnext.com.tw"
+
+
+@pytest.mark.asyncio
+async def test_vision_verify_business_card_fields_noop_when_no_transcription(monkeypatch, tmp_path):
+    """No page yields any transcription (all pages failed/unreadable) -> return the original
+    fields unchanged, and never call the reconciliation LLM at all."""
+    runner = _make_runner()
+    image_path = tmp_path / "card.jpg"
+    image_path.write_bytes(b"fake jpeg bytes")
+
+    async def fake_transcribe(_self, _image_path):
+        return ""
+
+    async def fail_call_llm(**_kwargs):
+        pytest.fail("reconciliation should not run with zero transcriptions")
+
+    monkeypatch.setattr(
+        "gateway.run_inbound.GatewayInboundMixin._vision_transcribe_image", fake_transcribe
+    )
+    monkeypatch.setattr("agent.auxiliary_client.async_call_llm", fail_call_llm)
+
+    fields = {"姓名": "吳泰中", "公司名稱": "", "電話": "", "手機": "", "Email": "",
+              "傳真": "", "地址": "", "統編": "", "備註": ""}
+    result = await runner._vision_verify_business_card_fields([str(image_path)], fields)
+    assert result == fields

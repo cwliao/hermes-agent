@@ -1851,9 +1851,11 @@ def test_complete_auto_posts_to_swarm_root_named_in_body(monkeypatch, tmp_path):
             ),
         )
         kb.claim_task(conn, worker_id)
+        run_id = kb.get_task(conn, worker_id).current_run_id
     finally:
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", worker_id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
 
     from tools import kanban_tools as kt
     out = kt._handle_complete({"summary": "penguin brain-teaser, saved to file"})
@@ -1908,9 +1910,11 @@ def test_complete_auto_post_is_best_effort_when_root_does_not_exist(monkeypatch,
             body="## Swarm protocol\n- Swarm root / shared blackboard: `t_does_not_exist`.\n",
         )
         kb.claim_task(conn, worker_id)
+        run_id = kb.get_task(conn, worker_id).current_run_id
     finally:
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", worker_id)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
 
     from tools import kanban_tools as kt
     out = kt._handle_complete({"summary": "done, but root is gone"})

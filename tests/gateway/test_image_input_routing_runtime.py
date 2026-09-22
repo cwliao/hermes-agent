@@ -395,7 +395,7 @@ async def test_telegram_image_choice_news_uses_tesseract_and_skips_vision(monkey
     async def fake_news_reply(ocr_text):
         return f"📰 新聞 OCR / 整理\n\n修正版：{ocr_text}"
 
-    monkeypatch.setattr(runner, "_extract_images_text_with_tesseract", lambda paths: "台積電新聞標題")
+    monkeypatch.setattr(runner, "_extract_images_text", lambda paths: "台積電新聞標題")
     monkeypatch.setattr(runner, "_format_news_ocr_reply", fake_news_reply)
     monkeypatch.setattr(runner, "_enrich_message_with_vision", fail_enrich)
     monkeypatch.setattr(runner, "_deliver_direct_image_ocr_reply", fake_direct_reply)
@@ -774,7 +774,7 @@ async def test_business_card_batch_saves_each_image_as_separate_notion_page(
 
     monkeypatch.setattr(
         runner,
-        "_extract_images_text_with_tesseract",
+        "_extract_images_text",
         lambda paths: f"OCR for {Path(paths[0]).name}",
     )
 
@@ -819,7 +819,7 @@ async def test_business_card_batch_continues_after_one_image_processing_failure(
             raise RuntimeError("simulated OCR failure")
         return f"OCR for {Path(paths[0]).name}"
 
-    monkeypatch.setattr(runner, "_extract_images_text_with_tesseract", fake_extract)
+    monkeypatch.setattr(runner, "_extract_images_text", fake_extract)
 
     reply = await runner._process_business_card_batch(image_paths, source=source)
 

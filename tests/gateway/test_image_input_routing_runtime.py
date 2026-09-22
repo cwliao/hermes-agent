@@ -214,7 +214,7 @@ async def test_telegram_image_with_non_keyword_caption_prompts_for_purpose(monke
     )
 
     session_key = runner._session_key_for_source(source)
-    assert result == ""
+    assert result is None
     assert sent["source"] == source
     assert "1. OCR + 整理文字" in sent["content"]
     assert "2. 整理名片" in sent["content"]
@@ -254,7 +254,7 @@ async def test_telegram_image_with_business_card_caption_skips_menu(monkeypatch)
         history=[],
     )
 
-    assert result == ""
+    assert result is None
     assert called["normalized"] == "business_card"
     assert called["image_paths"] == ["/tmp/cashback.png"]
 
@@ -292,7 +292,7 @@ async def test_telegram_image_only_ocr_prompts_for_purpose(monkeypatch):
     )
 
     session_key = runner._session_key_for_source(source)
-    assert result == ""
+    assert result is None
     assert sent["source"] == source
     assert "1. OCR + 整理文字" in sent["content"]
     assert "2. 整理名片" in sent["content"]

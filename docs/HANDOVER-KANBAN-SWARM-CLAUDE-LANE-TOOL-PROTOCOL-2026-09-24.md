@@ -69,51 +69,88 @@ lowest-common-denominator mechanism presumably used for the `agy`/`grok`
 backends (which apparently honor it reliably enough for their kanban tasks
 to complete in this same swarm run).
 
-Working hypothesis (not verified against clawo's closed/compiled source,
-`node_modules/@enderfga/claw-orchestrator/dist/...`): Claude specifically is
-prone to behaving as though a real tool/MCP connection *should* exist —
-its training strongly biases it toward native tool-use semantics whenever a
-system prompt describes an `<available_tools>` block in terms that read like
-a tool/function schema, even when told point-blank "you do NOT have tools."
-When no native tool-use or MCP channel actually exists, it appears to
-conclude a real MCP server "isn't connected" rather than reliably falling
-back to emitting the requested `<tool_calls>` text tags — i.e. a
-model-specific prompt-following gap in this particular tool-emulation
-protocol, not a Hermes kanban bug and not (as the worker itself guessed) a
-literal broken connection.
+## Root cause — CONFIRMED (update: same session, after further investigation)
 
-**Not verified this session** (would require clawo's source or a live
-transcript capture, neither available in this pass):
+The hypothesis above (a pure model-training quirk) was **wrong as stated**. The
+actual mechanism was confirmed with a direct, reproducible test:
 
-- Whether the model ever attempted `<tool_calls>` tags at all, or gave up
-  before emitting any.
-- Whether `clawo session-start` mode (its actual "Claude Code session"
-  integration, listed in `clawo --help` alongside Codex/Gemini/Cursor) gives
-  Claude real native tool-use / MCP access instead of the `-p --tools ""`
-  stub mode, which would sidestep this entirely — the custom-provider path
-  Hermes currently uses appears to be the more generic, chat-completions-style
-  integration, not that mode.
+1. First ruled out session staleness: `clawo session-list` showed the
+   `orchestrator-claude` backend was pinned to one persistent session
+   (`openai-sys-d9a1589d7528`) that had accumulated **29 turns** across the 4
+   dispatcher retries (session key = hash of model+systemPrompt, so identical
+   retries reuse the same conversation instead of starting fresh — a real but
+   secondary issue). Stopped it (`clawo session-stop openai-sys-d9a1589d7528`)
+   and re-tested on a brand-new isolated kanban task (`t_2aac20e8`, trivial
+   goal, guaranteed-fresh session). **Failed identically within 60s** — this
+   ruled out session staleness as the cause.
+2. Called clawo's OpenAI-compat endpoint directly
+   (`POST http://127.0.0.1:18796/v1/chat/completions`, token from
+   `~/.openclaw/server-token`) with a minimal one-tool request. The model's
+   actual reply: *"The `kanban_complete` tool isn't actually available in
+   this session despite being listed — the call failed with 'No such tool
+   available.'"* — i.e. Claude **did** attempt the tool call, and got a real
+   rejection from Claude Code's own tool-execution harness, not a made-up
+   self-diagnosis.
+3. `claude --help` documents `--tools ""` precisely: it disables the
+   **built-in** tool set (Bash, Read, Edit, ...) and "ignores user, project
+   and local settings files... **add `--strict-mcp-config` to skip MCP
+   servers too**." clawo's compat shim passes `--tools ""` but **not**
+   `--strict-mcp-config`.
+4. `orchestrator-claude`'s own profile `config.yaml` has a `mcp_servers:`
+   block wiring in real MCP servers (`sqlite-tasks`, `sqlite-kb`,
+   `sqlite-session`, `klib`, `notion`, `agentmemory`) — confirmed by asking a
+   fresh session (no `tools` in the request at all) to list its available
+   tools: it listed `Agent, Bash, Edit, ListAgents, Read, ReportFindings,
+   ScheduleWakeup, ShareOnboardingGuide, Skill, ToolSearch, Workflow, Write`
+   — genuine native tools, present despite the compat layer's intent to
+   suppress all of them.
 
-## Suggested follow-up (not done in this session)
+**Confirmed root cause**: `--tools ""` does not disable MCP-provided tools,
+only the built-in set. `orchestrator-claude`'s profile has real MCP servers
+configured (for its legitimate non-kanban orchestrator role). Those MCP
+tools stay live in every session spawned for this profile, including
+kanban-lane compat-bridge sessions. Because genuine native tools **are**
+present, Claude does not fully trust the "you have zero tools, use the text
+protocol instead" system-prompt framing, attempts `kanban_complete` as a
+real native tool call, and gets a genuine "No such tool available" rejection
+from Claude Code's own harness — which it then (accurately) reports as a
+broken tool connection.
 
-1. Confirm with a live transcript (e.g. capture clawo-serve's raw request/
-   response for one `orchestrator-claude` kanban run) whether the model is
-   emitting malformed/absent `<tool_calls>` tags, to convert the hypothesis
-   above into a confirmed diagnosis.
-2. If confirmed, the durable fix likely belongs in how Hermes' kanban
-   dispatcher invokes the `orchestrator-claude` profile — either route it
-   through clawo's native Claude Code session mode (real tool-use/MCP)
-   instead of the generic custom-provider stub, or harden the injected
-   system prompt specifically for the Claude backend (e.g. more forceful,
-   repeated instruction, or a one-shot example turn) to suppress the
-   tool-use assumption. Either change lives outside `@enderfga/claw-
-   orchestrator`'s compiled dist (a third-party dependency — do not patch
-   its `node_modules` output directly; any real fix belongs in how Hermes
-   or agentpool invokes it, or as an upstream request to that package).
-3. Until fixed, avoid depending on `orchestrator-claude` for automated kanban
-   tasks that require a terminal kanban call; `agy`/`grok`/`default`
-   (native_hermes) lanes are confirmed working for this purpose as of this
-   session.
+## Working fix applied this session
+
+Rather than patch `@enderfga/claw-orchestrator`'s compiled dist (third-party,
+fragile) or strip `orchestrator-claude`'s MCP servers (would degrade its
+other, legitimate orchestrator use), used the **already-proven-correct**
+dispatch mechanism instead: `agentpool`'s `dispatch.js`, which drives Claude
+via `clawo session-start` (a real Claude Code session with native tools
+genuinely wired, not the openai-compat `-p --tools ""` stub) — the same
+mechanism [[reference_agent_dispatch_skill_and_fanout]] already documents for
+cross-model code review. One call
+(`node dispatch.js` with `{"capability":"review","prompt":"...","cwd":"/home/cwliao/project/klib","preferred_engine":"claude"}`)
+produced a real, substantive REVISE verdict with two concrete, previously
+unnoticed findings, in place of the four failed kanban-lane attempts.
+
+## Suggested durable fix (not done — needs the profile owner's call)
+
+The kanban swarm's `orchestrator-claude` lane itself is still broken for any
+future use. Real options, all outside this session's scope:
+
+1. Give the kanban dispatcher a way to route the `claude` lane through
+   `clawo session-start`/`session-send` instead of the openai-compat stub
+   (mirrors what `dispatch.js` already does correctly) — the most correct
+   fix, but requires editing Hermes' kanban dispatcher / lane-selection code,
+   not just config.
+2. Create a **separate** hermes profile (e.g. `worker-claude`, mirroring
+   `worker-agy`/`worker-grok`'s naming) cloned from `orchestrator-claude` but
+   with `mcp_servers:` removed, and point the kanban swarm's claude lane at
+   that instead — leaves `orchestrator-claude`'s other (non-kanban) use
+   untouched. Not done this session: creating a new profile and rewiring the
+   swarm CLI's lane mapping is a real change to make, not a quick fix, and
+   deserves the operator's sign-off given it's a new persistent profile.
+3. Until either is done: for anything needing a real Claude review or
+   kanban-tool-calling verdict, use `agentpool/dispatch.js`
+   (`preferred_engine: "claude"`) directly, as done here, rather than
+   assigning a kanban task to `orchestrator-claude`.
 
 Also saved to Claude Code auto-memory
 (`project_hermes_kanban_orchestrator_claude_lane_tool_protocol.md`),

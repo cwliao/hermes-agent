@@ -130,7 +130,29 @@ cross-model code review. One call
 produced a real, substantive REVISE verdict with two concrete, previously
 unnoticed findings, in place of the four failed kanban-lane attempts.
 
-## Suggested durable fix (not done — needs the profile owner's call)
+## Durable fix — DONE (2026-09-24, same day, follow-up)
+
+Implemented option 2 below. `hermes profile create worker-claude
+--clone-from orchestrator-claude` (copies `config.yaml`/`.env`/`SOUL.md`/
+skills), then removed the `mcp_servers:` block from
+`~/.hermes/profiles/worker-claude/config.yaml` (the block that was leaking
+real native tools into `orchestrator-claude`'s kanban sessions in the first
+place — see root cause above). `orchestrator-claude` itself was left
+completely untouched for its other, non-kanban role.
+
+Verified with a fresh diagnostic kanban task
+(`kanban create ... --assignee worker-claude`, ask it to call
+`kanban_comment` then `kanban_complete` immediately): **completed on the
+first attempt**, single run, 53s, zero protocol violations — the exact
+task shape that failed 4/4 times on `orchestrator-claude`.
+
+**Going forward**: assign kanban tasks/swarm workers needing the Claude
+lane to `worker-claude`, not `orchestrator-claude`. Option 1 below (route
+through `clawo session-start` at the dispatcher level) remains the more
+structurally correct fix if anyone wants to invest in it later, but is no
+longer necessary to unblock kanban-side Claude usage.
+
+## Original suggested durable fix (superseded by the section above)
 
 The kanban swarm's `orchestrator-claude` lane itself is still broken for any
 future use. Real options, all outside this session's scope:
@@ -144,13 +166,13 @@ future use. Real options, all outside this session's scope:
    `worker-agy`/`worker-grok`'s naming) cloned from `orchestrator-claude` but
    with `mcp_servers:` removed, and point the kanban swarm's claude lane at
    that instead — leaves `orchestrator-claude`'s other (non-kanban) use
-   untouched. Not done this session: creating a new profile and rewiring the
-   swarm CLI's lane mapping is a real change to make, not a quick fix, and
-   deserves the operator's sign-off given it's a new persistent profile.
+   untouched. **Done — see "Durable fix — DONE" above.**
 3. Until either is done: for anything needing a real Claude review or
    kanban-tool-calling verdict, use `agentpool/dispatch.js`
    (`preferred_engine: "claude"`) directly, as done here, rather than
-   assigning a kanban task to `orchestrator-claude`.
+   assigning a kanban task to `orchestrator-claude`. Still valid advice for
+   one-off reviews outside a kanban swarm; `worker-claude` is for kanban
+   tasks specifically.
 
 Also saved to Claude Code auto-memory
 (`project_hermes_kanban_orchestrator_claude_lane_tool_protocol.md`),

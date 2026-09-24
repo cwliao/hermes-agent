@@ -103,6 +103,19 @@ zero outside a kanban task (footprint ladder rung 3).
   (`kanban.dispatch_in_gateway: true`). Standalone: `plugins/kanban/systemd/hermes-kanban-dispatcher.service`.
 - **Plugin assets:** `plugins/kanban/dashboard/` (web UI) + systemd unit. `kanban_db.connect` is its
   own connection helper — do not alias it to `projects_db.connect` (a path-proximity generator did).
+- **`orchestrator-claude` lane assignee cannot reliably complete kanban tasks (confirmed 2026-09-24,
+  see `docs/HANDOVER-KANBAN-SWARM-CLAUDE-LANE-TOOL-PROTOCOL-2026-09-24.md`).** It routes through
+  clawo's openai-compat HTTP stub (`claude -p --tools ""`), but `--tools ""` only disables Claude
+  Code's built-in tools, not its profile's configured MCP servers (`sqlite-tasks`, `klib`, `notion`,
+  `agentmemory`, ...) — needs `--strict-mcp-config` too, which the stub doesn't pass. Claude sees
+  genuine native tools present, tries `kanban_complete` as a native call instead of the prompt-only
+  `<tool_calls>` emulation, and gets a real "No such tool available" rejection every time (reproduced
+  on a fresh session, not a staleness issue). Until this profile is either routed through
+  `clawo session-start` or cloned into an MCP-free dedicated lane profile, do not assign kanban tasks
+  to `orchestrator-claude`; for a genuine Claude review/verdict use `agentpool/dispatch.js` with
+  `preferred_engine: "claude"` instead (drives `clawo session-start`, real tool-use, confirmed
+  working) and feed its result back into kanban manually via `kanban_comment`/a normal `hermes kanban
+  comment`.
 
 Isolation: **board** is the hard boundary — workers get `HERMES_KANBAN_BOARD` pinned in their env and
 cannot see other boards; **tenant** is a soft namespace within a board (workspace-path + memory-key

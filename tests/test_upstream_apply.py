@@ -9,6 +9,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+from hermes_upstream_apply import (  # noqa: E402
+    _compute_dropin_path,
+    _render_dropin,
+    _target_python_version,
+)
+
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "hermes_upstream_apply.py"
 
@@ -78,3 +85,78 @@ def test_approved_apply_defaults_to_dry_run(tmp_path: Path):
     assert result["status"] == "APPROVED"
     assert result["dry_run"] is True
     assert not (tmp_path / "releases").exists()
+
+
+def test_compute_dropin_path_sorts_after_every_existing_z_prefixed_file(tmp_path: Path):
+    dropin_dir = tmp_path / "drop-ins"
+    dropin_dir.mkdir()
+    (dropin_dir / ("z" * 180 + "-some-ad-hoc-branch.conf")).write_text("", encoding="utf-8")
+    (dropin_dir / ("z" * 60 + "-older-release.conf")).write_text("", encoding="utf-8")
+    (dropin_dir / "10-corporate-tls-ca.conf").write_text("", encoding="utf-8")
+
+    computed = _compute_dropin_path(dropin_dir, "530cd6ff91f5edc163e37e07a767c0caf585cb66")
+
+    existing = sorted(p.name for p in dropin_dir.iterdir())
+    assert sorted(existing + [computed.name])[-1] == computed.name
+
+
+def test_compute_dropin_path_on_empty_directory(tmp_path: Path):
+    dropin_dir = tmp_path / "empty-drop-ins"
+    dropin_dir.mkdir()
+    computed = _compute_dropin_path(dropin_dir, "abc1234567" + "0" * 30)
+    assert computed.name.startswith("z" * 20)
+
+
+def test_render_dropin_replaces_release_specific_keys_and_preserves_the_rest(tmp_path: Path):
+    previous = "\n".join([
+        "[Service]",
+        "ExecStart=",
+        "ExecStart=/home/cwliao/.hermes/venvs/gateway-old/bin/python -m hermes_cli.main gateway run",
+        "ExecStopPost=",
+        "ExecStopPost=-/home/cwliao/.hermes/venvs/gateway-old/bin/python -m gateway.cgroup_cleanup",
+        "WorkingDirectory=/home/cwliao/.hermes/releases/old-release",
+        "Environment=PYTHONPATH=/home/cwliao/.hermes/releases/old-release",
+        "Environment=VIRTUAL_ENV=/home/cwliao/.hermes/venvs/gateway-old",
+        "Environment=HERMES_RELEASE_SHA=oldsha",
+        "Environment=PATH=/home/cwliao/.hermes/venvs/gateway-old/bin:/usr/bin:/bin",
+        "Environment=HERMES_HOME=/home/cwliao/.hermes",
+        "Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+        "",
+    ])
+    venv_dir = Path("/home/cwliao/.hermes/venvs/gateway-new")
+    destination = Path("/home/cwliao/.hermes/releases/new-release")
+
+    rendered = _render_dropin(previous, venv_dir, destination, "newsha1234")
+
+    assert f"ExecStart={venv_dir}/bin/python -m hermes_cli.main gateway run" in rendered
+    assert f"ExecStopPost=-{venv_dir}/bin/python -m gateway.cgroup_cleanup" in rendered
+    assert f"WorkingDirectory={destination}" in rendered
+    assert f"Environment=PYTHONPATH={destination}" in rendered
+    assert f"Environment=VIRTUAL_ENV={venv_dir}" in rendered
+    assert "Environment=HERMES_RELEASE_SHA=newsha1234" in rendered
+    assert f"Environment=PATH={venv_dir}/bin:/usr/bin:/bin" in rendered
+    # Keys the release doesn't touch must survive untouched, byte-for-byte.
+    assert "Environment=HERMES_HOME=/home/cwliao/.hermes" in rendered
+    assert "Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" in rendered
+    # Old release's values must not leak through.
+    assert "old-release" not in rendered
+    assert "gateway-old" not in rendered
+    assert "oldsha" not in rendered
+
+
+def test_target_python_version_reads_tool_uv_environments(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "[tool.uv]\n"
+        "default-groups = []\n"
+        "environments = [\"python_version >= '3.14'\"]\n",
+        encoding="utf-8",
+    )
+    assert _target_python_version(pyproject) == "3.14"
+
+
+def test_target_python_version_falls_back_when_undeclared(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+    version = _target_python_version(pyproject)
+    assert version == f"{sys.version_info.major}.{sys.version_info.minor}"

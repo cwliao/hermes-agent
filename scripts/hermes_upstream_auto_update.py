@@ -44,19 +44,21 @@ REVIEW_SCRIPT = SCRIPT_DIR / "hermes_upstream_review.py"
 APPLY_SCRIPT = SCRIPT_DIR / "hermes_upstream_apply.py"
 REPORT_SCRIPT = SCRIPT_DIR / "hermes_upstream_report.py"
 
-TEST_MEMORY_CAP_KB = 4 * 1024 * 1024  # 4GB per pytest subprocess -- matches the /hermes-update
-# skill's own established, proven-safe cap for this exact repo's dependency footprint. Tried 3GB
-# first (2026-09-26) and hit a genuine MemoryError (not a false-positive artifact this time) on a
-# chunk containing several C-extension-heavy test files; 4GB is the smallest known-good value,
-# not an arbitrary increase. This host (55-0940189-03) runs other heavy work concurrently and has
-# previously come under real memory pressure from an UNCAPPED run (see memory: "no unbounded
-# heavy jobs on DGX") -- this cap is still well below that failure mode. Applied per CHUNK, not
-# to the whole scoped set at once -- see below.
-TEST_CHUNK_SIZE = 6  # files per pytest subprocess; keeps virtual-address usage bounded
-# regardless of how large the scoped set is (a big fork-history delta can touch 100+ files;
-# running them all in one process exhausted RLIMIT_AS on 2026-09-26 -- not a real test failure,
-# a harness artifact from big C-extension-heavy imports (PIL/aiohttp/etc.) reserving address
-# space well beyond what RLIMIT_AS budgeted for a single giant run).
+TEST_CHUNK_SIZE = 15  # files per pytest subprocess; each chunk is a fresh subprocess that
+# exits and releases everything when done, bounding worst-case REAL memory usage regardless of
+# how large the scoped set is (a big fork-history delta can touch 100+ files). NOT paired with
+# an RLIMIT_AS cap -- tried 3GB, then 4GB, then shrinking the chunk size to 6, and hit the exact
+# same fatal abort every time on chunks containing aiohttp/PIL-heavy test files (2026-09-26).
+# RLIMIT_AS caps *virtual address space*, not real usage; these C extensions reserve large
+# virtual ranges (mmap arenas, thread stacks) essentially independent of actual RSS, so no
+# reasonable AS cap is a good fit here -- it was fighting a phantom ceiling that had nothing to
+# do with this host's real available memory. The upfront MIN_AVAILABLE_MB_FOR_TESTS check below
+# (real /proc/meminfo MemAvailable) is the actual, correct safety gate against genuine host
+# memory pressure; subprocess-per-chunk boundaries are the real usage bound, not a hard rlimit.
+CHUNK_TIMEOUT_SECONDS = 240  # a real chunk of TEST_CHUNK_SIZE files finishes in well under a
+# minute normally; 240s is generous headroom, not an estimate of a slow-but-legitimate run. A
+# chunk that actually needs this long is exactly the "confirmed real hang" case -- fail that
+# fast and report, don't sit on it for the full 1200s this used to allow (see _run_chunk).
 MIN_AVAILABLE_MB_FOR_TESTS = 8 * 1024  # bail out (report, don't guess) if the host is already
 # this tight on memory -- matches the same DGX memory-pressure lesson: better to stop and let a
 # human retry than to gamble another OOM on a host other things depend on.
@@ -146,12 +148,6 @@ def _available_memory_mb() -> int | None:
     return None
 
 
-def _preexec_memory_cap() -> None:
-    import resource
-
-    resource.setrlimit(resource.RLIMIT_AS, (TEST_MEMORY_CAP_KB * 1024, TEST_MEMORY_CAP_KB * 1024))
-
-
 _FAILED_NODEID_RE = re.compile(r"^FAILED (\S+)")
 
 
@@ -192,7 +188,7 @@ def _chunk_failures_on_baseline(venv_repo: Path, chunk: list[str]) -> set[str]:
         completed = subprocess.run(
             [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *chunk],
             cwd=str(venv_repo), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, check=False, timeout=1200, preexec_fn=_preexec_memory_cap, env=env,
+            text=True, check=False, timeout=CHUNK_TIMEOUT_SECONDS, env=env,
         )
     except subprocess.TimeoutExpired:
         # A hang here (confirmed 2026-09-26: this exact class of chunk-composition hang is
@@ -230,21 +226,36 @@ def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -
     env["PYTHONPATH"] = str(test_root)
 
     # Run in small chunks, each a fresh subprocess: a fork with a long local commit history can
-    # touch 100+ files, and running them all in one pytest process can exhaust RLIMIT_AS just
-    # from import-time address-space reservations (PIL/aiohttp/etc.), independent of whether the
-    # code is actually broken. Chunking bounds peak usage per-process and releases everything
-    # between chunks; fails fast on the first genuinely-failing chunk.
-    def _run_chunk(chunk: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *chunk],
-            cwd=str(test_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, check=False, timeout=1200, preexec_fn=_preexec_memory_cap, env=env,
-        )
+    # touch 100+ files, and running them all in one pytest process risks real memory growth
+    # (and, with an RLIMIT_AS cap -- removed, see TEST_CHUNK_SIZE's comment above -- a phantom
+    # virtual-address ceiling unrelated to actual usage). Chunking bounds peak usage per-process
+    # and releases everything between chunks; fails fast on the first genuinely-failing chunk.
+    def _run_chunk(chunk: list[str]) -> subprocess.CompletedProcess[str] | None:
+        """None means the chunk hung past CHUNK_TIMEOUT_SECONDS -- must never propagate an
+        uncaught TimeoutExpired, or a hang here (confirmed real, host-load-dependent, and
+        independent of any RLIMIT_AS cap -- see TEST_CHUNK_SIZE's comment) burns the ENTIRE
+        remaining time budget doing nothing before crashing the whole script uncleanly. This is
+        exactly what happened 2026-09-26: a 1200s per-chunk timeout plus a hanging chunk meant
+        the outer bash `timeout 1700` killed the whole run with no report at all.
+        """
+        try:
+            return subprocess.run(
+                [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *chunk],
+                cwd=str(test_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, check=False, timeout=CHUNK_TIMEOUT_SECONDS, env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return None
 
     chunks = [test_files[i : i + TEST_CHUNK_SIZE] for i in range(0, len(test_files), TEST_CHUNK_SIZE)]
     summary_lines = [f"scoped tests: {len(test_files)} file(s) across {len(chunks)} chunk(s), against candidate worktree {test_root}"]
     for index, chunk in enumerate(chunks, start=1):
         completed = _run_chunk(chunk)
+        if completed is None:
+            summary_lines.append(
+                f"chunk {index}/{len(chunks)} 逾時（超過 {CHUNK_TIMEOUT_SECONDS}s，視為 hang），檔案：{', '.join(chunk)}"
+            )
+            return False, "\n".join(summary_lines)
         if completed.returncode != 0:
             failed = _failed_nodeids(completed.stdout)
             tail = "\n".join(completed.stdout.strip().splitlines()[-40:])
@@ -263,6 +274,12 @@ def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -
                 # attempt 2 is flaky noise, not a regression -- only a nodeid that fails BOTH
                 # times is treated as confirmed. Bounded to exactly one retry, not a loop.
                 retry = _run_chunk(chunk)
+                if retry is None:
+                    # Retry itself hung -- can't confirm anything either way; conservative default.
+                    summary_lines.append(
+                        f"chunk {index}/{len(chunks)} 重跑逾時（超過 {CHUNK_TIMEOUT_SECONDS}s），無法確認是否為回歸，保守判定為失敗。"
+                    )
+                    return False, "\n".join(summary_lines)
                 retry_failed = set(_failed_nodeids(retry.stdout)) if retry.returncode != 0 else set()
                 confirmed_new = new_failures & retry_failed
                 if not confirmed_new:

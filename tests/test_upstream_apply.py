@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 from hermes_upstream_apply import (  # noqa: E402
     _compute_dropin_path,
+    _prune_superseded_dropins,
     _render_dropin,
     _target_python_version,
 )
@@ -105,6 +106,71 @@ def test_compute_dropin_path_on_empty_directory(tmp_path: Path):
     dropin_dir.mkdir()
     computed = _compute_dropin_path(dropin_dir, "abc1234567" + "0" * 30)
     assert computed.name.startswith("z" * 20)
+
+
+_FULL_DROPIN_TEMPLATE = """[Service]
+ExecStart=
+ExecStart=/venv-{sha}/bin/python -m hermes_cli.main gateway run
+ExecStopPost=
+ExecStopPost=-/venv-{sha}/bin/python -m gateway.cgroup_cleanup
+WorkingDirectory=/releases/{sha}
+Environment=PYTHONPATH=/releases/{sha}
+Environment=VIRTUAL_ENV=/venv-{sha}
+Environment=HERMES_RELEASE_SHA={sha}
+Environment=PATH=/venv-{sha}/bin:/usr/bin
+Environment=HERMES_HOME=/home/x/.hermes
+Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+"""
+
+
+def test_prune_superseded_dropins_removes_fully_overridden_files_only(tmp_path: Path):
+    dropin_dir = tmp_path / "drop-ins"
+    dropin_dir.mkdir()
+    # Three self-managed releases in sort order: the last one's key set is a superset of
+    # the earlier two, so both earlier ones are provably dead once it exists.
+    (dropin_dir / ("z" * 20 + "-upstream-1111111111.conf")).write_text(
+        _FULL_DROPIN_TEMPLATE.format(sha="1111111111"), encoding="utf-8")
+    (dropin_dir / ("z" * 60 + "-upstream-2222222222.conf")).write_text(
+        _FULL_DROPIN_TEMPLATE.format(sha="2222222222"), encoding="utf-8")
+    (dropin_dir / ("z" * 100 + "-upstream-3333333333.conf")).write_text(
+        _FULL_DROPIN_TEMPLATE.format(sha="3333333333"), encoding="utf-8")
+    # A foundational, unrelated drop-in that only sets a key nothing later sets --
+    # must survive since it is not provably dead.
+    (dropin_dir / "10-corporate-tls-ca.conf").write_text(
+        "[Service]\nEnvironment=CORPORATE_CA_ONLY=1\n", encoding="utf-8")
+
+    removed = _prune_superseded_dropins(dropin_dir)
+
+    assert set(removed) == {
+        "z" * 20 + "-upstream-1111111111.conf",
+        "z" * 60 + "-upstream-2222222222.conf",
+    }
+    remaining = {p.name for p in dropin_dir.iterdir()}
+    assert remaining == {"z" * 100 + "-upstream-3333333333.conf", "10-corporate-tls-ca.conf"}
+
+
+def test_compute_dropin_path_stays_short_after_many_releases(tmp_path: Path):
+    """Regression test for the 2026-09-26 incident: after ~30 releases the z-prefix grew
+    past NAME_MAX (255) and every further deploy's drop-in write failed outright. Pruning
+    must keep the computed filename small regardless of how much history precedes it."""
+    dropin_dir = tmp_path / "drop-ins"
+    dropin_dir.mkdir()
+    z_count = 20
+    for i in range(30):
+        sha = f"{i:010x}"
+        (dropin_dir / (("z" * z_count) + f"-upstream-{sha}.conf")).write_text(
+            _FULL_DROPIN_TEMPLATE.format(sha=sha), encoding="utf-8")
+        z_count += 6  # mimics the ever-growing convention across many real deploys
+    # Growing at this rate for a few more releases (unpruned) would exceed NAME_MAX
+    # (255) and fail to write the file at all -- which is exactly what happened in
+    # production after ~30 releases.
+    assert z_count > 190
+
+    computed = _compute_dropin_path(dropin_dir, "abcdef0123456789")
+
+    assert len(computed.name) < 60
+    remaining = list(dropin_dir.iterdir())
+    assert remaining == []  # every prior self-managed release is now provably dead
 
 
 def test_render_dropin_replaces_release_specific_keys_and_preserves_the_rest(tmp_path: Path):

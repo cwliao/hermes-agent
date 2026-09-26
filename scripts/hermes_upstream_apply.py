@@ -153,16 +153,77 @@ def _previous_extras(destination: Path, previous_dropin_content: str) -> list[st
     return installed_extras(destination, previous_venv, python_exe=python_exe)
 
 
+def _dropin_directive_keys(path: Path) -> set[str]:
+    """The set of directive keys a drop-in ``.conf`` sets (``Environment=NAME`` counts
+    NAME, not the whole line, since systemd merges those per-variable-name)."""
+    keys: set[str] = set()
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith("Environment="):
+            body = line[len("Environment="):].strip().strip('"')
+            match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", body)
+            keys.add(f"Environment:{match.group(1)}" if match else "Environment:<unparsed>")
+        elif line.startswith(("ExecStart=", "ExecStopPost=", "WorkingDirectory=")):
+            keys.add(line.split("=", 1)[0])
+    return keys
+
+
+def _prune_superseded_dropins(dropin_dir: Path) -> list[str]:
+    """Delete every drop-in whose entire set of directive keys is also set by some
+    later-sorting file in the same directory -- provably dead weight, since systemd's
+    per-key lexical merge means a later file already re-asserts everything it touched.
+
+    Without this, the "each new deploy sorts after every prior one" convention grows the
+    filename by ~20 characters forever with nothing ever removed, until it exceeds the
+    filesystem's NAME_MAX (255) and every future deploy's drop-in write fails outright --
+    exactly what happened after ~30 releases on 2026-09-26. Pruning first keeps the
+    z-prefix small and bounded on every run, not just this one.
+    """
+    if not dropin_dir.is_dir():
+        return []
+    entries = sorted(dropin_dir.iterdir(), key=lambda p: p.name)
+    file_keys = {entry.name: _dropin_directive_keys(entry) for entry in entries}
+    names = [entry.name for entry in entries]
+    removed = []
+    for i, name in enumerate(names):
+        my_keys = file_keys[name]
+        if not my_keys:
+            continue  # no directives parsed (comment-only/unusual file) -- leave it alone
+        later_keys: set[str] = set()
+        for later_name in names[i + 1:]:
+            later_keys |= file_keys[later_name]
+        if my_keys <= later_keys:
+            (dropin_dir / name).unlink()
+            removed.append(name)
+    return removed
+
+
+_SELF_MANAGED_DROPIN_RE = re.compile(r"^z+-upstream-[0-9a-f]{6,}\.conf$")
+
+
 def _compute_dropin_path(dropin_dir: Path, candidate_sha: str) -> Path:
     """Pick a drop-in filename guaranteed to win systemd's lexical merge order.
 
     This repo's convention (see docs/plans/2026-09-25-upstream-rebase-005.md)
     is that each new deploy's filename carries strictly more leading ``z``
     characters than every prior one, so the newest deploy always sorts last
-    and wins. Computed fresh from the directory's actual current contents --
-    never hardcoded -- so a stale guess can't silently lose to a drop-in
-    that was added after the guess was made.
+    and wins. First prunes every provably-dead prior drop-in (see
+    ``_prune_superseded_dropins``), then removes any *remaining* file matching
+    this function's own naming scheme (``z+-upstream-<sha>.conf``) outright:
+    the new file about to be written always carries forward every key from
+    whatever was live (``_render_dropin``'s contract), so a prior entry in
+    this exact self-managed sequence is unconditionally superseded the moment
+    the new one exists -- unlike an unrelated hand-added drop-in (a kanban
+    feature flag, say), which the cross-file key check above must not touch
+    just because it also happens to have a long ``z`` prefix.
+    Only then is max_z computed fresh from whatever real files remain, so a
+    stale guess can't silently lose to a drop-in added after the guess.
     """
+    _prune_superseded_dropins(dropin_dir)
+    if dropin_dir.is_dir():
+        for entry in list(dropin_dir.iterdir()):
+            if _SELF_MANAGED_DROPIN_RE.match(entry.name):
+                entry.unlink()
     max_z = 0
     if dropin_dir.is_dir():
         for entry in dropin_dir.iterdir():

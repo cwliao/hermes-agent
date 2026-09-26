@@ -38,9 +38,9 @@ def test_dispatcher_health_telemetry_does_not_raise_nameerror(monkeypatch, caplo
 
     async def _to_thread(fn, *args, **kwargs):
         calls.append(fn.__name__)
-        if fn.__name__ == "_ready_nonempty":
+        if fn.__name__ == "ready_nonempty":
             runner._running = False
-        return [] if fn.__name__ != "_ready_nonempty" else False
+        return [] if fn.__name__ != "ready_nonempty" else False
 
     async def _sleep(_delay):
         return None
@@ -51,7 +51,7 @@ def test_dispatcher_health_telemetry_does_not_raise_nameerror(monkeypatch, caplo
     with caplog.at_level(logging.ERROR, logger="gateway.run"):
         asyncio.run(asyncio.wait_for(runner._kanban_dispatcher_watcher(), timeout=3.0))
 
-    assert "_ready_nonempty" in calls
+    assert "ready_nonempty" in calls
     assert not any("HEALTH_WINDOW" in record.getMessage() for record in caplog.records)
     assert not any("unexpected watcher error" in record.getMessage() for record in caplog.records)
     assert not any(record.exc_info for record in caplog.records)

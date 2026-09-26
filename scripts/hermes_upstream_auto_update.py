@@ -38,7 +38,18 @@ REVIEW_SCRIPT = SCRIPT_DIR / "hermes_upstream_review.py"
 APPLY_SCRIPT = SCRIPT_DIR / "hermes_upstream_apply.py"
 REPORT_SCRIPT = SCRIPT_DIR / "hermes_upstream_report.py"
 
-TEST_MEMORY_CAP_KB = 4 * 1024 * 1024  # 4GB, matches the /hermes-update skill's post-rebase cap
+TEST_MEMORY_CAP_KB = 3 * 1024 * 1024  # 3GB per pytest subprocess -- see _run_scoped_tests: this
+# host (55-0940189-03) runs other heavy work concurrently and has previously come under real
+# memory pressure from an uncapped test run (see /hermes-update skill + memory: "no unbounded
+# heavy jobs on DGX"). Applied per CHUNK, not to the whole scoped set at once -- see below.
+TEST_CHUNK_SIZE = 15  # files per pytest subprocess; keeps virtual-address usage bounded
+# regardless of how large the scoped set is (a big fork-history delta can touch 100+ files;
+# running them all in one process exhausted RLIMIT_AS on 2026-09-26 -- not a real test failure,
+# a harness artifact from big C-extension-heavy imports (PIL/aiohttp/etc.) reserving address
+# space well beyond what RLIMIT_AS budgeted for a single giant run).
+MIN_AVAILABLE_MB_FOR_TESTS = 8 * 1024  # bail out (report, don't guess) if the host is already
+# this tight on memory -- matches the same DGX memory-pressure lesson: better to stop and let a
+# human retry than to gamble another OOM on a host other things depend on.
 
 
 def _git(repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -115,25 +126,67 @@ def _scoped_test_files(repo: Path, upstream_sha: str, candidate_sha: str) -> lis
     return sorted(test_files)
 
 
-def _run_scoped_tests(repo: Path, test_files: list[str]) -> tuple[bool, str]:
+def _available_memory_mb() -> int | None:
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return None
+
+
+def _preexec_memory_cap() -> None:
+    import resource
+
+    resource.setrlimit(resource.RLIMIT_AS, (TEST_MEMORY_CAP_KB * 1024, TEST_MEMORY_CAP_KB * 1024))
+
+
+def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -> tuple[bool, str]:
+    """Run scoped tests against *test_root* (the candidate's own checkout), using the
+    interpreter/dependencies already installed under *venv_repo*'s .venv.
+
+    PYTHONPATH is pointed at test_root so its modules shadow venv_repo's own editable
+    install for this run -- otherwise the appended editable-install finder would make
+    every import resolve back to venv_repo's checkout (currently `main`, not the
+    candidate), silently testing the wrong tree. See feedback_verify_hermes_deploy_past_env_vars
+    for the same class of gotcha in the deploy path.
+    """
     if not test_files:
         return True, "沒有對應的 scoped test 檔案（改動內容無法對應到既有測試），略過測試步驟。"
-    venv_python = repo / ".venv" / "bin" / "python3"
+    venv_python = venv_repo / ".venv" / "bin" / "python3"
     if not venv_python.is_file():
         return True, "找不到 .venv/bin/python3，略過測試步驟（未執行測試不代表失敗）。"
 
-    def _preexec() -> None:
-        import resource
+    available_mb = _available_memory_mb()
+    if available_mb is not None and available_mb < MIN_AVAILABLE_MB_FOR_TESTS:
+        return False, (
+            f"主機目前可用記憶體僅 {available_mb}MB（低於 {MIN_AVAILABLE_MB_FOR_TESTS}MB 安全門檻），"
+            "為避免在共用的 DGX 主機上引發 OOM，未執行測試、未套用。請稍後在記憶體充裕時重試。"
+        )
 
-        resource.setrlimit(resource.RLIMIT_AS, (TEST_MEMORY_CAP_KB * 1024, TEST_MEMORY_CAP_KB * 1024))
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(test_root)
 
-    completed = subprocess.run(
-        [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *test_files],
-        cwd=str(repo), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, check=False, timeout=1200, preexec_fn=_preexec,
-    )
-    tail = "\n".join(completed.stdout.strip().splitlines()[-40:])
-    return completed.returncode == 0, f"scoped tests: {', '.join(test_files)}\n{tail}"
+    # Run in small chunks, each a fresh subprocess: a fork with a long local commit history can
+    # touch 100+ files, and running them all in one pytest process can exhaust RLIMIT_AS just
+    # from import-time address-space reservations (PIL/aiohttp/etc.), independent of whether the
+    # code is actually broken. Chunking bounds peak usage per-process and releases everything
+    # between chunks; fails fast on the first genuinely-failing chunk.
+    chunks = [test_files[i : i + TEST_CHUNK_SIZE] for i in range(0, len(test_files), TEST_CHUNK_SIZE)]
+    summary_lines = [f"scoped tests: {len(test_files)} file(s) across {len(chunks)} chunk(s), against candidate worktree {test_root}"]
+    for index, chunk in enumerate(chunks, start=1):
+        completed = subprocess.run(
+            [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *chunk],
+            cwd=str(test_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, check=False, timeout=1200, preexec_fn=_preexec_memory_cap, env=env,
+        )
+        if completed.returncode != 0:
+            tail = "\n".join(completed.stdout.strip().splitlines()[-40:])
+            summary_lines.append(f"chunk {index}/{len(chunks)} 失敗，檔案：{', '.join(chunk)}\n{tail}")
+            return False, "\n".join(summary_lines)
+        summary_lines.append(f"chunk {index}/{len(chunks)}: OK")
+    return True, "\n".join(summary_lines)
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -207,8 +260,19 @@ def main(argv: list[str] | None = None) -> int:
     candidate_sha = candidate["candidate_sha"]
 
     # 3. Scoped tests on exactly the files the fork's own commits touch (see /hermes-update
-    #    skill's step 2.5 -- never a blind full-suite run on this host).
-    tests_ok, tests_report = _run_scoped_tests(repo, _scoped_test_files(repo, upstream_sha, candidate_sha))
+    #    skill's step 2.5 -- never a blind full-suite run on this host), run against the
+    #    candidate's OWN content in an isolated worktree -- never against venv_repo's live
+    #    `main` checkout, which is a different commit than what's about to be deployed.
+    test_worktree = state / "test-worktrees" / run_id
+    test_worktree.parent.mkdir(parents=True, exist_ok=True)
+    add = _git(repo, ["worktree", "add", "--detach", str(test_worktree), candidate_sha], check=False)
+    if add.returncode != 0:
+        print(f"❌ Hermes upstream 全自動更新：無法建立 candidate 測試用 worktree，未套用。\n{add.stderr}")
+        return 0
+    try:
+        tests_ok, tests_report = _run_scoped_tests(repo, test_worktree, _scoped_test_files(repo, upstream_sha, candidate_sha))
+    finally:
+        _git(repo, ["worktree", "remove", "--force", str(test_worktree)], check=False)
     if not tests_ok:
         print(
             "⚠️ Hermes upstream 全自動更新：scoped tests 失敗，未套用（candidate 仍為 PENDING，需人工檢查）。\n"

@@ -170,13 +170,25 @@ def _chunk_failures_on_baseline(venv_repo: Path, chunk: list[str]) -> set[str]:
 
     Any nodeid this can't cleanly attribute is conservatively treated as NOT pre-existing (i.e.
     still blocks), since a baseline check we can't trust proves nothing.
+
+    IMPORTANT: must set PYTHONPATH here too (pointed at venv_repo itself), matching the
+    candidate run's own PYTHONPATH override. Confirmed 2026-09-26: at least one test
+    (test_calendar_guard.py::test_rendered_wrapper_preserves_valid_release_path) fails merely
+    because PYTHONPATH is *set at all* in its subprocess's environment (it echoes the env var
+    verbatim into rendered output), regardless of its value or of any actual code difference.
+    Without this, the candidate run (which always sets PYTHONPATH for import-shadowing) and an
+    unset-PYTHONPATH baseline run are not a fair comparison -- any such test looks like a "new"
+    regression on every single run, when it is really just this harness's own environment
+    manipulation leaking into a PYTHONPATH-sensitive test.
     """
     venv_python = venv_repo / ".venv" / "bin" / "python3"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(venv_repo)
     try:
         completed = subprocess.run(
             [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *chunk],
             cwd=str(venv_repo), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, check=False, timeout=1200, preexec_fn=_preexec_memory_cap,
+            text=True, check=False, timeout=1200, preexec_fn=_preexec_memory_cap, env=env,
         )
     except subprocess.TimeoutExpired:
         # A hang here (confirmed 2026-09-26: this exact class of chunk-composition hang is

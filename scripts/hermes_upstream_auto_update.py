@@ -63,6 +63,9 @@ def _run_script(script: Path, args: list[str], *, env: dict[str, str] | None = N
 
 
 def _render_report(repo: Path, candidate_path: Path) -> str:
+    # No --state-file here deliberately: this cron job's own conflict-report branch
+    # should always surface the current state, since it's the one signal an operator
+    # acts on to go resolve the stuck rebase by hand (unlike the passive daily guard).
     completed = subprocess.run(
         [sys.executable, str(REPORT_SCRIPT), "--repo", str(repo), "--candidate", str(candidate_path)],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=120,

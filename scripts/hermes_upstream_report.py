@@ -99,6 +99,25 @@ def _upstream_commits(repo: Path, metadata: dict[str, Any]) -> list[str]:
     return [line.replace("\t", " ", 1) for line in output.splitlines() if line.strip()]
 
 
+def _noop_fingerprint(metadata: dict[str, Any]) -> str:
+    return f"noop:{metadata.get('upstream_sha')}"
+
+
+def _blocked_fingerprint(metadata: dict[str, Any]) -> str:
+    local_commit_ids = metadata.get("local_commit_ids")
+    local_count = len(local_commit_ids) if isinstance(local_commit_ids, list) else None
+    return ":".join(
+        str(x)
+        for x in (
+            "blocked",
+            metadata.get("error_code"),
+            metadata.get("upstream_sha"),
+            local_count,
+            metadata.get("replayed_local_commit_count"),
+        )
+    )
+
+
 def _render_noop(metadata: dict[str, Any]) -> str:
     upstream = _short(metadata.get("upstream_sha"))
     return "\n".join(
@@ -135,13 +154,22 @@ def _render_blocked(metadata: dict[str, Any], checked_at: str) -> str:
     )
 
 
-def render_report(repo: Path, metadata: dict[str, Any], checked_at: str | None = None) -> str:
+def render_report(
+    repo: Path, metadata: dict[str, Any], checked_at: str | None = None
+) -> tuple[str, str | None]:
+    """Returns (message, fingerprint). fingerprint is None for a genuine "new
+    update available" alert (always worth sending); for the two steady-state
+    cases (noop / blocked-with-no-progress) it identifies whether anything
+    actually changed since the last run, so main() can skip re-sending an
+    identical daily message -- see T0(annoyed user, 2026-09-23): the blocked
+    case was resending the same "rebase stuck at 0/388" notice every single
+    day forever with zero new information."""
     checked_at = checked_at or datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
     checks = metadata.get("checks") if isinstance(metadata.get("checks"), dict) else {}
     if bool(checks.get("noop")):
-        return _render_noop(metadata)
+        return _render_noop(metadata), _noop_fingerprint(metadata)
     if str(metadata.get("status", "")).upper() == "BLOCKED":
-        return _render_blocked(metadata, checked_at)
+        return _render_blocked(metadata, checked_at), _blocked_fingerprint(metadata)
 
     source_sha = metadata.get("source_sha")
     candidate_sha = metadata.get("candidate_sha")
@@ -159,15 +187,32 @@ def render_report(repo: Path, metadata: dict[str, Any], checked_at: str | None =
         "請使用 code workflow 手動檢查與更新。",
         "Telegram 只提醒，不會自動 deploy、restart 或 push。",
     ]
-    return "\n".join(lines)
+    return "\n".join(lines), None
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--candidate", required=True, type=Path)
+    parser.add_argument("--state-file", type=Path, default=None)
     args = parser.parse_args()
-    print(render_report(args.repo.expanduser().resolve(), _load(args.candidate.expanduser().resolve())))
+    message, fingerprint = render_report(
+        args.repo.expanduser().resolve(), _load(args.candidate.expanduser().resolve())
+    )
+
+    if fingerprint is not None and args.state_file is not None:
+        state_file = args.state_file.expanduser()
+        previous = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else None
+        if previous == fingerprint:
+            # Unchanged steady state (same blocked commit/error, or same
+            # upstream SHA with nothing to do) -- stay silent on Telegram.
+            # Full detail is already in hermes_upstream_update_guard.log
+            # regardless, written by the guard script before this ran.
+            return 0
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(fingerprint, encoding="utf-8")
+
+    print(message)
     return 0
 
 

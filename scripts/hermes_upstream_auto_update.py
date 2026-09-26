@@ -163,11 +163,19 @@ def _nodeids_failing_on_baseline(venv_repo: Path, nodeids: list[str]) -> set[str
     as NOT pre-existing (i.e. still blocks), since a baseline check we can't trust proves nothing.
     """
     venv_python = venv_repo / ".venv" / "bin" / "python3"
-    completed = subprocess.run(
-        [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *nodeids],
-        cwd=str(venv_repo), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, check=False, timeout=300, preexec_fn=_preexec_memory_cap,
-    )
+    try:
+        completed = subprocess.run(
+            [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *nodeids],
+            cwd=str(venv_repo), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, check=False, timeout=300, preexec_fn=_preexec_memory_cap,
+        )
+    except subprocess.TimeoutExpired:
+        # A hang here (confirmed 2026-09-26: at least one gateway test is genuinely
+        # host-load-dependent flaky/hang-prone in isolation, independent of any candidate
+        # content) must not crash the whole run uncleanly. Returning an empty set makes every
+        # nodeid count as "not proven pre-existing" -> still blocks, per this function's own
+        # conservative contract above.
+        return set()
     return set(_failed_nodeids(completed.stdout))
 
 

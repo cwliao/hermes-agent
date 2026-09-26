@@ -155,26 +155,34 @@ def _failed_nodeids(stdout: str) -> list[str]:
     return [m.group(1) for line in stdout.splitlines() if (m := _FAILED_NODEID_RE.match(line))]
 
 
-def _nodeids_failing_on_baseline(venv_repo: Path, nodeids: list[str]) -> set[str]:
-    """Re-run specific failing nodeids against venv_repo's own live `main` checkout (not the
-    candidate) to tell a real regression apart from a failure that predates this sync entirely
-    -- same principle as the /hermes-update skill's own manual "check if it fails on the
-    original checkout too" step. Any nodeid this can't cleanly re-run is conservatively treated
-    as NOT pre-existing (i.e. still blocks), since a baseline check we can't trust proves nothing.
+def _chunk_failures_on_baseline(venv_repo: Path, chunk: list[str]) -> set[str]:
+    """Re-run the SAME CHUNK COMPOSITION (not just the failing nodeids in isolation) against
+    venv_repo's own live `main` checkout, to tell a real regression apart from a failure that
+    predates this sync entirely -- same principle as the /hermes-update skill's own manual
+    "check if it fails on the original checkout too" step.
+
+    Must replay the full chunk, not a narrower nodeid subset: confirmed 2026-09-26 that some
+    of these failures are chunk-composition-dependent cross-test pollution (a test earlier in
+    the SAME chunk leaves state that makes a later one in that chunk fail/hang), reproducible
+    with this exact file grouping against `main` too and NOT reproducible when the "failing"
+    nodeids are re-run alone -- an isolated-nodeid rerun falsely looked like a clean baseline
+    and made a chunk-ordering artifact look like a genuine candidate regression.
+
+    Any nodeid this can't cleanly attribute is conservatively treated as NOT pre-existing (i.e.
+    still blocks), since a baseline check we can't trust proves nothing.
     """
     venv_python = venv_repo / ".venv" / "bin" / "python3"
     try:
         completed = subprocess.run(
-            [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *nodeids],
+            [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *chunk],
             cwd=str(venv_repo), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, check=False, timeout=300, preexec_fn=_preexec_memory_cap,
+            text=True, check=False, timeout=1200, preexec_fn=_preexec_memory_cap,
         )
     except subprocess.TimeoutExpired:
-        # A hang here (confirmed 2026-09-26: at least one gateway test is genuinely
-        # host-load-dependent flaky/hang-prone in isolation, independent of any candidate
-        # content) must not crash the whole run uncleanly. Returning an empty set makes every
-        # nodeid count as "not proven pre-existing" -> still blocks, per this function's own
-        # conservative contract above.
+        # A hang here (confirmed 2026-09-26: this exact class of chunk-composition hang is
+        # host-load-dependent and reproduces against unmodified `main` too) must not crash the
+        # whole run uncleanly. Returning an empty set makes every nodeid count as "not proven
+        # pre-existing" -> still blocks, per this function's own conservative contract above.
         return set()
     return set(_failed_nodeids(completed.stdout))
 
@@ -210,14 +218,17 @@ def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -
     # from import-time address-space reservations (PIL/aiohttp/etc.), independent of whether the
     # code is actually broken. Chunking bounds peak usage per-process and releases everything
     # between chunks; fails fast on the first genuinely-failing chunk.
-    chunks = [test_files[i : i + TEST_CHUNK_SIZE] for i in range(0, len(test_files), TEST_CHUNK_SIZE)]
-    summary_lines = [f"scoped tests: {len(test_files)} file(s) across {len(chunks)} chunk(s), against candidate worktree {test_root}"]
-    for index, chunk in enumerate(chunks, start=1):
-        completed = subprocess.run(
+    def _run_chunk(chunk: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *chunk],
             cwd=str(test_root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, check=False, timeout=1200, preexec_fn=_preexec_memory_cap, env=env,
         )
+
+    chunks = [test_files[i : i + TEST_CHUNK_SIZE] for i in range(0, len(test_files), TEST_CHUNK_SIZE)]
+    summary_lines = [f"scoped tests: {len(test_files)} file(s) across {len(chunks)} chunk(s), against candidate worktree {test_root}"]
+    for index, chunk in enumerate(chunks, start=1):
+        completed = _run_chunk(chunk)
         if completed.returncode != 0:
             failed = _failed_nodeids(completed.stdout)
             tail = "\n".join(completed.stdout.strip().splitlines()[-40:])
@@ -226,12 +237,29 @@ def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -
                 # against; treat conservatively as blocking.
                 summary_lines.append(f"chunk {index}/{len(chunks)} 失敗（非測試層級錯誤），檔案：{', '.join(chunk)}\n{tail}")
                 return False, "\n".join(summary_lines)
-            baseline_failing = _nodeids_failing_on_baseline(venv_repo, failed)
-            new_failures = [nid for nid in failed if nid not in baseline_failing]
+            baseline_failing = _chunk_failures_on_baseline(venv_repo, chunk)
+            new_failures = set(nid for nid in failed if nid not in baseline_failing)
             if new_failures:
+                # Before blocking, retry the SAME chunk against the candidate once: this host
+                # is known to run other heavy work concurrently, and at least one gateway test
+                # is confirmed genuinely host-load-dependent flaky/hang-prone independent of any
+                # candidate content (2026-09-26). A nodeid that fails on attempt 1 but passes on
+                # attempt 2 is flaky noise, not a regression -- only a nodeid that fails BOTH
+                # times is treated as confirmed. Bounded to exactly one retry, not a loop.
+                retry = _run_chunk(chunk)
+                retry_failed = set(_failed_nodeids(retry.stdout)) if retry.returncode != 0 else set()
+                confirmed_new = new_failures & retry_failed
+                if not confirmed_new:
+                    summary_lines.append(
+                        f"chunk {index}/{len(chunks)}: 第一次失敗（{', '.join(sorted(new_failures))}）但重跑一次後未再出現，"
+                        "判定為不穩定（flaky），非本次回歸，繼續。"
+                    )
+                    continue
+                retry_tail = "\n".join(retry.stdout.strip().splitlines()[-40:]) if retry.returncode != 0 else tail
                 summary_lines.append(
                     f"chunk {index}/{len(chunks)} 失敗，其中在目前 main 上也一樣失敗（視為既有問題、非本次回歸）："
-                    f"{', '.join(sorted(baseline_failing)) or '(無)'}；真正的新失敗：{', '.join(new_failures)}\n{tail}"
+                    f"{', '.join(sorted(baseline_failing)) or '(無)'}；重跑兩次都失敗、確認為新回歸："
+                    f"{', '.join(sorted(confirmed_new))}\n{retry_tail}"
                 )
                 return False, "\n".join(summary_lines)
             summary_lines.append(

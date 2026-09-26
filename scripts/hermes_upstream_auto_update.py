@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+
+from release_snapshot import build_snapshot  # noqa: E402
 
 PREFLIGHT_SCRIPT = SCRIPT_DIR / "hermes_upstream_preflight.py"
 REVIEW_SCRIPT = SCRIPT_DIR / "hermes_upstream_review.py"
@@ -302,21 +305,39 @@ def main(argv: list[str] | None = None) -> int:
 
     # 3. Scoped tests on exactly the files the fork's own commits touch (see /hermes-update
     #    skill's step 2.5 -- never a blind full-suite run on this host), run against the
-    #    candidate's OWN content in an isolated worktree -- never against venv_repo's live
-    #    `main` checkout, which is a different commit than what's about to be deployed.
-    #    Deliberately OUTSIDE state (~/.hermes/...): the test suite's own home_io_guard
-    #    fixture fails any test that touches a path under the real HERMES_HOME tree, and a
-    #    worktree nested under it trips that guard purely by location -- confirmed 2026-09-26.
-    test_worktree = Path(tempfile.gettempdir()) / f"hermes-upstream-auto-update-test-{run_id}"
-    test_worktree.parent.mkdir(parents=True, exist_ok=True)
-    add = _git(repo, ["worktree", "add", "--detach", str(test_worktree), candidate_sha], check=False)
+    #    candidate's OWN content -- never against venv_repo's live `main` checkout, which is
+    #    a different commit than what's about to be deployed.
+    #
+    #    The test tree must be a `.git`-free COPY (via build_snapshot, the same helper apply.py
+    #    itself uses for the real release), not a raw `git worktree`. Confirmed 2026-09-26: a
+    #    git worktree's `.git/worktrees/<name>/` metadata always lives inside venv_repo's own
+    #    `.git` (that's structural to how worktrees work -- true regardless of where the
+    #    worktree's working directory itself is placed, /tmp included), and several tests
+    #    (via run_agent -> hermes_bootstrap -> pm.environments.activate_dependencies) stat a
+    #    path under exactly that location at import time. tests/home_io_guard.py then fails
+    #    them for touching "the real hermes home" -- a false positive with NOTHING to do with
+    #    the candidate's actual content, but indistinguishable from a real regression by the
+    #    baseline check (which runs against venv_repo directly, no worktree, so it never trips
+    #    this). Verified directly: the exact same tests pass cleanly against a build_snapshot
+    #    copy of the identical commit.
+    git_worktree = Path(tempfile.gettempdir()) / f"hermes-upstream-auto-update-src-{run_id}"
+    test_root = Path(tempfile.gettempdir()) / f"hermes-upstream-auto-update-test-{run_id}"
+    add = _git(repo, ["worktree", "add", "--detach", str(git_worktree), candidate_sha], check=False)
     if add.returncode != 0:
         print(f"❌ Hermes upstream 全自動更新：無法建立 candidate 測試用 worktree，未套用。\n{add.stderr}")
         return 0
     try:
-        tests_ok, tests_report = _run_scoped_tests(repo, test_worktree, _scoped_test_files(repo, upstream_sha, candidate_sha))
+        shutil.rmtree(test_root, ignore_errors=True)  # defensive: leftover from an interrupted prior run
+        build_snapshot(git_worktree, test_root, candidate_sha)
+    except Exception as exc:
+        print(f"❌ Hermes upstream 全自動更新：無法建立 candidate 測試快照，未套用。\n{exc}")
+        return 0
     finally:
-        _git(repo, ["worktree", "remove", "--force", str(test_worktree)], check=False)
+        _git(repo, ["worktree", "remove", "--force", str(git_worktree)], check=False)
+    try:
+        tests_ok, tests_report = _run_scoped_tests(repo, test_root, _scoped_test_files(repo, upstream_sha, candidate_sha))
+    finally:
+        shutil.rmtree(test_root, ignore_errors=True)
     if not tests_ok:
         print(
             "⚠️ Hermes upstream 全自動更新：scoped tests 失敗，未套用（candidate 仍為 PENDING，需人工檢查）。\n"

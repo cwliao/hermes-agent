@@ -52,7 +52,7 @@ TEST_MEMORY_CAP_KB = 4 * 1024 * 1024  # 4GB per pytest subprocess -- matches the
 # previously come under real memory pressure from an UNCAPPED run (see memory: "no unbounded
 # heavy jobs on DGX") -- this cap is still well below that failure mode. Applied per CHUNK, not
 # to the whole scoped set at once -- see below.
-TEST_CHUNK_SIZE = 15  # files per pytest subprocess; keeps virtual-address usage bounded
+TEST_CHUNK_SIZE = 6  # files per pytest subprocess; keeps virtual-address usage bounded
 # regardless of how large the scoped set is (a big fork-history delta can touch 100+ files;
 # running them all in one process exhausted RLIMIT_AS on 2026-09-26 -- not a real test failure,
 # a harness artifact from big C-extension-heavy imports (PIL/aiohttp/etc.) reserving address

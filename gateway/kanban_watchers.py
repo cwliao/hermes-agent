@@ -528,50 +528,6 @@ class GatewayKanbanWatchersMixin:
                 out.append((slug, dispatcher.tick_once_for_board(slug)))
             return out
 
-        def _ready_nonempty() -> bool:
-            """Cheap probe: is there at least one ready+assigned+unclaimed
-            task on ANY board whose assignee maps to a real Hermes profile
-            (i.e. one the dispatcher would actually spawn for)?
-
-            Tasks assigned to control-plane lanes (e.g. ``orion-cc``,
-            ``orion-research``) are pulled by terminals via
-            ``claim_task`` directly and never spawnable, so a queue full
-            of those is "correctly idle", not "stuck". Filtering them out
-            here keeps the stuck-warn fire only on real failures (broken
-            PATH, missing venv, credential loss for a real Hermes profile).
-            """
-            # Only probe the review column when autonomous review dispatch is
-            # actually on. With ``review_dispatch`` off (the default — no
-            # sdlc-review agent), a task parked in 'review' is "correctly idle"
-            # waiting for a human, not a stuck dispatcher; probing it here would
-            # fire a false "dispatcher stuck" warning that never clears. Shares
-            # the exact gate the dispatcher uses so the two can't drift.
-            from hermes_cli import kanban_db_connect as _kbc
-            from hermes_cli import kanban_db_dispatch as _kbd
-            _review_probe = _kbd.review_dispatch_enabled()
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
-                conn = None
-                try:
-                    conn = _kbc.connect(board=slug)
-                    if _kbd.has_spawnable_ready(conn):
-                        return True
-                    if _review_probe and _kbd.has_spawnable_review(conn):
-                        return True
-                except Exception:
-                    continue
-                finally:
-                    if conn is not None:
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-            return False
-
         # Auto-decompose: turn fresh triage tasks into ready workgraphs
         # before the dispatcher fans out workers. Gated by
         # ``kanban.auto_decompose`` (default True). Capped by

@@ -24,6 +24,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -142,6 +143,29 @@ def _preexec_memory_cap() -> None:
     resource.setrlimit(resource.RLIMIT_AS, (TEST_MEMORY_CAP_KB * 1024, TEST_MEMORY_CAP_KB * 1024))
 
 
+_FAILED_NODEID_RE = re.compile(r"^FAILED (\S+)")
+
+
+def _failed_nodeids(stdout: str) -> list[str]:
+    return [m.group(1) for line in stdout.splitlines() if (m := _FAILED_NODEID_RE.match(line))]
+
+
+def _nodeids_failing_on_baseline(venv_repo: Path, nodeids: list[str]) -> set[str]:
+    """Re-run specific failing nodeids against venv_repo's own live `main` checkout (not the
+    candidate) to tell a real regression apart from a failure that predates this sync entirely
+    -- same principle as the /hermes-update skill's own manual "check if it fails on the
+    original checkout too" step. Any nodeid this can't cleanly re-run is conservatively treated
+    as NOT pre-existing (i.e. still blocks), since a baseline check we can't trust proves nothing.
+    """
+    venv_python = venv_repo / ".venv" / "bin" / "python3"
+    completed = subprocess.run(
+        [str(venv_python), "-m", "pytest", "-p", "no:cacheprovider", "-q", *nodeids],
+        cwd=str(venv_repo), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, check=False, timeout=300, preexec_fn=_preexec_memory_cap,
+    )
+    return set(_failed_nodeids(completed.stdout))
+
+
 def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -> tuple[bool, str]:
     """Run scoped tests against *test_root* (the candidate's own checkout), using the
     interpreter/dependencies already installed under *venv_repo*'s .venv.
@@ -182,9 +206,26 @@ def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -
             text=True, check=False, timeout=1200, preexec_fn=_preexec_memory_cap, env=env,
         )
         if completed.returncode != 0:
+            failed = _failed_nodeids(completed.stdout)
             tail = "\n".join(completed.stdout.strip().splitlines()[-40:])
-            summary_lines.append(f"chunk {index}/{len(chunks)} 失敗，檔案：{', '.join(chunk)}\n{tail}")
-            return False, "\n".join(summary_lines)
+            if not failed:
+                # Non-test failure (crash, collection error, etc.) -- nothing to baseline-check
+                # against; treat conservatively as blocking.
+                summary_lines.append(f"chunk {index}/{len(chunks)} 失敗（非測試層級錯誤），檔案：{', '.join(chunk)}\n{tail}")
+                return False, "\n".join(summary_lines)
+            baseline_failing = _nodeids_failing_on_baseline(venv_repo, failed)
+            new_failures = [nid for nid in failed if nid not in baseline_failing]
+            if new_failures:
+                summary_lines.append(
+                    f"chunk {index}/{len(chunks)} 失敗，其中在目前 main 上也一樣失敗（視為既有問題、非本次回歸）："
+                    f"{', '.join(sorted(baseline_failing)) or '(無)'}；真正的新失敗：{', '.join(new_failures)}\n{tail}"
+                )
+                return False, "\n".join(summary_lines)
+            summary_lines.append(
+                f"chunk {index}/{len(chunks)}: 有失敗但在目前 main 上同樣失敗，判定為既有問題、非本次回歸，繼續："
+                f"{', '.join(failed)}"
+            )
+            continue
         summary_lines.append(f"chunk {index}/{len(chunks)}: OK")
     return True, "\n".join(summary_lines)
 
@@ -263,7 +304,10 @@ def main(argv: list[str] | None = None) -> int:
     #    skill's step 2.5 -- never a blind full-suite run on this host), run against the
     #    candidate's OWN content in an isolated worktree -- never against venv_repo's live
     #    `main` checkout, which is a different commit than what's about to be deployed.
-    test_worktree = state / "test-worktrees" / run_id
+    #    Deliberately OUTSIDE state (~/.hermes/...): the test suite's own home_io_guard
+    #    fixture fails any test that touches a path under the real HERMES_HOME tree, and a
+    #    worktree nested under it trips that guard purely by location -- confirmed 2026-09-26.
+    test_worktree = Path(tempfile.gettempdir()) / f"hermes-upstream-auto-update-test-{run_id}"
     test_worktree.parent.mkdir(parents=True, exist_ok=True)
     add = _git(repo, ["worktree", "add", "--detach", str(test_worktree), candidate_sha], check=False)
     if add.returncode != 0:

@@ -113,7 +113,11 @@ fi
 
 # The report helper reads only candidate metadata and Git history/diff. Its
 # stdout is intentionally the Telegram payload for this no-agent cron job.
-if ! "$REPORT_SCRIPT" --repo "$REPO" --candidate "$candidate_path"; then
+# --state-file lets it dedupe against the last alert: an unchanged blocked/
+# noop state (same stuck commit, same upstream SHA) prints nothing instead of
+# repeating an identical daily message forever.
+ALERT_STATE_FILE="$CRON_STATE_DIR/.upstream_update_guard_alert.sha256"
+if ! "$REPORT_SCRIPT" --repo "$REPO" --candidate "$candidate_path" --state-file "$ALERT_STATE_FILE"; then
   printf '⚠️ Hermes upstream report 產生失敗（run_id=%s）；未 deploy。\n' "$run_id"
   log "report failed for run_id=$run_id"
   exit 0

@@ -150,7 +150,7 @@ def _base_metadata(run_id: str, now: datetime, source_sha: str, upstream_sha: st
         },
         "error_code": None,
         "retry_count": 0,
-        "approval": {"approved_by": None, "approved_at_utc": None, "approval_token": None},
+        "approval": {"approved_by": None, "approved_at_utc": None},
         "push_status": "not_attempted",
     }
 

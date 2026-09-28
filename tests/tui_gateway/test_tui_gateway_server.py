@@ -3141,11 +3141,7 @@ def test_command_dispatch_and_catalog_resolve_project_skills_from_the_session_cw
         miss = server._methods["command.dispatch"]("m", {"name": other, "arg": "", "session_id": sid})
         assert miss["error"]["code"] == 4018
     # Nothing leaks past the RPC: the thread's logical cwd is unbound again.
-    # Do not infer this from find_project_root(): a host-level /tmp/.git (used
-    # by some test environments) makes the ambient launch cwd look like a
-    # project even after the session scope has been restored.
-    from agent.runtime_cwd import scoped_session_cwd
-    assert scoped_session_cwd() == ""
+    assert skill_utils.find_project_root() is None
 
 
 def test_complete_slash_and_skills_reload_are_bound_to_the_session_cwd(tmp_path, monkeypatch):

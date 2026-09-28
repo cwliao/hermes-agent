@@ -3141,7 +3141,11 @@ def test_command_dispatch_and_catalog_resolve_project_skills_from_the_session_cw
         miss = server._methods["command.dispatch"]("m", {"name": other, "arg": "", "session_id": sid})
         assert miss["error"]["code"] == 4018
     # Nothing leaks past the RPC: the thread's logical cwd is unbound again.
-    assert skill_utils.find_project_root() is None
+    # Do not infer this from find_project_root(): a host-level /tmp/.git (used
+    # by some test environments) makes the ambient launch cwd look like a
+    # project even after the session scope has been restored.
+    from agent.runtime_cwd import scoped_session_cwd
+    assert scoped_session_cwd() == ""
 
 
 def test_complete_slash_and_skills_reload_are_bound_to_the_session_cwd(tmp_path, monkeypatch):
@@ -16940,6 +16944,15 @@ def test_model_options_preserves_canonical_custom_row_after_agent_init(monkeypat
         "hermes_cli.auth.is_provider_explicitly_configured",
         lambda _slug: False,
     )
+    # explicit_only also preserves providers authenticated through the
+    # Anthropic OAuth credential stores; isolate that discovery path as well as
+    # the generic explicit-config predicate for this provider-filtering test.
+    monkeypatch.setattr("hermes_cli.inventory._anthropic_oauth_credentials_present", lambda: False)
+    monkeypatch.setattr("hermes_cli.inventory._external_process_signed_in", lambda _slug: False)
+    # Staged local models and an enabled MoA preset are injected after
+    # list_authenticated_providers and explicit_only keeps them on purpose.
+    monkeypatch.setattr("hermes_cli.inventory._local_runtime_row", lambda _ctx: None)
+    monkeypatch.setattr("hermes_cli.inventory._moa_provider_row", lambda _current="": None)
     monkeypatch.setattr("hermes_cli.inventory._apply_pricing", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("hermes_cli.inventory._apply_capabilities", lambda *_args, **_kwargs: None)
 

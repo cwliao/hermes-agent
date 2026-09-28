@@ -58,6 +58,7 @@ CHUNK_TIMEOUT_SECONDS = 240  # a real chunk of TEST_CHUNK_SIZE files finishes in
 MIN_AVAILABLE_MB_FOR_TESTS = 8 * 1024  # bail out (report, don't guess) if the host is already
 # this tight on memory -- matches the same DGX memory-pressure lesson: better to stop and let a
 # human retry than to gamble another OOM on a host other things depend on.
+KNOWN_BASELINE_FAILURES_FILENAME = "known_baseline_test_failures.json"
 
 
 def _git(repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -151,6 +152,50 @@ def _failed_nodeids(stdout: str) -> list[str]:
     return [m.group(1) for line in stdout.splitlines() if (m := _FAILED_NODEID_RE.match(line))]
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _baseline_failure_summary(stdout: str, nodeid: str) -> str:
+    """Return a bounded, human-useful summary without persisting a traceback."""
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip()
+        if stripped and nodeid in stripped:
+            return stripped[-500:]
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped[-500:]
+    return "baseline failure (no summary)"
+
+
+def _nodeid_belongs_to_test_file(nodeid: str, test_file: str) -> bool:
+    return nodeid == test_file or nodeid.startswith(f"{test_file}::")
+
+
+def _known_baseline_failures_path(state_dir: Path) -> Path:
+    return state_dir / KNOWN_BASELINE_FAILURES_FILENAME
+
+
+def _load_known_baseline_failures(state_dir: Path) -> dict[str, dict[str, str]]:
+    path = _known_baseline_failures_path(state_dir)
+    if not path.is_file():
+        return {}
+    payload = _load(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f"known baseline failures must be a JSON object: {path}")
+    return {
+        nodeid: entry
+        for nodeid, entry in payload.items()
+        if isinstance(nodeid, str) and isinstance(entry, dict)
+    }
+
+
+def _save_known_baseline_failures(state_dir: Path, failures: dict[str, dict[str, str]]) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    _write(_known_baseline_failures_path(state_dir), failures)
+
+
 def _chunk_failures_on_baseline(venv_repo: Path, chunk: list[str]) -> set[str]:
     """Re-run the SAME CHUNK COMPOSITION (not just the failing nodeids in isolation) against
     venv_repo's own live `main` checkout, to tell a real regression apart from a failure that
@@ -195,7 +240,12 @@ def _chunk_failures_on_baseline(venv_repo: Path, chunk: list[str]) -> set[str]:
     return set(_failed_nodeids(completed.stdout))
 
 
-def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -> tuple[bool, str]:
+def _run_scoped_tests(
+    venv_repo: Path,
+    test_root: Path,
+    test_files: list[str],
+    state_dir: Path | None = None,
+) -> tuple[bool, str]:
     """Run scoped tests against *test_root* (the candidate's own checkout), using the
     interpreter/dependencies already installed under *venv_repo*'s .venv.
 
@@ -220,6 +270,9 @@ def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(test_root)
+    known_failures = _load_known_baseline_failures(state_dir) if state_dir is not None else {}
+    known_failures_before_run = set(known_failures)
+    chunks_with_failures: dict[int, set[str]] = {}
 
     # Run in small chunks, each a fresh subprocess: a fork with a long local commit history can
     # touch 100+ files, and running them all in one pytest process risks real memory growth
@@ -254,13 +307,37 @@ def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -
             return False, "\n".join(summary_lines)
         if completed.returncode != 0:
             failed = _failed_nodeids(completed.stdout)
+            chunks_with_failures[index] = set(failed)
             tail = "\n".join(completed.stdout.strip().splitlines()[-40:])
             if not failed:
                 # Non-test failure (crash, collection error, etc.) -- nothing to baseline-check
                 # against; treat conservatively as blocking.
                 summary_lines.append(f"chunk {index}/{len(chunks)} 失敗（非測試層級錯誤），檔案：{', '.join(chunk)}\n{tail}")
                 return False, "\n".join(summary_lines)
-            baseline_failing = _chunk_failures_on_baseline(venv_repo, chunk)
+            known_in_chunk = {
+                nodeid for nodeid in failed
+                if nodeid in known_failures
+            }
+            unknown_failed = set(failed) - known_in_chunk
+            baseline_failing = set(known_in_chunk)
+            if unknown_failed:
+                # The baseline command must retain the full chunk composition, including any
+                # already-known failures, because ordering-dependent pollution is part of what
+                # this check establishes. The database only avoids this subprocess when every
+                # currently failing nodeid is already known.
+                baseline_failing.update(_chunk_failures_on_baseline(venv_repo, chunk))
+            now = _utc_now()
+            for nodeid in known_in_chunk:
+                known_failures[nodeid]["last_confirmed_utc"] = now
+                known_failures[nodeid]["last_error_summary"] = _baseline_failure_summary(completed.stdout, nodeid)
+            for nodeid in unknown_failed & baseline_failing:
+                known_failures[nodeid] = {
+                    "first_confirmed_utc": now,
+                    "last_confirmed_utc": now,
+                    "last_error_summary": _baseline_failure_summary(completed.stdout, nodeid),
+                }
+            if state_dir is not None and (known_in_chunk or unknown_failed & baseline_failing):
+                _save_known_baseline_failures(state_dir, known_failures)
             new_failures = set(nid for nid in failed if nid not in baseline_failing)
             if new_failures:
                 # Before blocking, retry the SAME chunk against the candidate once: this host
@@ -297,6 +374,20 @@ def _run_scoped_tests(venv_repo: Path, test_root: Path, test_files: list[str]) -
             )
             continue
         summary_lines.append(f"chunk {index}/{len(chunks)}: OK")
+    if state_dir is not None:
+        # A successful run gives us permission to heal only entries whose test file was
+        # actually included in this run. Untouched files remain intentionally unknown.
+        run_files = set(test_files)
+        for nodeid in list(known_failures):
+            if any(_nodeid_belongs_to_test_file(nodeid, test_file) for test_file in run_files):
+                if not any(
+                    nodeid in failed
+                    for index, failed in chunks_with_failures.items()
+                    if any(_nodeid_belongs_to_test_file(nodeid, test_file) for test_file in chunks[index - 1])
+                ):
+                    del known_failures[nodeid]
+        if known_failures != _load_known_baseline_failures(state_dir):
+            _save_known_baseline_failures(state_dir, known_failures)
     return True, "\n".join(summary_lines)
 
 
@@ -399,7 +490,12 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         _git(repo, ["worktree", "remove", "--force", str(git_worktree)], check=False)
     try:
-        tests_ok, tests_report = _run_scoped_tests(repo, test_root, _scoped_test_files(repo, upstream_sha, candidate_sha))
+        tests_ok, tests_report = _run_scoped_tests(
+            repo,
+            test_root,
+            _scoped_test_files(repo, upstream_sha, candidate_sha),
+            state,
+        )
     finally:
         shutil.rmtree(test_root, ignore_errors=True)
     if not tests_ok:

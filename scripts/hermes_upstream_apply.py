@@ -2,14 +2,12 @@
 """Apply an approved upstream candidate through an immutable release snapshot.
 
 Without ``--execute`` this command is a validation/dry-run only. Live service
-mutation requires both an approved candidate and an approval token supplied by
-the operator through ``HERMES_UPSTREAM_APPROVAL_TOKEN``.
+mutation requires an explicitly approved candidate with a named approver.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -309,9 +307,11 @@ def _run(command: list[str], *, check: bool = False) -> subprocess.CompletedProc
 def _approval_ok(candidate: dict[str, Any]) -> bool:
     approval = candidate.get("approval") or {}
     approved_by = approval.get("approved_by")
-    token_hash = approval.get("approval_token_sha256")
-    token = os.environ.get("HERMES_UPSTREAM_APPROVAL_TOKEN", "")
-    return bool(approved_by and token_hash and token and hashlib.sha256(token.encode()).hexdigest() == token_hash)
+    return (
+        str(candidate.get("status")).upper() == "APPROVED"
+        and isinstance(approved_by, str)
+        and bool(approved_by.strip())
+    )
 
 
 def apply(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
@@ -321,11 +321,8 @@ def apply(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     candidate = _load(candidate_path)
     result: dict[str, Any] = {"phase": "apply", "run_id": args.run_id, "candidate_path": str(candidate_path), "release_id": candidate.get("release_id"), "status": "FAILED", "dry_run": not args.execute}
 
-    if str(candidate.get("status")).upper() != "APPROVED":
-        result.update(status="BLOCKED", error_code="NOT_APPROVED", next_step="取得人工 approval 後重試 apply")
-        return 1, result
     if not _approval_ok(candidate):
-        result.update(status="BLOCKED", error_code="APPROVAL_TOKEN_INVALID", next_step="確認 approved_by 與 HERMES_UPSTREAM_APPROVAL_TOKEN，再重試")
+        result.update(status="BLOCKED", error_code="NOT_APPROVED", next_step="取得人工 approval 後重試 apply")
         return 1, result
 
     preflight_args = argparse.Namespace(

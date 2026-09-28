@@ -92,6 +92,7 @@ def test_review_creates_pending_candidate_and_review_ref(repo_fixture, tmp_path:
     assert result["status"] == "PENDING"
     candidate = json.loads((state / "candidates" / "review-test.json").read_text())
     assert candidate["status"] == "PENDING"
+    assert set(candidate["approval"]) == {"approved_by", "approved_at_utc"}
     assert candidate["checks"]["noop"] is True
     assert git(repo, "rev-parse", "refs/upstream/review/review-test") == candidate["candidate_sha"]
     assert git(repo, "show-ref") != before

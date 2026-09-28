@@ -29,8 +29,7 @@
 
 The updater uses **rebase-based review candidate + snapshot promotion**.
 Review-only never deploys, restarts, or pushes. Apply never runs unless one
-specific candidate is `APPROVED` and the operator supplies the matching
-`HERMES_UPSTREAM_APPROVAL_TOKEN`.
+specific candidate is `APPROVED` and its approval records a named approver.
 
 The live release is immutable. A deploy must create a new release snapshot,
 retain the previous release and drop-in, switch the effective systemd paths,
@@ -76,12 +75,12 @@ truth. Record `candidate_sha`, `release_id`, `source_sha`, `parent_sha`, and
 
 ## Approve and apply
 
-Approval is explicit and candidate-specific. Store only the SHA-256 hash of
-the approval token in metadata as `approval.approval_token_sha256`; never put
-the raw token in logs or files. The apply command defaults to dry-run:
+Approval is explicit and candidate-specific. Edit the candidate JSON directly:
+set `status` to `APPROVED` and set `approval.approved_by` to the operator
+identity. No environment variable or token hash is needed. The apply command
+defaults to dry-run:
 
 ```bash
-export HERMES_UPSTREAM_APPROVAL_TOKEN='provided-out-of-band'
 python scripts/hermes_upstream_apply.py \
   --repo "$HOME/.hermes/hermes-agent" \
   --state-dir "$HOME/.hermes/hermes-upstream-state" \

@@ -41,6 +41,23 @@ def _no_browser_downloads(monkeypatch):
     monkeypatch.setattr("pm.client._request", refuse)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_runtime_boundary_scan(monkeypatch):
+    """Full ``run_doctor`` sweeps must not inspect this host's user units.
+
+    ``_check_runtime_boundary`` always runs and, with no injected runner,
+    shells out to systemctl and crontab. A unit whose effective path is under
+    the real Hermes home (this machine: ``current-release``) makes
+    ``Path.resolve`` trip ``tests/home_io_guard.py``. The check itself is
+    covered by ``tests/hermes_cli/test_doctor_runtime_boundary.py``, which
+    calls it with a fake runner and is not affected by this fixture.
+    """
+    monkeypatch.setattr(
+        "hermes_cli.doctor_runtime_boundary._check_development_checkout_runtime_references",
+        lambda issues, **_kwargs: None,
+    )
+
+
 def _tls_out_normalized(out: str) -> str:
     """Doctor print matcher for TLS rows: key on words, not spacing."""
     return " ".join(out.lower().split())
@@ -363,6 +380,10 @@ def test_check_gateway_service_linger_skips_when_service_not_installed(monkeypat
 
     monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
     monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda: unit_path)
+    # Also treats the host (default-profile) unit as installed. A missing
+    # profile unit is not a skip while this machine's real
+    # hermes-gateway.service exists, so the host dir must be an empty fixture.
+    monkeypatch.setattr(gateway_cli, "user_systemd_unit_dir", lambda: tmp_path / "systemd")
 
     issues = []
     doctor._check_gateway_service_linger(issues)
@@ -400,6 +421,10 @@ def test_check_gateway_service_linger_skips_when_service_not_installed(monkeypat
 
     monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
     monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda: unit_path)
+    # Also treats the host (default-profile) unit as installed. A missing
+    # profile unit is not a skip while this machine's real
+    # hermes-gateway.service exists, so the host dir must be an empty fixture.
+    monkeypatch.setattr(gateway_cli, "user_systemd_unit_dir", lambda: tmp_path / "systemd")
 
     issues = []
     doctor._check_gateway_service_linger(issues)

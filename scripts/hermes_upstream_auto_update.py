@@ -6,22 +6,18 @@ On any non-clean outcome (rebase conflict, scoped test failure, apply failure,
 push failure) it stops short of touching anything live and prints a report for
 a human to act on -- it never retries or force-fixes a problem itself.
 
-On the clean path (rebase_ok, no scoped-test failures) it self-generates the
-`HERMES_UPSTREAM_APPROVAL_TOKEN`/`approval_token_sha256` pair that
-`hermes_upstream_apply.py --execute` requires. This is a deliberate, narrow
-exception to the normal human-approval gate, authorized specifically for this
-script by the operator (2026-09-26) -- it does not apply anywhere else a human
-is asked to approve an upstream candidate.
+On the clean path (rebase_ok, no scoped-test failures) it records an explicit
+self-approval with a named approver before calling `hermes_upstream_apply.py
+--execute`. This is a deliberate, narrow exception to the normal human-review
+workflow, authorized specifically for this script by the operator.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
-import secrets
 import shutil
 import subprocess
 import sys
@@ -314,19 +310,16 @@ def _write(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _self_approve(candidate_path: Path) -> str:
-    """Mark the candidate APPROVED with a self-generated token; returns the plaintext token."""
+def _self_approve(candidate_path: Path) -> None:
+    """Mark the candidate APPROVED with the automated operator identity."""
     candidate = _load(candidate_path)
-    token = secrets.token_hex(32)
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     candidate["status"] = "APPROVED"
     candidate["approval"] = {
         "approved_by": "auto-cron:hermes_upstream_auto_update",
         "approved_at_utc": now,
-        "approval_token_sha256": hashlib.sha256(token.encode()).hexdigest(),
     }
     _write(candidate_path, candidate)
-    return token
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -418,20 +411,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # 4. Self-approve (explicit, narrowly-scoped operator exception -- see module docstring)
     #    and auto-discover the currently-live release/drop-in for --execute's rollback pair.
-    token = _self_approve(candidate_path)
+    _self_approve(candidate_path)
     try:
         previous_release, previous_dropin = _current_release_identity(args.systemd_unit)
     except Exception as exc:
         print(f"❌ Hermes upstream 全自動更新：無法從 systemd 讀出目前 live release/drop-in，未套用。\n{exc}")
         return 0
 
-    env = os.environ.copy()
-    env["HERMES_UPSTREAM_APPROVAL_TOKEN"] = token
     code, apply_result = _run_script(APPLY_SCRIPT, [
         "--repo", str(repo), "--state-dir", str(state), "--run-id", run_id,
         "--previous-release", str(previous_release), "--previous-dropin", str(previous_dropin),
         "--systemd-unit", args.systemd_unit, "--execute",
-    ], env=env)
+    ])
 
     if apply_result.get("status") != "DONE":
         print(

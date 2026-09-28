@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 from argparse import Namespace
@@ -42,7 +41,7 @@ def write_candidate(repo: Path, state: Path, *, created: str, status: str = "APP
         "run_id": "run", "status": status, "created_at_utc": created,
         "candidate_sha": head, "source_sha": head, "parent_sha": git(repo, "rev-parse", "HEAD^"),
         "release_id": "release-run", "review_branch": "refs/heads/main",
-        "approval": {"approved_by": "operator", "approval_token_sha256": hashlib.sha256(b"ok").hexdigest()},
+        "approval": {"approved_by": "operator"},
     }
     path.write_text(json.dumps(value), encoding="utf-8")
     return path
@@ -141,7 +140,6 @@ def test_restart_failure_restores_previous_dropin(tmp_path: Path, monkeypatch):
             return subprocess.CompletedProcess(command, 1, "", "restart failed")
         return real_run(command, check=check)
 
-    monkeypatch.setenv("HERMES_UPSTREAM_APPROVAL_TOKEN", "ok")
     monkeypatch.setattr(apply_module, "_run", fake_run)
     args = Namespace(
         repo=str(repo), state_dir=str(state), run_id="run", release_root=str(tmp_path / "releases"),

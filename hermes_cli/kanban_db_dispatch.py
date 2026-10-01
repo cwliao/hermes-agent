@@ -2919,20 +2919,10 @@ def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
     from tools.process_registry import restart_safe_gateway_child_argv
 
     if task.current_run_id is None:
-        # Outside managed systemd this is harmless, but a managed dispatch must
-        # never mint an untraceable worker.  Check topology through the shared
-        # helper first, using a placeholder suffix that cannot be launched.
-        dispatch = restart_safe_gateway_child_argv(
-            command,
-            unit_suffix=f"kanban-{task.id}-run-missing",
-            require_restart_safe_scope=True,
-            outlives_parent=True,
-        )
-        if dispatch.mode != "in_process":
-            raise RuntimeError(
-                "cannot create restart-safe systemd scope for Kanban worker: "
-                "the claimed task has no current run id"
-            )
+        # A task without a run id is a legacy/direct spawn (and can occur in
+        # isolated callers); there is no run identity to use in the scope name.
+        # Let the normal subprocess path handle it instead of turning an
+        # otherwise valid spawn into an infrastructure failure.
         return command
 
     return restart_safe_gateway_child_argv(

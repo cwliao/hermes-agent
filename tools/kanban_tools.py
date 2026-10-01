@@ -1195,6 +1195,13 @@ def _handle_block(args: dict, **kw) -> str:
 @_kanban_handler("kanban_schedule")
 def _handle_schedule(args: dict, **kw) -> str:
     """Park the current task until an orchestrator re-gates it."""
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    requested_tid = args.get("task_id")
+    if env_tid and requested_tid and requested_tid != env_tid:
+        raise _Reject(
+            f"kanban_schedule refused: worker is scoped to task {env_tid}; "
+            f"refusing to mutate {requested_tid}."
+        )
     tid = _worker_guard("kanban_schedule", args)
     raw_reason = args.get("reason")
     _check(raw_reason is None or isinstance(raw_reason, str), "reason must be a string")

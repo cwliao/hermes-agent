@@ -45,7 +45,7 @@ def kanban_home(tmp_path, monkeypatch):
     # written against. The grace-period itself is covered by dedicated
     # tests in tests/hermes_cli/test_kanban_db.py.
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -317,7 +317,7 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
 
 
 def test_create_task_persists_max_runtime(kanban_home):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="x", max_runtime_seconds=600)
         task = kb.get_task(conn, tid)
@@ -329,7 +329,7 @@ def test_create_task_persists_max_runtime(kanban_home):
 def test_create_task_persists_explicit_origin(kanban_home):
     """WORKER-SUBPROCESS-SESSION-ENV-001: explicit origin_* kwargs land on
     the new row unchanged."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn, title="x",
@@ -352,7 +352,7 @@ def test_create_task_inherits_origin_from_parent(kanban_home):
     """A child task created with no explicit origin_* inherits it from its
     first parent, so origin propagates down an entire swarm/worker tree
     without every call site re-resolving the live session."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         parent_id = kb.create_task(
             conn, title="parent",
@@ -372,7 +372,7 @@ def test_create_task_no_origin_inheritance_when_parent_has_none(kanban_home):
     """A parent with no origin_platform (e.g. created from a plain CLI/cron
     invocation) leaves the child's origin_* NULL too -- no origin to
     propagate, not an error."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         parent_id = kb.create_task(conn, title="parent")
         child_id = kb.create_task(conn, title="child", parents=[parent_id])
@@ -400,7 +400,7 @@ def test_enforce_max_runtime_integrates_with_dispatch(kanban_home, monkeypatch):
             state["sent_term"] = True
     monkeypatch.setattr(_kb, "_pid_alive", _alive)
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn, title="timeout-me", assignee="worker",
@@ -462,7 +462,7 @@ def test_migration_renames_legacy_event_kinds(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     # Init fresh.
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="x")
@@ -476,7 +476,7 @@ def test_migration_renames_legacy_event_kinds(tmp_path, monkeypatch):
                     (tid, old, now),
                 )
         # Re-run init_db — the migration pass should rename them.
-        kb.init_db()
+        kbc.init_db()
         rows = conn.execute(
             "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id", (tid,),
         ).fetchall()
@@ -582,7 +582,7 @@ def test_migration_backfills_inflight_run_for_legacy_db(kanban_home):
         assert kb.get_task(conn, tid).current_run_id is None
 
         # Re-run init_db — migration backfill should kick in.
-        kb.init_db()
+        kbc.init_db()
         conn2 = kbc.connect()
         try:
             runs = kb.list_runs(conn2, tid)
@@ -717,7 +717,7 @@ def test_migration_backfill_idempotent_under_re_run(tmp_path, monkeypatch):
 
     # Fresh DB, one task left in 'running' with a claim but no run row.
     # Simulates a pre-runs-era DB.
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="legacy inflight", assignee="worker")
@@ -734,7 +734,7 @@ def test_migration_backfill_idempotent_under_re_run(tmp_path, monkeypatch):
         # Re-run init_db 3x — each should detect the orphan-inflight and
         # install exactly ONE run row, not three.
         for _ in range(3):
-            kb.init_db()
+            kbc.init_db()
 
         runs = kb.list_runs(conn, tid)
         assert len(runs) == 1, f"expected exactly 1 backfilled run, got {len(runs)}"

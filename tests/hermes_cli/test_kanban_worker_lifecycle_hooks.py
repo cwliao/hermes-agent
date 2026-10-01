@@ -37,7 +37,7 @@ def kanban_home(tmp_path, monkeypatch):
     # Crash detection acts immediately in these tests (no launch grace).
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 @pytest.fixture

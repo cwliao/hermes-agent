@@ -28,7 +28,7 @@ def conn(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     db_path = kb.kanban_db_path(board="default")
     kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
-    kb.init_db()
+    kbc.init_db()
     with kbc.connect() as c:
         yield c
 

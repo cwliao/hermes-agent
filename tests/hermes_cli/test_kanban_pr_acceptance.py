@@ -66,7 +66,7 @@ def github(tmp_path, monkeypatch):
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    kb.init_db()
+    kbc.init_db()
     try:
         yield state
     finally:
@@ -159,7 +159,7 @@ def test_acceptance_runs_gh_as_the_assignee_profile(tmp_path, monkeypatch):
                   "print(json.dumps({'data': {'repository': None}}))\n")
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
-    kb.init_db()
+    kbc.init_db()
     with connect() as conn:
         tid = kb.create_task(conn, title="as-b", completion_contract="acme/repo", assignee="b")
         assert not kb.complete_task(conn, tid, result="done",
@@ -202,7 +202,7 @@ def test_assignee_without_own_gh_login_never_falls_through_to_ambient_login(tmp_
                   "print(json.dumps({'data': {'repository': None}}))\n")
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
-    kb.init_db()
+    kbc.init_db()
     with connect() as conn:
         tid = kb.create_task(conn, title="as-b", completion_contract="acme/repo", assignee="b")
         assert not kb.complete_task(conn, tid, result="done",
@@ -221,7 +221,7 @@ def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, m
     process's ambient login: classification `auth` naming the profile, gh never invoked."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))  # any gh spawn would fail as infra
-    kb.init_db()
+    kbc.init_db()
     with connect() as conn:
         tid = kb.create_task(conn, title="as-ghost", completion_contract="acme/repo", assignee="ghost")
         assert not kb.complete_task(conn, tid, result="done",

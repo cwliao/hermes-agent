@@ -117,9 +117,10 @@ def test_cli_invalid_max_in_progress_has_defined_behaviour(isolated_kanban_home,
     for every bad input — is unchanged.
     """
     from hermes_cli import kanban as kb_cli
-    from hermes_cli import kanban_db
+    from hermes_cli import kanban_db as kanban_db_core
+    from hermes_cli import kanban_db_dispatch as kanban_db
 
-    monkeypatch.setattr(kanban_db, "_system_memory_sample", lambda: {})
+    monkeypatch.setattr(kanban_db_core, "_system_memory_sample", lambda: {})
     default = kanban_db.derive_default_max_in_progress()
 
     # value -> expected resolution

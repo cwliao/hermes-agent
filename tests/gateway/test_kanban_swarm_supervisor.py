@@ -13,6 +13,7 @@ import pytest
 
 from gateway.kanban_watchers import GatewayKanbanWatchersMixin
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.kanban_swarm import SwarmWorkerSpec, create_swarm
 
 
@@ -25,7 +26,7 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     db_path = kb.kanban_db_path(board="default")
     kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -74,7 +75,7 @@ def _set_worker_heartbeat(conn, worker_id: str, last_heartbeat_at: int) -> None:
 def test_stalled_worker_records_one_diagnostic_without_blocking(
     kanban_home, runner, monkeypatch
 ):
-    conn = kb.connect()
+    conn = kbc.connect()
     created = _make_swarm_with_worker_budget(conn, max_runtime_seconds=30)
     worker_id = created.worker_ids[0]
     now = int(time.time())
@@ -98,7 +99,7 @@ def test_stalled_worker_records_one_diagnostic_without_blocking(
     assert worker_calls[0]["block"] is False
     assert worker_calls[0]["source"] == "swarm_supervisor"
 
-    conn = kb.connect()
+    conn = kbc.connect()
     events = _supervisor_events(conn, worker_id)
     assert len(events) == 1
     assert events[0].payload["stall_key"].startswith(
@@ -110,7 +111,7 @@ def test_stalled_worker_records_one_diagnostic_without_blocking(
 
 
 def test_same_stall_is_deduped_across_ticks(kanban_home, runner):
-    conn = kb.connect()
+    conn = kbc.connect()
     created = _make_swarm_with_worker_budget(conn, max_runtime_seconds=30)
     worker_id = created.worker_ids[0]
     now = int(time.time())
@@ -120,13 +121,13 @@ def test_same_stall_is_deduped_across_ticks(kanban_home, runner):
     runner._kanban_swarm_supervisor_tick(now=now)
     runner._kanban_swarm_supervisor_tick(now=now)
 
-    conn = kb.connect()
+    conn = kbc.connect()
     assert len(_supervisor_events(conn, worker_id)) == 1
     conn.close()
 
 
 def test_healthy_worker_produces_no_diagnostic(kanban_home, runner, monkeypatch):
-    conn = kb.connect()
+    conn = kbc.connect()
     created = _make_swarm_with_worker_budget(conn, max_runtime_seconds=30)
     worker_id = created.worker_ids[0]
     now = int(time.time())
@@ -145,13 +146,13 @@ def test_healthy_worker_produces_no_diagnostic(kanban_home, runner, monkeypatch)
     runner._kanban_swarm_supervisor_tick(now=now)
 
     assert [call for call in calls if call["task_id"] == worker_id] == []
-    conn = kb.connect()
+    conn = kbc.connect()
     assert _supervisor_events(conn, worker_id) == []
     conn.close()
 
 
 def test_watcher_noops_without_dispatcher_lock(kanban_home, runner, monkeypatch):
-    conn = kb.connect()
+    conn = kbc.connect()
     created = _make_swarm_with_worker_budget(conn, max_runtime_seconds=30)
     worker_id = created.worker_ids[0]
     now = int(time.time())
@@ -172,13 +173,13 @@ def test_watcher_noops_without_dispatcher_lock(kanban_home, runner, monkeypatch)
     runner._kanban_swarm_supervisor_tick(now=now)
 
     assert calls == []
-    conn = kb.connect()
+    conn = kbc.connect()
     assert _supervisor_events(conn, worker_id) == []
     conn.close()
 
 
 def test_stall_tick_never_mutates_task_status(kanban_home, runner):
-    conn = kb.connect()
+    conn = kbc.connect()
     created = _make_swarm_with_worker_budget(conn, max_runtime_seconds=30)
     worker_id = created.worker_ids[0]
     now = int(time.time())
@@ -196,7 +197,7 @@ def test_stall_tick_never_mutates_task_status(kanban_home, runner):
 
     runner._kanban_swarm_supervisor_tick(now=now)
 
-    conn = kb.connect()
+    conn = kbc.connect()
     for task_id, status in statuses_before.items():
         assert kb.get_task(conn, task_id).status == status
     assert _supervisor_events(conn, worker_id)

@@ -27,7 +27,7 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -814,7 +814,7 @@ def test_worktree_workspace_explicit_target_materializes_linked_worktree(kanban_
 def test_complete_task_rejects_missing_declared_artifact(kanban_home, tmp_path):
     """A declared deliverable must exist before the task can become done."""
     missing = tmp_path / "missing-deliverable.png"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task_id = kb.create_task(conn, title="missing artifact")
         with pytest.raises(kb.CompletionEvidenceError) as exc_info:
             kb.complete_task(
@@ -1111,7 +1111,7 @@ class TestSharedBoardPaths:
 
         # Dispatcher creates the board and a task.
         self._set_home(monkeypatch, tmp_path, default_home)
-        kb.init_db()
+        kbc.init_db()
         with kbc.connect() as conn:
             task_id = kb.create_task(conn, title="cross-profile")
 
@@ -1207,7 +1207,7 @@ class TestSharedBoardPaths:
 # ---------------------------------------------------------------------------
 
 def test_connect_falls_back_to_delete_on_locking_protocol(tmp_path, monkeypatch, caplog):
-    """kanban_db.connect() must handle ``locking protocol`` on NFS/SMB.
+    """kbc.connect() must handle ``locking protocol`` on NFS/SMB.
 
     Without this fallback, the gateway's kanban dispatcher crashes every
     60s and the kanban migration (``consecutive_failures`` ADD COLUMN) is
@@ -1215,7 +1215,7 @@ def test_connect_falls_back_to_delete_on_locking_protocol(tmp_path, monkeypatch,
     (see hermes-agent issue #22032).
 
     NOTE: We do NOT use the ``kanban_home`` fixture here because that
-    fixture pre-initializes the DB via ``kb.init_db()`` — putting the
+    fixture pre-initializes the DB via ``kbc.init_db()`` — putting the
     file in WAL on disk. The Bug D safety guard now refuses to downgrade
     to DELETE when the on-disk header is already WAL, so testing the
     NFS-fallback path requires a truly-fresh DB file (NFS scenario in
@@ -1283,7 +1283,7 @@ def test_connect_falls_back_to_delete_on_locking_protocol(tmp_path, monkeypatch,
 
 
 def test_connect_works_when_wal_is_silently_refused(tmp_path, monkeypatch, caplog):
-    """kanban_db.connect() must stay usable when WAL silently no-ops to DELETE."""
+    """kbc.connect() must stay usable when WAL silently no-ops to DELETE."""
     import sqlite3 as _sqlite3
     from unittest.mock import patch as _patch
 
@@ -1841,7 +1841,7 @@ def test_locked_healthy_db_does_not_classify_as_corrupt(tmp_path, monkeypatch):
     and must not be reported as :class:`KanbanDbCorruptError`. Raw sqlite
     ``OperationalError`` (lock/busy) is acceptable and expected."""
     db_path = tmp_path / "kanban.db"
-    kb.init_db(db_path=db_path)
+    kbc.init_db(db_path=db_path)
     kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
 
     real_connect = sqlite3.connect

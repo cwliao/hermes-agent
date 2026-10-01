@@ -106,7 +106,7 @@ def _wake_source_from(adapter):
 
 def test_slack_wake_resumes_the_creators_workspace_scoped_session(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-scope.db"))
-    kb.init_db()
+    kbc.init_db()
     _completed_subscription(
         platform="slack",
         chat_id=CHANNEL,
@@ -140,7 +140,7 @@ def test_slack_wake_resumes_the_creators_workspace_scoped_session(tmp_path, monk
 def test_slack_wake_falls_back_to_the_adapter_channel_workspace_map(tmp_path, monkeypatch):
     """Subscriptions that stored no workspace resolve it from the adapter."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-scope-fallback.db"))
-    kb.init_db()
+    kbc.init_db()
     _completed_subscription(
         platform="slack",
         chat_id=CHANNEL,
@@ -160,7 +160,7 @@ def test_slack_wake_falls_back_to_the_adapter_channel_workspace_map(tmp_path, mo
 def test_unknown_channel_keeps_the_previous_unscoped_wake(tmp_path, monkeypatch):
     """An unresolvable workspace yields an unscoped key, not a wrong scope."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-scope-unknown.db"))
-    kb.init_db()
+    kbc.init_db()
     _completed_subscription(
         platform="slack",
         chat_id=CHANNEL,
@@ -178,7 +178,7 @@ def test_unknown_channel_keeps_the_previous_unscoped_wake(tmp_path, monkeypatch)
 def test_unscoped_platform_wake_key_is_byte_identical(tmp_path, monkeypatch):
     """Platforms without tenant scoping must keep their exact key shape."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "wake-scope-telegram.db"))
-    kb.init_db()
+    kbc.init_db()
     _completed_subscription(
         platform="telegram",
         chat_id="chat-dm",

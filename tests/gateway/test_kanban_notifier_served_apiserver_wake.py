@@ -177,7 +177,7 @@ def test_served_profile_wake_runs_in_process_only_for_the_session_it_owns(served
     _own_session(served.builder, SESSION, "builder")
     _FakeHttpSession.calls = []
     monkeypatch.setattr(aiohttp, "ClientSession", _FakeHttpSession)
-    kb.init_db()
+    kbc.init_db()
     adapter = RecordingApiServerAdapter()
     runner = _make_runner(adapter=adapter)
     task = _subscription()

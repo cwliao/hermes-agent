@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from gateway.kanban_watchers_common import _board_slugs, _positive_int_setting, logger
+from hermes_cli import kanban_db_dispatch as kbd
 
 
 def _kbc():

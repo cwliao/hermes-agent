@@ -22,6 +22,7 @@ import hermes_state
 import hermes_state_wal
 from hermes_state import SessionDB, get_last_init_error
 from hermes_state_wal import WalUnsupportedError, apply_wal_with_fallback
+from hermes_cli import kanban_db_connect as kbc
 
 
 # ``sqlite3.Connection.execute`` is a C-level slot and can't be monkeypatched

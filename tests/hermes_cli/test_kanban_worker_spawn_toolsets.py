@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from hermes_cli import kanban_db_dispatch as kbd
 
 
 def _make_task(kb, *, assignee: str):
@@ -110,7 +111,7 @@ def test_worker_toolset_resolution_discovers_plugins_before_filtering(
         lambda: calls.append(True),
     )
 
-    kb._resolve_worker_cli_toolsets(str(root))
+    kbd._resolve_worker_cli_toolsets(str(root))
 
     assert calls
 
@@ -140,7 +141,7 @@ plugins:
     monkeypatch.setenv("HERMES_HOME", str(root))
     from hermes_cli import kanban_db as kb
 
-    resolved = kb._resolve_worker_cli_toolsets(str(profile))
+    resolved = kbd._resolve_worker_cli_toolsets(str(profile))
 
     assert resolved is not None
     assert "mermaid_renderer" in resolved
@@ -169,7 +170,7 @@ platform_toolsets:
         '[swarm:contract] {"role":"synthesizer","root_id":"t_root",'
         '"verifier_id":"t_verify"}'
     )
-    assert kb._resolve_worker_cli_toolsets(str(profile), task_body=body) == ["kanban"]
+    assert kbd._resolve_worker_cli_toolsets(str(profile), task_body=body) == ["kanban"]
 
 
 def test_worker_toolsets_explicit_profile_override_is_preserved(monkeypatch, tmp_path):

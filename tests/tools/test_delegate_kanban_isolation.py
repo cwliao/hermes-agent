@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from hermes_cli import kanban_db_connect as kbc
 
 # The subprocess-boundary tests below spawn ``sys.executable -c`` with a tmp
 # cwd. Without an explicit PYTHONPATH the child resolves ``hermes_cli`` /

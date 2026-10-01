@@ -16,6 +16,8 @@ import agent.lsp
 from agent.lsp.manager import LSPService
 from agent.lsp.servers import SERVERS, ServerContext, ServerDef, SpawnSpec
 from agent.lsp.workspace import clear_cache
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_workspace as kbw
 
 MOCK_SERVER = str(Path(__file__).parent / "_mock_lsp_server.py")
 

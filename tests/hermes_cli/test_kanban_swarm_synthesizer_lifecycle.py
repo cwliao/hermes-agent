@@ -11,7 +11,7 @@ precondition. What this ticket fixes is the synthesizer role's OWN
 attempt lifecycle: bounded retries, confirmed termination before retry,
 no same-tick respawn, an overall wall-clock deadline, and a typed
 ``block_kind`` on exhaustion -- all scoped to tasks whose body contains
-``role = "synthesizer"`` (``kb._is_synthesizer_role``), so every other
+``role = "synthesizer"`` (``kbd._is_synthesizer_role``), so every other
 role's timeout/retry behaviour is provably unchanged.
 """
 
@@ -25,6 +25,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_dispatch as kbd
 
 SYNTH_BODY = (
     "Completion contract (the kernel rejects a completion that omits any "
@@ -49,7 +50,7 @@ def _make_synth_task(conn, *, max_retries=1, max_runtime_seconds=300):
         max_runtime_seconds=max_runtime_seconds, max_retries=max_retries,
     )
     kb.claim_task(conn, tid)
-    kb._set_worker_pid(conn, tid, os.getpid())
+    kbd._set_worker_pid(conn, tid, os.getpid())
     return tid
 
 
@@ -80,7 +81,7 @@ def test_synthesizer_first_timeout_then_retry_succeeds(kanban_home, monkeypatch)
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
 
-        timed_out = kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        timed_out = kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
         assert tid in timed_out
 
         task = kb.get_task(conn, tid)
@@ -123,7 +124,7 @@ def test_synthesizer_second_timeout_exhausts_budget(kanban_home, monkeypatch):
     try:
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
 
         # Simulate the retry being claimed and itself timing out.
         with kb.write_txn(conn):
@@ -131,9 +132,9 @@ def test_synthesizer_second_timeout_exhausts_budget(kanban_home, monkeypatch):
                 "UPDATE tasks SET retry_not_before = NULL WHERE id = ?", (tid,),
             )
         kb.claim_task(conn, tid)
-        kb._set_worker_pid(conn, tid, os.getpid())
+        kbd._set_worker_pid(conn, tid, os.getpid())
         _backdate_run_start(conn, tid, seconds_ago=400)
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
 
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
@@ -167,7 +168,7 @@ def test_synthesizer_unconfirmed_termination_blocks_without_retry(
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
 
-        timed_out = kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        timed_out = kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
         assert tid in timed_out
 
         task = kb.get_task(conn, tid)
@@ -205,7 +206,7 @@ def test_synthesizer_overall_deadline_forces_exhaustion(kanban_home, monkeypatch
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=3700)
 
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
 
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
@@ -256,7 +257,7 @@ def test_synthesizer_deadline_checked_after_termination_polling(
             return alive_calls[0] <= 31
 
         monkeypatch.setattr(kb, "_pid_alive", slow_pid_alive)
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
 
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
@@ -280,14 +281,14 @@ def test_enforce_max_runtime_duplicate_tick_is_idempotent(kanban_home, monkeypat
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
 
-        first = kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        first = kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
         assert tid in first
         # Immediately call again in the "same tick" -- the task is no
         # longer 'running' (it's 'ready' with claim_lock/worker_pid
         # cleared), so enforce_max_runtime's own WHERE clause excludes it.
         # This is the idempotency guarantee: one timeout produces exactly
         # one timed_out event and one failure-counter increment, never two.
-        second = kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        second = kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
         assert tid not in second
 
         task = kb.get_task(conn, tid)
@@ -310,7 +311,7 @@ def test_late_old_run_completion_rejected_after_timeout(kanban_home, monkeypatch
         tid = _make_synth_task(conn, max_retries=2)
         old_run_id = kb.get_task(conn, tid).current_run_id
         _backdate_run_start(conn, tid, seconds_ago=400)
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
 
         # The old run is closed and no longer current. A completion attempt
         # carrying the OLD run id must be rejected -- it must not resurrect
@@ -341,7 +342,7 @@ def test_synthesizer_mixed_timeout_then_crash_exhausts_budget(
     try:
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
         assert kb.get_task(conn, tid).status == "ready"
 
         # Retry claimed, then "crashes" (worker exits without completing) --
@@ -393,15 +394,15 @@ def test_root_status_unaffected_by_synthesizer_exhaustion(kanban_home, monkeypat
 
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET retry_not_before = NULL WHERE id = ?", (tid,),
             )
         kb.claim_task(conn, tid)
-        kb._set_worker_pid(conn, tid, os.getpid())
+        kbd._set_worker_pid(conn, tid, os.getpid())
         _backdate_run_start(conn, tid, seconds_ago=400)
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
 
         synth = kb.get_task(conn, tid)
         assert synth.status == "blocked"
@@ -428,15 +429,15 @@ def test_gave_up_event_payload_is_notifier_truthful(kanban_home, monkeypatch):
     try:
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET retry_not_before = NULL WHERE id = ?", (tid,),
             )
         kb.claim_task(conn, tid)
-        kb._set_worker_pid(conn, tid, os.getpid())
+        kbd._set_worker_pid(conn, tid, os.getpid())
         _backdate_run_start(conn, tid, seconds_ago=400)
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
 
         events = kb.list_events(conn, tid)
         gave_up = next(e for e in events if e.kind == "gave_up")
@@ -507,10 +508,10 @@ def test_non_synthesizer_role_keeps_legacy_timeout_behavior(kanban_home, monkeyp
             max_runtime_seconds=300, max_retries=2,
         )
         kb.claim_task(conn, tid)
-        kb._set_worker_pid(conn, tid, os.getpid())
+        kbd._set_worker_pid(conn, tid, os.getpid())
         _backdate_run_start(conn, tid, seconds_ago=400)
 
-        kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
+        kbd.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
         task = kb.get_task(conn, tid)
         assert task.status == "ready"
         # No synthesizer-only backoff applied to other roles.

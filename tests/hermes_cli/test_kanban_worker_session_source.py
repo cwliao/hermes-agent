@@ -10,6 +10,7 @@ import os
 import pytest
 
 from hermes_state import SessionDB
+from hermes_cli import kanban_db_dispatch as kbd
 
 
 @pytest.fixture()

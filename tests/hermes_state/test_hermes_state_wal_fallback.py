@@ -330,7 +330,7 @@ class TestApplyWalWithFallback:
         Prevents log spam when NFS users run kanban (which opens a fresh
         connection on every operation — see hermes_cli/kanban_db.py).
         Regression guard: the fix for #22032 ran apply_wal_with_fallback()
-        on every kb.connect() call; without dedup, errors.log fills with
+        on every kbc.connect() call; without dedup, errors.log fills with
         hundreds of identical errors per hour.
         """
         with caplog.at_level("ERROR", logger="hermes_state"):
@@ -441,7 +441,7 @@ class TestApplyWalWithFallback:
     def test_delete_fallback_failure_warning_deduplicated_per_db_label(self, tmp_path, caplog):
         """Repeated both-fail calls with the same db_label log exactly ONE WARNING.
 
-        kanban_db.connect() runs on every kanban operation; without dedup,
+        kbc.connect() runs on every kanban operation; without dedup,
         APFS-external-SSD users would see hundreds of identical warnings.
         """
 
@@ -501,7 +501,7 @@ class TestRequireWal:
     """``require_wal=True`` turns either WAL-refusal shape into a hard
     ``WalUnsupportedError`` for callers that mandate WAL concurrency, instead
     of silently degrading to DELETE. The default callers (SessionDB /
-    kanban_db.connect) keep ``require_wal=False`` so NFS-homed installs work.
+    kbc.connect) keep ``require_wal=False`` so NFS-homed installs work.
     """
 
     def test_happy_path_unaffected_by_require_wal(self, tmp_path):

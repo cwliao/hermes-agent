@@ -29,7 +29,7 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
     kbd._recent_worker_exits.clear()
-    kb.init_db()
+    kbc.init_db()
     return home
 
 

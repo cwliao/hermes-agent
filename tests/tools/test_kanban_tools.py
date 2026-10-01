@@ -258,7 +258,7 @@ def worker_env(monkeypatch, tmp_path):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         # Model-facing task creation now requires either a real Hermes profile
@@ -331,7 +331,7 @@ def test_model_list_hides_terminal_history_by_default(monkeypatch, worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         active = kb.create_task(conn, title="autumn joke request", assignee="factory")
         finished = kb.create_task(conn, title="autumn joke request", assignee="factory")
@@ -374,7 +374,7 @@ def test_blocking_terminal_task_directs_new_request_to_fresh_swarm(worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         conn.execute(
             "UPDATE tasks SET status = 'done', completed_at = 2 WHERE id = ?",
@@ -405,7 +405,7 @@ def test_completion_rejects_missing_prose_file_evidence(worker_env, tmp_path):
     assert rejected.get("error")
     assert "missing or unreadable file" in rejected["error"]
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         assert kb.get_task(conn, worker_env).status == "running"
     finally:
@@ -641,7 +641,7 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
     monkeypatch.setattr(_Path, "home", lambda: tmp_path)
 
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         goal_task_id = kb.create_task(
@@ -837,7 +837,7 @@ def _make_goal_mode_worker_env(monkeypatch, tmp_path):
     monkeypatch.setattr(_Path, "home", lambda: tmp_path)
 
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         goal_task_id = kb.create_task(
@@ -1147,7 +1147,7 @@ def test_create_rejects_unavailable_assignee_without_creating_card(worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
     finally:
@@ -1161,7 +1161,7 @@ def test_create_rejects_unavailable_assignee_without_creating_card(worker_env):
     assert "error" in out
     assert "No task was created" in out["error"]
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         after = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
     finally:
@@ -1176,7 +1176,7 @@ def test_swarm_rejects_unavailable_verifier_before_any_card(worker_env):
         from hermes_cli import kanban_db as kb
         from tools import kanban_tools as kt
 
-        conn = kb.connect()
+        conn = kbc.connect()
         try:
             before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
         finally:
@@ -1188,7 +1188,7 @@ def test_swarm_rejects_unavailable_verifier_before_any_card(worker_env):
         }))
         assert "error" in out
         assert "verifier_assignee" in out["error"]
-        conn = kb.connect()
+        conn = kbc.connect()
         try:
             after = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
         finally:
@@ -1201,7 +1201,7 @@ def test_swarm_rejects_unavailable_verifier_before_any_card(worker_env):
 def test_external_watcher_lease_expires(worker_env):
     from hermes_cli import kanban_db as kb
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         expires = kb.register_external_watcher(
             conn,
@@ -1301,7 +1301,7 @@ def test_unblock_with_pending_parents_returns_todo(monkeypatch, tmp_path):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         parent = kb.create_task(conn, title="parent", assignee="worker")
@@ -1443,7 +1443,7 @@ def test_dispatcher_worker_completion_canonicalizes_swarm_contract(worker_env):
         "expected_lane_id": "claude",
         "preflight_skill_id": "claude-code",
     }
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         conn.execute(
             "UPDATE tasks SET body = ? WHERE id = ?",
@@ -1467,7 +1467,7 @@ def test_dispatcher_worker_completion_canonicalizes_swarm_contract(worker_env):
     assert d.get("ok") is True
     assert d["task_id"] == worker_env
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         run = kb.latest_run(conn, worker_env)
         assert run.metadata["role"] == "worker"
@@ -1490,7 +1490,7 @@ def test_dispatcher_synthesizer_promotes_summary_to_result(worker_env):
         "root_id": "t_swarm_root",
         "verifier_id": "t_verifier",
     }
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         conn.execute(
             "UPDATE tasks SET body = ? WHERE id = ?",
@@ -1509,7 +1509,7 @@ def test_dispatcher_synthesizer_promotes_summary_to_result(worker_env):
     assert d.get("ok") is True
     assert d["task_id"] == worker_env
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         task = kb.get_task(conn, worker_env)
         run = kb.latest_run(conn, worker_env)
@@ -1604,7 +1604,7 @@ def test_orchestrator_complete_any_task_allowed(monkeypatch, tmp_path):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="child to close out")
@@ -1762,8 +1762,8 @@ def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env,
     monkeypatch.setenv("HERMES_HOME", str(home))
     from hermes_cli import kanban_db as kb
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
-    with kb.connect_closing() as conn:
+    kbc.init_db()
+    with kbc.connect_closing() as conn:
         kb.register_external_watcher(
             conn, assignee="peer", watcher_id="test-fixture"
         )
@@ -1970,8 +1970,8 @@ def test_complete_auto_posts_to_swarm_root_named_in_body(monkeypatch, tmp_path):
 
     from hermes_cli import kanban_db as kb
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
-    conn = kb.connect()
+    kbc.init_db()
+    conn = kbc.connect()
     try:
         root_id = kb.create_task(conn, title="Swarm: test", assignee="default")
         worker_id = kb.create_task(
@@ -1993,7 +1993,7 @@ def test_complete_auto_posts_to_swarm_root_named_in_body(monkeypatch, tmp_path):
     out = kt._handle_complete({"summary": "penguin brain-teaser, saved to file"})
     assert json.loads(out)["ok"] is True
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         comments = kb.list_comments(conn, root_id)
     finally:
@@ -2013,7 +2013,7 @@ def test_complete_does_not_auto_post_without_swarm_root_in_body(worker_env):
     assert json.loads(out)["ok"] is True
 
     from hermes_cli import kanban_db as kb
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         comments = kb.list_comments(conn, worker_env)
     finally:
@@ -2034,8 +2034,8 @@ def test_complete_auto_post_is_best_effort_when_root_does_not_exist(monkeypatch,
 
     from hermes_cli import kanban_db as kb
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
-    conn = kb.connect()
+    kbc.init_db()
+    conn = kbc.connect()
     try:
         worker_id = kb.create_task(
             conn, title="orphaned worker", assignee="test-worker",
@@ -2157,7 +2157,7 @@ def test_swarm_happy_path_fills_in_skill_and_profile(monkeypatch, worker_env):
     assert len(d["worker_ids"]) == 4
 
     from hermes_cli import kanban_db as kb
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         expected_skills = {
             "native_hermes": [],
@@ -2217,7 +2217,7 @@ def test_swarm_binds_goal_to_current_user_turn_not_stale_model_argument(
     assert out["ok"] is True, out
 
     from hermes_cli import kanban_db as kb
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         root = kb.get_task(conn, out["root_id"])
         assert chr(0x5c0f) + chr(0x8c93) in (root.body or "")
@@ -2229,7 +2229,7 @@ def test_swarm_binds_goal_to_current_user_turn_not_stale_model_argument(
 def test_swarm_rejects_unknown_lane_before_creating_any_card(monkeypatch, worker_env):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from hermes_cli import kanban_db as kb
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         before = conn.execute("select count(*) from tasks").fetchone()[0]
     finally:
@@ -2244,7 +2244,7 @@ def test_swarm_rejects_unknown_lane_before_creating_any_card(monkeypatch, worker
     assert "error" in d
     assert "bogus" in d["error"]
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         after = conn.execute("select count(*) from tasks").fetchone()[0]
     finally:
@@ -2333,7 +2333,7 @@ def test_swarm_subscribes_synthesizer_when_session_context_present(
     assert d["subscribed"] is True
 
     from hermes_cli import kanban_db as kb
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         subs = kb.list_notify_subs(conn, d["synthesizer_id"])
     finally:
@@ -2345,7 +2345,7 @@ def test_swarm_subscribes_synthesizer_when_session_context_present(
 def test_swarm_rejects_non_integer_worker_max_runtime(monkeypatch, worker_env):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from hermes_cli import kanban_db as kb
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         before = conn.execute("select count(*) from tasks").fetchone()[0]
     finally:
@@ -2360,7 +2360,7 @@ def test_swarm_rejects_non_integer_worker_max_runtime(monkeypatch, worker_env):
     assert "error" in d, d
     assert "max_runtime_seconds" in d["error"]
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         after = conn.execute("select count(*) from tasks").fetchone()[0]
     finally:
@@ -2404,7 +2404,7 @@ def test_create_rejects_parent_in_flight_swarm_topology_node(monkeypatch, worker
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         created = ks.create_swarm(
             conn,
@@ -2463,7 +2463,7 @@ def test_create_allows_parent_when_swarm_is_done(monkeypatch, worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         created = ks.create_swarm(
             conn,
@@ -2505,7 +2505,7 @@ def test_create_allows_unrelated_task_during_in_flight_swarm(monkeypatch, worker
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         created = ks.create_swarm(
             conn,
@@ -2548,7 +2548,7 @@ def test_link_rejects_in_flight_swarm_topology_node(monkeypatch, worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         created = ks.create_swarm(
             conn,
@@ -2591,7 +2591,7 @@ def test_link_allows_unrelated_tasks(monkeypatch, worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         t1 = kb.create_task(conn, title="Task 1", assignee="peer")
         t2 = kb.create_task(conn, title="Task 2", assignee="qa")
@@ -2653,7 +2653,7 @@ def test_swarm_allowed_when_prior_swarm_synthesizer_is_done(monkeypatch, worker_
     d1 = json.loads(out1)
     assert d1.get("ok") is True, d1
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         _complete_lane_swarm(conn, d1)
     finally:
@@ -2685,7 +2685,7 @@ def test_swarm_allowed_when_prior_swarm_synthesizer_is_archived(monkeypatch, wor
     d1 = json.loads(out1)
     assert d1.get("ok") is True, d1
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         kb.archive_task(conn, d1["synthesizer_id"])
     finally:
@@ -2719,7 +2719,7 @@ def test_swarm_root_done_but_synthesizer_not_done_is_rejected(monkeypatch, worke
     assert d1.get("ok") is True, d1
 
     # Verify that root is done, but synthesizer is in 'todo'
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         root_task = kb.get_task(conn, d1["root_id"])
         synth_task = kb.get_task(conn, d1["synthesizer_id"])
@@ -2784,7 +2784,7 @@ def test_swarm_missing_synthesizer_row_does_not_block_new_swarm(monkeypatch, wor
     d1 = json.loads(out1)
     assert d1.get("ok") is True, d1
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         conn.execute("DELETE FROM tasks WHERE id = ?", (d1["synthesizer_id"],))
         conn.commit()

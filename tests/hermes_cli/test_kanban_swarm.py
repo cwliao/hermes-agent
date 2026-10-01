@@ -86,7 +86,7 @@ def test_create_swarm_verifier_does_not_carry_requesting_code_review(tmp_path):
     protocol-violation stall. Cover both create_swarm() entry shapes:
     non-lane (plain worker specs) and lane-bound (lane_id on every worker).
     """
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -341,7 +341,7 @@ def test_swarm_verifier_and_synthesis_are_dependency_gated(tmp_path):
 
 
 def test_lane_bound_swarm_persists_contracts_goal_budget_and_runtime(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -398,7 +398,7 @@ def test_explicit_worker_max_runtime_seconds_applies_uniformly_across_lanes(tmp_
     """An explicit swarm-wide override still wins over the lane-aware default,
     for every lane including native_hermes -- preserves the pre-existing
     behavior for callers that already pass this explicitly."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -422,7 +422,7 @@ def test_explicit_worker_max_runtime_seconds_applies_uniformly_across_lanes(tmp_
 
 
 def test_per_worker_max_runtime_seconds_still_beats_swarm_and_lane_defaults(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -474,7 +474,7 @@ def _make_quorum_swarm(conn, worker_quorum):
 
 
 def test_worker_quorum_out_of_range_rejected(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         with pytest.raises(ValueError, match="worker_quorum must be between 1 and 4"):
             _make_quorum_swarm(conn, worker_quorum=5)
@@ -485,7 +485,7 @@ def test_worker_quorum_out_of_range_rejected(tmp_path):
 
 
 def test_worker_quorum_requires_lane_mode(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         with pytest.raises(ValueError, match="worker_quorum is only meaningful for lane-bound swarms"):
             create_swarm(
@@ -501,7 +501,7 @@ def test_worker_quorum_requires_lane_mode(tmp_path):
 
 
 def test_worker_quorum_sets_verifier_expected_lane_count_and_stores_topology(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = _make_quorum_swarm(conn, worker_quorum=3)
         verifier = kb.get_task(conn, created.verifier_id)
@@ -515,7 +515,7 @@ def test_worker_quorum_sets_verifier_expected_lane_count_and_stores_topology(tmp
 
 
 def test_worker_quorum_none_keeps_full_lane_count(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = _make_quorum_swarm(conn, worker_quorum=None)
         verifier = kb.get_task(conn, created.verifier_id)
@@ -529,7 +529,7 @@ def test_worker_quorum_none_keeps_full_lane_count(tmp_path):
 
 
 def test_excuse_blocked_workers_below_quorum_archives_once_satisfied(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = _make_quorum_swarm(conn, worker_quorum=3)
         by_lane = {
@@ -555,7 +555,7 @@ def test_excuse_blocked_workers_below_quorum_archives_once_satisfied(tmp_path):
 
 
 def test_excuse_blocked_workers_below_quorum_noop_below_quorum(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = _make_quorum_swarm(conn, worker_quorum=3)
         by_lane = {
@@ -580,7 +580,7 @@ def test_excuse_blocked_workers_below_quorum_noop_below_quorum(tmp_path):
 def test_excuse_blocked_workers_below_quorum_noop_without_quorum_configured(tmp_path):
     """Swarms created without worker_quorum keep the strict all-workers
     behavior unchanged -- a blocked worker is never excused."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = _make_quorum_swarm(conn, worker_quorum=None)
         by_lane = {
@@ -604,7 +604,7 @@ def test_excuse_blocked_workers_below_quorum_noop_without_quorum_configured(tmp_
 def test_excuse_blocked_workers_below_quorum_ignores_unrelated_blocked_tasks(tmp_path):
     """A blocked task with no swarm worker contract at all (an ordinary
     task that happens to also be blocked) must never be touched."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         plain_id = kb.create_task(conn, title="unrelated", body="just a task", assignee="someone")
         conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (plain_id,))
@@ -623,7 +623,7 @@ def test_excuse_blocked_workers_below_quorum_never_touches_sticky_block(tmp_path
     independent cross-review before merge) must never be auto-excused,
     even when siblings already satisfy the quorum. Only the dispatcher's
     own circuit-breaker gave_up path is eligible."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = _make_quorum_swarm(conn, worker_quorum=3)
         by_lane = {
@@ -652,7 +652,7 @@ def test_excuse_blocked_workers_below_quorum_skips_task_no_longer_blocked(tmp_pa
     """Defense-in-depth: if the task transitioned away from 'blocked'
     between the initial scan and the archive attempt (e.g. a concurrent
     kanban unblock), it must not be archived anyway."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = _make_quorum_swarm(conn, worker_quorum=3)
         by_lane = {
@@ -690,7 +690,7 @@ def test_excuse_blocked_workers_below_quorum_skips_task_no_longer_blocked(tmp_pa
 
 
 def test_lane_bound_swarm_allows_two_of_three_external_lanes(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -717,7 +717,7 @@ def test_lane_bound_swarm_allows_two_of_three_external_lanes(tmp_path):
 
 
 def test_lane_bound_swarm_rejects_missing_native_hermes_lane(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         with pytest.raises(ValueError, match="native_hermes"):
             create_swarm(
@@ -738,7 +738,7 @@ def test_lane_bound_swarm_rejects_missing_native_hermes_lane(tmp_path):
 
 
 def test_lane_bound_swarm_rejects_fewer_than_two_external_lanes(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         with pytest.raises(ValueError, match="at least 2"):
             create_swarm(
@@ -762,7 +762,7 @@ def test_lane_bound_swarm_rejects_fewer_than_two_external_lanes(tmp_path):
 
 
 def test_lane_bound_swarm_rejects_unknown_lane_id(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         with pytest.raises(ValueError, match="only accept lane ids"):
             create_swarm(
@@ -790,7 +790,7 @@ def test_lane_bound_swarm_rejects_unknown_lane_id(tmp_path):
 
 
 def test_lane_bound_completion_is_fail_closed_and_synth_requires_verifier_gate(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -874,7 +874,7 @@ def test_swarm_worker_parser_reads_optional_acceptance_segment():
 
 
 def test_lane_bound_worker_contract_acceptance_prefers_explicit_body_then_title(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -962,7 +962,7 @@ def test_completion_requirements_satisfy_validate_completion(tmp_path):
     moved.
     """
 
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -1016,7 +1016,7 @@ def test_completion_call_example_satisfies_validate_completion(tmp_path):
     task. This is the anti-drift check for the concrete example added in
     response: if _completion_call_example and validate_completion ever
     disagree, this fails -- whichever side moved."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -1075,7 +1075,7 @@ def test_completion_requirements_reject_a_subset(tmp_path):
     kernel does not actually enforce.
     """
 
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -1154,7 +1154,7 @@ class TestNoPartialGraphOnValidationFailure:
     def test_an_invalid_last_worker_leaves_no_cards(self, tmp_path):
         """The worst case: everything before it is valid, so under the old
         code the root and three workers were already committed."""
-        conn = kb.connect(tmp_path / "kanban.db")
+        conn = kbc.connect(tmp_path / "kanban.db")
         try:
             self._attempt(conn, bad_index=len(MULTI_AGENT_LANE_IDS) - 1)
             rows = conn.execute("select count(*) from tasks").fetchone()[0]
@@ -1163,7 +1163,7 @@ class TestNoPartialGraphOnValidationFailure:
             conn.close()
 
     def test_an_invalid_middle_worker_leaves_no_cards(self, tmp_path):
-        conn = kb.connect(tmp_path / "kanban.db")
+        conn = kbc.connect(tmp_path / "kanban.db")
         try:
             self._attempt(conn, bad_index=1)
             assert conn.execute("select count(*) from tasks").fetchone()[0] == 0
@@ -1173,7 +1173,7 @@ class TestNoPartialGraphOnValidationFailure:
     def test_a_valid_swarm_is_unaffected(self, tmp_path):
         """The check must still let a correct graph through -- moving a
         validation earlier is only safe if it did not become stricter."""
-        conn = kb.connect(tmp_path / "kanban.db")
+        conn = kbc.connect(tmp_path / "kanban.db")
         try:
             specs = [
                 SwarmWorkerSpec(
@@ -1215,7 +1215,7 @@ def test_synthesizer_runtime_and_retry_budget_reaches_overall_deadline():
 def test_find_active_swarms_for_session_finds_in_flight_and_ignores_terminal(tmp_path):
     """find_active_swarms_for_session finds swarms with non-terminal synthesizers,
     and ignores completed or archived ones."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         # Swarm 1: active (synthesizer is todo)
         s1 = create_swarm(
@@ -1264,7 +1264,7 @@ def test_find_active_swarms_for_session_finds_in_flight_and_ignores_terminal(tmp
 def test_find_active_swarm_topologies_is_board_wide_and_skips_terminal(tmp_path):
     """Board-wide helper returns in-flight swarm topology and ignores a
     synthesizer that has reached TERMINAL_STATUSES."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         s1 = create_swarm(
             conn,
@@ -1296,7 +1296,7 @@ def test_find_active_swarms_for_session_ignores_corrupt_or_missing_synthesizer(t
     """When a candidate root references a missing/deleted synthesizer task,
     it logs a warning and does NOT treat the swarm as perpetually active."""
     import logging
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         s = create_swarm(
             conn,
@@ -1321,7 +1321,7 @@ def test_find_active_swarms_for_session_ignores_corrupt_or_missing_synthesizer(t
 def test_create_swarm_atomic_recheck_blocks_duplicate_swarm_directly(tmp_path):
     """Calling create_swarm directly when an active swarm is in flight for the
     same session origin raises ValueError via the atomic transaction check."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         s1 = create_swarm(
             conn,
@@ -1356,14 +1356,14 @@ def test_create_swarm_atomic_recheck_concurrent_race(tmp_path):
     import concurrent.futures
 
     db_file = tmp_path / "kanban_race.db"
-    init_conn = kb.connect(db_file)
+    init_conn = kbc.connect(db_file)
     init_conn.close()
 
     results = []
     errors = []
 
     def _attempt():
-        thread_conn = kb.connect(db_file)
+        thread_conn = kbc.connect(db_file)
         try:
             created = create_swarm(
                 thread_conn,
@@ -1450,7 +1450,7 @@ def test_recompute_ready_blocks_synthesizer_when_verifier_metadata_missing_repro
     """Reproduce 2026-08-27 incident: verifier completed but contract/metadata was missing.
     recompute_ready must transition synthesizer to 'blocked' with a descriptive diagnostic event.
     """
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -1511,7 +1511,7 @@ def test_recompute_ready_blocks_synthesizer_when_verifier_metadata_missing_repro
 
 def test_recompute_ready_deduplicates_stall_diagnostic_events(tmp_path):
     """Calling recompute_ready multiple times must not spam duplicate diagnostic events."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -1559,7 +1559,7 @@ def test_recompute_ready_deduplicates_stall_diagnostic_events(tmp_path):
 
 def test_recompute_ready_does_not_fire_diagnostic_while_verifier_running(tmp_path):
     """A verifier that has not completed yet is a normal wait, not a diagnostic anomaly."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,

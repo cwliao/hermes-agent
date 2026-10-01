@@ -12,6 +12,7 @@ import pytest
 from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
 
 
 @pytest.fixture
@@ -337,19 +338,19 @@ def test_cmd_swarm_subscribes_terminal_lanes_when_session_context_present(
 
     conn = kbc.connect()
     try:
-        subs = kb.list_notify_subs(conn, created["synthesizer_id"])
+        subs = kbn.list_notify_subs(conn, created["synthesizer_id"])
         assert len(subs) == 1, subs
         assert subs[0]["platform"] == "telegram"
         assert subs[0]["chat_id"] == "chat-gate8"
-        verifier_subs = kb.list_notify_subs(conn, created["verifier_id"])
+        verifier_subs = kbn.list_notify_subs(conn, created["verifier_id"])
         assert len(verifier_subs) == 1, verifier_subs
         assert verifier_subs[0]["platform"] == "telegram"
         assert verifier_subs[0]["chat_id"] == "chat-gate8"
         # The verifier and synthesizer are subscribed, but not every card in
         # the graph; worker-level subscriptions would turn one swarm into a
         # burst before the gate has produced a user-visible outcome.
-        assert kb.list_notify_subs(conn, created["root_id"]) == []
-        assert len(kb.list_notify_subs(conn, created["worker_ids"][0])) == 0
+        assert kbn.list_notify_subs(conn, created["root_id"]) == []
+        assert len(kbn.list_notify_subs(conn, created["worker_ids"][0])) == 0
     finally:
         conn.close()
 
@@ -368,7 +369,7 @@ def test_cmd_swarm_no_subscription_without_session_context(
 
     conn = kbc.connect()
     try:
-        subs = kb.list_notify_subs(conn, created["synthesizer_id"])
+        subs = kbn.list_notify_subs(conn, created["synthesizer_id"])
     finally:
         conn.close()
     assert subs == []
@@ -408,7 +409,7 @@ def test_cmd_swarm_respects_auto_subscribe_on_create_false(
 
     conn = kbc.connect()
     try:
-        subs = kb.list_notify_subs(conn, created["synthesizer_id"])
+        subs = kbn.list_notify_subs(conn, created["synthesizer_id"])
     finally:
         conn.close()
     assert subs == []
@@ -430,7 +431,7 @@ def test_cmd_swarm_tui_fallback_subscribes_via_session_key(
 
     conn = kbc.connect()
     try:
-        subs = kb.list_notify_subs(conn, created["synthesizer_id"])
+        subs = kbn.list_notify_subs(conn, created["synthesizer_id"])
     finally:
         conn.close()
     assert len(subs) == 1, subs

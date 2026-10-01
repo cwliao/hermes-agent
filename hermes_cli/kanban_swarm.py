@@ -25,6 +25,8 @@ import unicodedata
 from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
 
 logger = logging.getLogger(__name__)
 
@@ -1214,7 +1216,7 @@ def _auto_subscribe_swarm_root(
     platform = str(root.origin_platform)
     delivery_mode = "notify+wake" if platform != "tui" else None
     try:
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=root_id,
             platform=platform,

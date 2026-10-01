@@ -18,7 +18,7 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -82,9 +82,9 @@ def test_specify_records_audit_comment_only_when_author_given(kanban_home):
 
 def test_specify_triage_task_refuses_contract(kanban_home):
     body = 'Review work.\n[swarm:contract] {"role": "verifier", "root_id": "t_r"}'
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = _create_triage(conn, title="verifier task", body=body)
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         ok = kb.specify_triage_task(
             conn,
             tid,
@@ -93,7 +93,7 @@ def test_specify_triage_task_refuses_contract(kanban_home):
             author="specifier-bot",
         )
     assert ok is False
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body
@@ -106,9 +106,9 @@ def test_specify_triage_task_refuses_contract(kanban_home):
 
 def test_specify_triage_task_refuses_malformed_contract(kanban_home):
     body = "Review work.\n[swarm:contract] not-json"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = _create_triage(conn, title="verifier task", body=body)
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         ok = kb.specify_triage_task(
             conn,
             tid,
@@ -116,7 +116,7 @@ def test_specify_triage_task_refuses_malformed_contract(kanban_home):
             body="New body",
         )
     assert ok is False
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body

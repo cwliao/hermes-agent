@@ -16,7 +16,7 @@ def test_review_unknown_argument_rejects_before_handoff(tmp_path, monkeypatch):
     from tools import kanban_tools  # register actual handlers
     from tools.registry import registry
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title='review payload', assignee='builder', workspace_kind='scratch')
         assert kb.claim_task(conn, tid) is not None

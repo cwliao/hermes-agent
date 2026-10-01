@@ -29,7 +29,7 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -80,7 +80,7 @@ def test_legacy_db_migrates_goal_columns(tmp_path, monkeypatch):
     legacy.close()
 
     # init_db runs the additive migration.
-    kb.init_db()
+    kbc.init_db()
     with kbc.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
         assert "goal_mode" in cols
@@ -364,7 +364,7 @@ def _run_cli_goal_loop_q(monkeypatch, task, *, task_id="t1"):
     monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
 
     fake_conn = object()
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: fake_conn)
+    monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: fake_conn)
     monkeypatch.setattr("hermes_cli.kanban_db.get_task", lambda conn, tid: task)
 
     calls = []

@@ -64,7 +64,7 @@ def _normalize_slug_or_400(slug: str) -> Optional[str]:
 
 def _resolve_board(board: Optional[str]) -> Optional[str]:
     """Validate/normalise a board slug query param (400 malformed, 404 unknown);
-    ``None`` when omitted so ``kb.connect()`` falls through to the active board."""
+    ``None`` when omitted so ``kbc.connect()`` falls through to the active board."""
     if board is None or board == "":
         return None
     normed = _normalize_slug_or_400(board)
@@ -85,7 +85,7 @@ def _conn(board: Optional[str] = None):
     """Connect to the already-normalised ``board`` (``None`` = active). ``init_db`` is
     idempotent; running it here lets a fresh install self-heal if POST /tasks arrives first."""
     try:
-        kanban_db.init_db(board=board)
+        kbc.init_db(board=board)
     except Exception as exc:
         log.warning("kanban init_db failed: %s", exc)
     return kbc.connect(board=board)

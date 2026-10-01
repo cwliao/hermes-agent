@@ -352,7 +352,7 @@ class TestWorkerSpawnEnv:
             claim_expires=None,
             tenant=None,
         )
-        kb._default_spawn(task, str(fresh_home / "ws"), board=None)
+        kbd._default_spawn(task, str(fresh_home / "ws"), board=None)
         env = captured["env"]
         assert env["HERMES_KANBAN_BOARD"] == "default"
         assert env["HERMES_KANBAN_DB"] == str(fresh_home / "kanban.db")
@@ -397,7 +397,7 @@ class TestWorkerSpawnEnv:
             origin_session_key="sesskey1",
             origin_profile="default",
         )
-        kb._default_spawn(task, str(fresh_home / "ws"), board=None)
+        kbd._default_spawn(task, str(fresh_home / "ws"), board=None)
         env = captured["env"]
         assert env["HERMES_SESSION_PLATFORM"] == "telegram"
         assert env["HERMES_SESSION_CHAT_ID"] == "-100123"
@@ -440,7 +440,7 @@ class TestWorkerSpawnEnv:
             claim_expires=None,
             tenant=None,
         )
-        kb._default_spawn(task, str(fresh_home / "ws"), board=None)
+        kbd._default_spawn(task, str(fresh_home / "ws"), board=None)
         env = captured["env"]
         assert "HERMES_SESSION_PLATFORM" not in env
         assert "HERMES_SESSION_CHAT_ID" not in env

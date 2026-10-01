@@ -46,7 +46,7 @@ def served(tmp_path, monkeypatch):
 def test_worker_for_served_profile_gets_its_own_env_and_toolset_pin(served, monkeypatch):
     """The dispatcher (root context) spawns alpha's worker: no launch-profile settings leak into the
     child and the ``--toolsets`` pin (whose probes read credentials) is resolved under alpha's scope."""
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="t", assignee="alpha")
@@ -88,7 +88,7 @@ def test_notifier_pings_run_under_the_subscribers_profile(served, monkeypatch):
     """A subscription owned by served alpha is pinged with alpha's home active, so its media policy
     and display language apply — alpha's own adapter was already selected before this fix."""
     (served.alpha / "config.yaml").write_text("display:\n  language: zh\ngateway:\n  strict: true\n")
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="notify parity", assignee="alpha")

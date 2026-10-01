@@ -4,6 +4,7 @@ import json
 import pytest
 
 from hermes_state import SessionDB
+from hermes_cli import kanban_db_connect as kbc
 
 
 @pytest.mark.parametrize("linked,explicit", [(False, None), (True, None), (False, "override")])

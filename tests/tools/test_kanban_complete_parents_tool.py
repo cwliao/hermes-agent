@@ -10,6 +10,7 @@ chasing stale runs while the real blocker was a reopened or unfinished parent.
 import json
 
 import pytest
+from hermes_cli import kanban_db_connect as kbc
 
 
 @pytest.fixture

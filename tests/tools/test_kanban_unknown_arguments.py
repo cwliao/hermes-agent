@@ -1,6 +1,7 @@
 """Unknown review arguments must not silently mutate the board (#115641)."""
 import json
 from pathlib import Path
+from hermes_cli import kanban_db_connect as kbc
 
 
 def test_review_unknown_argument_rejects_before_handoff(tmp_path, monkeypatch):

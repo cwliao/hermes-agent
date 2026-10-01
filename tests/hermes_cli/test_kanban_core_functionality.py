@@ -407,7 +407,7 @@ def test_enforce_max_runtime_integrates_with_dispatch(kanban_home, monkeypatch):
             max_runtime_seconds=1,
         )
         kb.claim_task(conn, tid)
-        kb._set_worker_pid(conn, tid, os.getpid())
+        kbd._set_worker_pid(conn, tid, os.getpid())
         old_started = int(time.time()) - 30
         with kb.write_txn(conn):
             conn.execute(
@@ -424,12 +424,12 @@ def test_enforce_max_runtime_integrates_with_dispatch(kanban_home, monkeypatch):
         # enforce_max_runtime directly proves the kernel wiring. For the
         # dispatch_once assertion, rely on its own code path by calling it
         # after forcing SIGTERM via enforce_max_runtime.
-        before = kb.enforce_max_runtime(conn, signal_fn=_signal)
+        before = kbd.enforce_max_runtime(conn, signal_fn=_signal)
         assert tid in before, "kernel enforce_max_runtime should catch the overrun"
 
         # Now a second dispatch_once run should be a no-op on this task
         # (already released). Confirm the loop doesn't re-report it.
-        res = kb.dispatch_once(conn, spawn_fn=lambda t, ws: None)
+        res = kbd.dispatch_once(conn, spawn_fn=lambda t, ws: None)
         task = kb.get_task(conn, tid)
         # After timeout, task is back in 'ready' and will be re-spawned
         # by the same pass. That's the intended behaviour.

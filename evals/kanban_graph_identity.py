@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from hermes_cli import kanban_db_connect as kbc
 
 
 def main():

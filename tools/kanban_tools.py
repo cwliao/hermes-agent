@@ -28,6 +28,8 @@ from tools.kanban_tools_schemas import (
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_dispatch as kbd
 
 logger = logging.getLogger(__name__)
 
@@ -1518,8 +1520,8 @@ def _handle_create(args: dict, **kw) -> str:
             if guard:
                 return guard
         _assignee_name = str(assignee).strip()
-        if kbn.assignee_availability(conn, _assignee_name) is None:
-            return tool_error(kbn.assignee_unavailable_message(conn, _assignee_name))
+        if kb.assignee_availability(conn, _assignee_name) is None:
+            return tool_error(kb.assignee_unavailable_message(conn, _assignee_name))
         from gateway.session_context import get_session_env
         from tools.async_delegation import _current_origin_session_id
         self_tid = (os.environ.get("HERMES_KANBAN_TASK")
@@ -1856,10 +1858,10 @@ def _handle_swarm(args: dict, **kw) -> str:
             ("synthesizer_assignee", str(synthesizer_assignee)),
         ])
         for field_name, assignee_name in routing:
-            if kbn.assignee_availability(conn, assignee_name) is None:
+            if kb.assignee_availability(conn, assignee_name) is None:
                 return tool_error(
                     f"kanban_swarm: {field_name}={assignee_name!r} is unavailable. "
-                    f"{kbn.assignee_unavailable_message(conn, assignee_name)}"
+                    f"{kb.assignee_unavailable_message(conn, assignee_name)}"
                 )
         origin = {}
         from gateway.session_context import resolve_notify_origin

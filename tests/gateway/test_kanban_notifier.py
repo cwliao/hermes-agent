@@ -154,7 +154,7 @@ def test_synthesizer_notifier_sends_result_not_status_summary(tmp_path, monkeypa
             assignee="synthesizer",
             body='role = "synthesizer"\n[swarm:contract]',
         )
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=tid,
             platform="telegram",
@@ -223,7 +223,7 @@ def test_swarm_root_subscription_only_notifies_worker_excuse_events(
                 "origin_profile": "main",
             },
         )
-        subs = kb.list_notify_subs(conn, created.root_id)
+        subs = kbn.list_notify_subs(conn, created.root_id)
         assert len(subs) == 1
         assert subs[0]["delivery_metadata"] == {
             "event_kind_allowlist": "worker_excused_needs_input",

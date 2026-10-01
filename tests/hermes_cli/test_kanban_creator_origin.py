@@ -1,5 +1,6 @@
 """All explicit creator paths share durable lineage without graph coupling."""
 import pytest
+from hermes_cli import kanban_db_connect as kbc
 
 
 @pytest.mark.parametrize("surface", ["db", "builtin", "cli"])

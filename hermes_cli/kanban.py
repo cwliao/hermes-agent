@@ -9,12 +9,15 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import logging
 import os
 import shlex
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from hermes_cli.config import cfg_get, load_config
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -30,9 +33,18 @@ from hermes_cli.kanban_output import (
 )
 from hermes_cli.kanban_boards import _dispatch_boards
 from hermes_cli.kanban_ops import (
-    _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
+    _cmd_daemon, _kanban_config, _cmd_repair, _cmd_tail, _cmd_watch,
 )
 from hermes_cli.kanban_parser import build_parser  # noqa: F401  (re-exported: hermes_cli.main, run_slash)
+
+
+_GC_ALERT_DEDUP_SECONDS = 30 * 60
+_GC_ALERT_DEDUP_FILENAME = "kanban_gc.last_alert"
+
+
+def _resolve_max_in_progress(configured):
+    """Shared resolver seam for CLI/gateway concurrency semantics."""
+    return kbd.resolve_max_in_progress(configured)
 
 
 # --- Flag parsing helpers ---
@@ -40,6 +52,64 @@ from hermes_cli.kanban_parser import build_parser  # noqa: F401  (re-exported: h
 def _none_profile(value: str) -> Optional[str]:
     """``none`` / ``-`` / ``null`` mean "unassign"."""
     return None if value.lower() in {"none", "-", "null"} else value
+
+
+def _parse_nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
+def _send_gc_alert(text: str) -> bool:
+    """Best-effort, time-deduplicated Telegram alert for dead-graph GC."""
+    try:
+        from hermes_constants import get_hermes_home
+        from hermes_cli.failed_unit_allowlist_repair import _send_telegram
+
+        now = int(time.time())
+        dedup_path = get_hermes_home() / "gateway" / _GC_ALERT_DEDUP_FILENAME
+        try:
+            last = int(dedup_path.read_text(encoding="utf-8").strip() or "0")
+        except (OSError, ValueError):
+            last = 0
+        if now - last < _GC_ALERT_DEDUP_SECONDS:
+            logging.getLogger(__name__).info("kanban dead-graph GC alert suppressed by dedup window")
+            return True
+        if not _send_telegram(text):
+            return False
+        try:
+            dedup_path.parent.mkdir(parents=True, exist_ok=True)
+            dedup_path.write_text(str(now), encoding="utf-8")
+        except OSError:
+            logging.getLogger(__name__).warning("kanban dead-graph GC alert sent but dedup state could not be saved")
+        return True
+    except Exception as exc:  # noqa: BLE001 -- alerts are strictly best-effort
+        logging.getLogger(__name__).warning("kanban dead-graph GC Telegram alert failed: %s", exc)
+        return False
+
+
+def _dead_graph_root_labels(conn, ordered_ids: list[str]) -> list[str]:
+    """Return root task labels before ``archive_graph`` removes the links."""
+    if not ordered_ids:
+        return []
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"SELECT id, title FROM tasks WHERE id IN ({placeholders})", ordered_ids
+    ).fetchall()
+    titles = {row["id"]: row["title"] for row in rows}
+    child_rows = conn.execute(
+        f"SELECT child_id FROM task_links WHERE parent_id IN ({placeholders}) "
+        f"AND child_id IN ({placeholders})", [*ordered_ids, *ordered_ids]
+    ).fetchall()
+    child_ids = {row["child_id"] for row in child_rows}
+    root_ids = [task_id for task_id in ordered_ids if task_id not in child_ids]
+    if not root_ids:
+        root_ids = ordered_ids[-1:]
+    return [f"{titles.get(task_id, '(deleted)')} ({task_id})" for task_id in root_ids[:10]]
 
 
 def _parse_metadata_flag(raw: Optional[str]) -> tuple[Optional[dict], int]:
@@ -317,6 +387,87 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
                       f"Heartbeat recorded for {args.task_id}")
 
 
+def _default_watcher_id() -> str:
+    import socket
+
+    return os.environ.get("HERMES_WATCHER_ID") or f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _cmd_watcher(args: argparse.Namespace) -> int:
+    action = getattr(args, "watcher_action", None)
+    if not action:
+        print("usage: hermes kanban watcher {register|heartbeat|unregister|list}", file=sys.stderr)
+        return 2
+    if action == "list":
+        with kbc.connect_closing() as conn:
+            data = kb.list_external_watchers(
+                conn, include_expired=bool(getattr(args, "include_expired", False))
+            )
+        if getattr(args, "json", False):
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+        elif not data:
+            print("(no active external watcher leases)")
+        else:
+            print(f"{'ASSIGNEE':20s}  {'WATCHER':24s}  {'EXPIRES':12s}  ACTIVE")
+            for entry in data:
+                print(f"{entry['assignee']:20s}  {entry['watcher_id']:24s}  "
+                      f"{_fmt_ts(entry['expires_at']):12s}  {'yes' if entry['active'] else 'no'}")
+        return 0
+
+    watcher_id = getattr(args, "watcher_id", None) or _default_watcher_id()
+    try:
+        if action == "register":
+            metadata = {}
+            if getattr(args, "metadata", None):
+                decoded = json.loads(args.metadata)
+                if not isinstance(decoded, dict):
+                    raise ValueError("--metadata must be a JSON object")
+                metadata = decoded
+            with kbc.connect_closing() as conn:
+                expires_at = kb.register_external_watcher(
+                    conn, assignee=args.assignee, watcher_id=watcher_id,
+                    ttl_seconds=args.ttl, capabilities=args.capability, metadata=metadata,
+                )
+            payload = {"ok": True, "action": action, "assignee": args.assignee,
+                       "watcher_id": watcher_id, "expires_at": expires_at}
+        elif action == "heartbeat":
+            with kbc.connect_closing() as conn:
+                expires_at = kb.heartbeat_external_watcher(
+                    conn, assignee=args.assignee, watcher_id=watcher_id, ttl_seconds=args.ttl,
+                )
+            if expires_at is None:
+                print(f"no watcher lease for assignee={args.assignee!r}, watcher_id={watcher_id!r}; register first",
+                      file=sys.stderr)
+                return 1
+            payload = {"ok": True, "action": action, "assignee": args.assignee,
+                       "watcher_id": watcher_id, "expires_at": expires_at}
+        elif action == "unregister":
+            with kbc.connect_closing() as conn:
+                removed = kb.unregister_external_watcher(
+                    conn, assignee=args.assignee, watcher_id=watcher_id
+                )
+            payload = {"ok": removed, "action": action, "assignee": args.assignee,
+                       "watcher_id": watcher_id}
+            if not removed:
+                print("no matching watcher lease", file=sys.stderr)
+                return 1
+        else:
+            print(f"kanban watcher: unknown action {action!r}", file=sys.stderr)
+            return 2
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"kanban watcher: {exc}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    elif action == "register":
+        print(f"Registered {args.assignee!r} for watcher {watcher_id!r} until {_fmt_ts(payload['expires_at'])}")
+    elif action == "heartbeat":
+        print(f"Heartbeat extended for {args.assignee!r} / {watcher_id!r} until {_fmt_ts(payload['expires_at'])}")
+    else:
+        print(f"Unregistered {args.assignee!r} / {watcher_id!r}")
+    return 0
+
+
 def _cmd_assignees(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         data = kb.known_assignees(conn)
@@ -406,6 +557,7 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
             created_by=args.created_by or _profile_author(), priority=args.priority,
             idempotency_key=getattr(args, "idempotency_key", None),
         )
+        _maybe_auto_subscribe_swarm(conn, created.synthesizer_id, verifier_id=created.verifier_id)
     if getattr(args, "json", False):
         _print_json(created.as_dict())
     else:
@@ -414,6 +566,44 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
               f"Verifier: {created.verifier_id}\n"
               f"Synthesizer: {created.synthesizer_id}")
     return 0
+
+
+def _maybe_auto_subscribe_swarm(
+    conn: Any, synthesizer_id: str, *, verifier_id: str | None = None,
+) -> bool:
+    """Best-effort subscription of the originating session to swarm terminals."""
+    try:
+        cfg = load_config()
+        if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
+            return False
+    except Exception:
+        pass
+    platform = chat_id = ""
+    try:
+        from gateway.session_context import get_session_env
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        if not platform or not chat_id:
+            session_key = get_session_env("HERMES_SESSION_KEY", "") or os.environ.get("HERMES_SESSION_KEY", "")
+            if not session_key:
+                return False
+            platform, chat_id = "tui", session_key
+        thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "") or None
+        user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+        notifier_profile = get_session_env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE")
+        subscribed = False
+        for task_id in dict.fromkeys(task_id for task_id in (verifier_id, synthesizer_id) if task_id):
+            try:
+                kb.add_notify_sub(conn, task_id=task_id, platform=platform, chat_id=chat_id,
+                                  thread_id=thread_id, user_id=user_id, notifier_profile=notifier_profile)
+                subscribed = True
+            except Exception:
+                logging.getLogger(__name__).warning("swarm auto-subscribe failed for task %s (non-fatal)", task_id,
+                                                    exc_info=True)
+        return subscribed
+    except Exception:
+        logging.getLogger(__name__).warning("swarm auto-subscribe setup failed (non-fatal)", exc_info=True)
+        return False
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
@@ -1317,6 +1507,151 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
                              ("task_id", "ok", "reason", "fanout", "child_ids", "new_title"), _decompose_ok_line)
 
 
+def _cmd_gc(args: argparse.Namespace) -> int:
+    """Remove archived workspaces and optionally archive abandoned task graphs."""
+    import shutil
+
+    dead_graphs = getattr(args, "dead_graphs", False)
+    dry = getattr(args, "dry_run", False)
+    tenant = getattr(args, "tenant", None)
+    tenant = tenant.strip() if isinstance(tenant, str) else tenant
+    include_untenanted = bool(getattr(args, "include_untenanted", False))
+    scope_label = f"tenant {tenant!r}" if tenant else "untenanted graphs"
+    if dry and not dead_graphs:
+        print("--dry-run only applies to --dead-graphs; nothing to preview")
+        return 0
+    if dead_graphs and not tenant and not include_untenanted:
+        print("--dead-graphs requires either --tenant <name> or --include-untenanted: refusing to sweep the whole board",
+              file=sys.stderr)
+        return 2
+    if dry:
+        with kbc.connect_closing() as conn:
+            graphs = kb.find_dead_graphs(conn, older_than_seconds=getattr(args, "dead_graph_days", 7) * 86400,
+                                         tenant=tenant, include_untenanted=include_untenanted)
+        for ordered in graphs:
+            print(f"would archive graph of {len(ordered)}: " + " ".join(ordered))
+        print(f"GC dry run: {len(graphs)} abandoned graph(s) in {scope_label} would be archived; nothing was changed")
+        return 0
+
+    scratch_root = kb.workspaces_root()
+    removed_ws = 0
+    with kbc.connect_closing() as conn:
+        rows = conn.execute("SELECT id, workspace_kind, workspace_path, branch_name FROM tasks WHERE status = 'archived'").fetchall()
+    for row in rows:
+        if row["workspace_kind"] == "worktree":
+            path = row["workspace_path"]
+            if path and Path(path).is_dir():
+                kbw._cleanup_worktree_workspace(row["id"], path, row["branch_name"])
+                if not Path(path).is_dir():
+                    removed_ws += 1
+            continue
+        if row["workspace_kind"] != "scratch":
+            continue
+        path = Path(row["workspace_path"] or (scratch_root / row["id"]))
+        try:
+            path = path.resolve()
+            path.relative_to(scratch_root.resolve())
+        except (OSError, ValueError):
+            continue
+        if path.exists() and path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed_ws += 1
+
+    event_days = getattr(args, "event_retention_days", 30)
+    log_days = getattr(args, "log_retention_days", 30)
+    with kbc.connect_closing() as conn:
+        removed_events = kb.gc_events(conn, older_than_seconds=event_days * 86400)
+    removed_logs = kb.gc_worker_logs(older_than_seconds=log_days * 86400)
+    archived_graphs = archived_cards = partial_graphs = partial_cards = 0
+    partial_graph_ids = []
+    cap_hit = False
+    archived_root_labels = []
+    if dead_graphs:
+        status_snapshot = {}
+        max_dead_graphs = getattr(args, "max_dead_graphs", kb.DEFAULT_DEAD_GRAPH_ARCHIVE_CAP)
+        try:
+            max_dead_graphs = int(max_dead_graphs)
+        except (TypeError, ValueError):
+            print("--max-dead-graphs must be a non-negative integer", file=sys.stderr)
+            return 2
+        if max_dead_graphs < 0:
+            print("--max-dead-graphs must be a non-negative integer", file=sys.stderr)
+            return 2
+        with kbc.connect_closing() as conn:
+            graphs = kb.find_dead_graphs(conn, older_than_seconds=getattr(args, "dead_graph_days", 7) * 86400,
+                                         tenant=tenant, include_untenanted=include_untenanted,
+                                         _status_snapshot=status_snapshot)
+            if len(graphs) > max_dead_graphs:
+                cap_hit = True
+                print(f"Dead-graph archive cap hit: found {len(graphs)} candidate graph(s), maximum is {max_dead_graphs}; archived none",
+                      file=sys.stderr)
+            else:
+                for ordered in graphs:
+                    roots = _dead_graph_root_labels(conn, ordered)
+                    graph_archived = kb.archive_graph(conn, ordered, allowed_statuses=status_snapshot)
+                    archived_cards += graph_archived
+                    if graph_archived == len(ordered):
+                        archived_graphs += 1
+                        archived_root_labels.extend(roots)
+                    elif graph_archived:
+                        partial_graphs += 1
+                        partial_cards += graph_archived
+                        partial_graph_ids.append(ordered)
+        if cap_hit:
+            _send_gc_alert(f"🚨 Hermes Kanban dead-graph GC cap hit: found {len(graphs)} candidate graph(s) in {scope_label}, exceeding the cap of {max_dead_graphs}; archived none.")
+        elif archived_graphs:
+            _send_gc_alert(f"⚠️ Hermes Kanban dead-graph GC archived {archived_graphs} graph(s) / {archived_cards} card(s) in {scope_label}. Roots: {', '.join(archived_root_labels[:10]) or '(root details unavailable)'}.")
+        if partial_graphs:
+            _send_gc_alert(f"⚠️ Hermes Kanban dead-graph GC partially archived {partial_graphs} graph(s) / {partial_cards} card(s) in {scope_label}; CAS rejected the remaining cards. Graphs: {'; '.join(' '.join(g) for g in partial_graph_ids[:10])}.")
+    summary = f"GC complete: {removed_ws} workspace(s), {removed_events} event row(s), {removed_logs} log file(s) removed"
+    if dead_graphs:
+        summary += f", {archived_cards} card(s) in {archived_graphs} abandoned graph(s) archived"
+        if cap_hit:
+            summary += "; archive cap hit, no dead graphs archived"
+        if partial_graphs:
+            summary += f"; {partial_cards} card(s) in {partial_graphs} graph(s) partially archived"
+    print(summary)
+    return 0
+
+
+def _cmd_dispatch(args: argparse.Namespace) -> int:
+    """Run one dispatcher pass, preserving the facade resolver seam."""
+    try:
+        cfg = load_config()
+        section = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        default_assignee = (section.get("default_assignee") or "").strip() or None
+        per_profile = kbd._positive_int(section.get("max_in_progress_per_profile"), None)
+        configured = getattr(args, "max_in_progress", None)
+        max_in_progress = _resolve_max_in_progress(
+            configured if configured is not None else section.get("max_in_progress")
+        )
+        max_spawn = getattr(args, "max", None)
+        if max_spawn is None:
+            max_spawn = kbd._positive_int(section.get("max_spawn"), None)
+    except Exception:
+        default_assignee = per_profile = max_in_progress = None
+        max_spawn = getattr(args, "max", None)
+    with kbc.connect_closing() as conn:
+        result = kbd.dispatch_once(
+            conn, dry_run=args.dry_run, max_spawn=max_spawn,
+            max_in_progress=max_in_progress,
+            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            default_assignee=default_assignee, max_in_progress_per_profile=per_profile,
+        )
+    if getattr(args, "json", False):
+        _print_json({"spawned": [{"task_id": tid, "assignee": who, "workspace": ws}
+                                  for tid, who, ws in result.spawned],
+                     "promoted": result.promoted, "memory_pressure": result.memory_pressure}, ascii=True)
+        return 0
+    print(f"Promoted:     {result.promoted}")
+    print(f"Spawned:      {len(result.spawned)}")
+    for tid, who, ws in result.spawned:
+        print(f"  - {tid}  ->  {who}  @ {ws or '-'}{' (dry)' if args.dry_run else ''}")
+    if result.memory_pressure:
+        print(f"Memory pressure {result.memory_pressure}: new workers restricted this tick")
+    return 0
+
+
 _HANDLERS = {
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
@@ -1337,6 +1672,7 @@ _HANDLERS = {
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
     "context": _cmd_context, "specify": _cmd_specify, "decompose": _cmd_decompose,
     "gc": _cmd_gc,
+    "watcher": _cmd_watcher,
 }
 
 
@@ -1434,4 +1770,3 @@ def run_slash(rest: str) -> str:
     if err and out:
         return f"{out}\n{err}"
     return err if err else (out or "(no output)")
-

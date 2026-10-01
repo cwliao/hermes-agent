@@ -108,7 +108,7 @@ def test_legacy_db_without_subs_table_counts_zero_and_stays_unmigrated(tmp_path)
 
 def test_count_notify_subs_filters_profile_owners(tmp_path):
     db_path = tmp_path / "owners.db"
-    kb.init_db(db_path)
+    kbc.init_db(db_path)
     conn = kbc.connect(db_path)
     try:
         for profile in ("default", "writer", None):

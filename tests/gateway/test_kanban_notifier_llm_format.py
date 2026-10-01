@@ -5,6 +5,7 @@ from gateway.config import Platform
 import gateway.kanban_watchers as kanban_watchers
 from gateway.run import GatewayRunner
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 
 
 class RecordingAdapter:
@@ -51,8 +52,8 @@ def _set_notifier_llm_gate(monkeypatch, enabled):
 def _create_completed_subscription(tmp_path, monkeypatch):
     db_path = tmp_path / "notifier-llm-format.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
-    kb.init_db()
-    conn = kb.connect()
+    kbc.init_db()
+    conn = kbc.connect()
     try:
         task_id = kb.create_task(conn, title="notify once")
         kb.add_notify_sub(

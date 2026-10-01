@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 
 
 @pytest.fixture
@@ -32,7 +33,7 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -61,7 +62,7 @@ def _swarm(conn, *, tenant="gc-test"):
 
 def test_children_are_archived_before_parents(kanban_home):
     """The property the whole design rests on."""
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         root, w1, w2, verifier = _swarm(conn)
         _age(conn, [root, w1, w2, verifier], 30 * 24 * 3600)
 
@@ -76,7 +77,7 @@ def test_children_are_archived_before_parents(kanban_home):
 def test_archiving_the_graph_never_promotes_the_verifier(kanban_home):
     """The hazard, pinned. Archive in the returned order and the verifier
     must go straight from todo to archived -- never through ready."""
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         root, w1, w2, verifier = _swarm(conn)
         _age(conn, [root, w1, w2, verifier], 30 * 24 * 3600)
 
@@ -99,7 +100,7 @@ def test_wrong_order_does_promote_it(kanban_home):
     """Negative control for the ordering. Archive parents first and the
     promotion happens -- so the ordering above is load-bearing, not a
     stylistic choice."""
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         root, w1, w2, verifier = _swarm(conn)
         kb.archive_task(conn, w1)
         kb.archive_task(conn, w2)
@@ -111,7 +112,7 @@ def test_wrong_order_does_promote_it(kanban_home):
 def test_a_live_card_keeps_its_graph(kanban_home):
     """One dispatchable card protects its siblings. A graph is abandoned
     together or not at all."""
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         root, w1, w2, verifier = _swarm(conn)
         kb.unblock_task(conn, w1)
         assert kb.get_task(conn, w1).status in ("ready", "todo")
@@ -122,7 +123,7 @@ def test_a_live_card_keeps_its_graph(kanban_home):
 
 
 def test_a_recent_graph_is_left_alone(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         _swarm(conn)
         assert kb.find_dead_graphs(conn, older_than_seconds=7 * 24 * 3600, tenant="gc-test") == []
 
@@ -130,7 +131,7 @@ def test_a_recent_graph_is_left_alone(kanban_home):
 def test_a_fully_finished_graph_is_not_garbage(kanban_home):
     """Everything done is history, not residue. Archiving it would hide
     completed work from the board for no benefit."""
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         root = kb.create_task(conn, title="root")
         child = kb.create_task(conn, title="child", parents=[root])
         kb.complete_task(conn, root, summary="ok")
@@ -142,7 +143,7 @@ def test_a_fully_finished_graph_is_not_garbage(kanban_home):
 def test_a_graph_in_another_tenant_is_not_swept(kanban_home):
     """Scoping is the only thing separating a disposable graph from a parked
     one, since nothing on a card marks it disposable."""
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         root, w1, w2, verifier = _swarm(conn, tenant="someone-elses-backlog")
         _age(conn, [root, w1, w2, verifier], 30 * 24 * 3600)
         assert kb.find_dead_graphs(
@@ -151,19 +152,19 @@ def test_a_graph_in_another_tenant_is_not_swept(kanban_home):
 
 
 def test_no_scope_returns_no_dead_graphs(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         _swarm(conn)
         assert kb.find_dead_graphs(conn, older_than_seconds=0) == []
 
 
 def test_empty_tenant_is_rejected(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         with pytest.raises(ValueError, match="non-empty"):
             kb.find_dead_graphs(conn, older_than_seconds=0, tenant="")
 
 
 def test_tenant_and_untenanted_scope_are_mutually_exclusive(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         with pytest.raises(ValueError, match="mutually exclusive"):
             kb.find_dead_graphs(
                 conn,
@@ -174,7 +175,7 @@ def test_tenant_and_untenanted_scope_are_mutually_exclusive(kanban_home):
 
 
 def test_cross_tenant_boundary_graph_is_excluded_from_both_scopes(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         root = kb.create_task(conn, title="tenant root", tenant="X")
         kb.block_task(conn, root, reason="gave up")
         child = kb.create_task(conn, title="un tenant child", parents=[root])
@@ -190,7 +191,7 @@ def test_cross_tenant_boundary_graph_is_excluded_from_both_scopes(kanban_home):
 
 
 def test_untenanted_multicard_dead_graph_is_swept(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         ids = _swarm(conn, tenant=None)
         _age(conn, ids, 30 * 24 * 3600)
         root, w1, w2, verifier = ids
@@ -204,7 +205,7 @@ def test_untenanted_multicard_dead_graph_is_swept(kanban_home):
 
 
 def test_untenanted_standalone_card_is_not_swept(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task_id = kb.create_task(
             conn, title="parked backlog", initial_status="blocked",
         )
@@ -215,7 +216,7 @@ def test_untenanted_standalone_card_is_not_swept(kanban_home):
 
 
 def test_archive_graph_status_snapshot_is_compare_and_swap_guarded(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task_id = kb.create_task(
             conn, title="status changed", initial_status="blocked",
         )
@@ -229,7 +230,7 @@ def test_archive_graph_status_snapshot_is_compare_and_swap_guarded(kanban_home):
 
 
 def test_archive_graph_accepts_find_dead_graph_status_snapshot_strings(kanban_home):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         ids = _swarm(conn, tenant=None)
         _age(conn, ids, 30 * 24 * 3600)
         status_snapshot = {}
@@ -275,7 +276,7 @@ def test_cli_dead_graphs_without_scope_is_rejected(kanban_home, capsys):
 def test_dead_graph_cap_archives_nothing_and_alerts(kanban_home, monkeypatch):
     from hermes_cli.kanban import _cmd_gc
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         first = _swarm(conn, tenant=None)
         second = _swarm(conn, tenant=None)
         _age(conn, [*first, *second], 30 * 24 * 3600)
@@ -293,7 +294,7 @@ def test_dead_graph_cap_archives_nothing_and_alerts(kanban_home, monkeypatch):
     assert _cmd_gc(args) == 0
     assert len(alerts) == 1
     assert "cap hit" in alerts[0]
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         assert all(
             kb.get_task(conn, task_id).status != "archived"
             for task_id in [*first, *second]
@@ -303,7 +304,7 @@ def test_dead_graph_cap_archives_nothing_and_alerts(kanban_home, monkeypatch):
 def test_cli_dead_graphs_archive_real_untenanted_graph(kanban_home, monkeypatch):
     from hermes_cli.kanban import _cmd_gc
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         ids = _swarm(conn, tenant=None)
         _age(conn, ids, 30 * 24 * 3600)
 
@@ -313,7 +314,7 @@ def test_cli_dead_graphs_archive_real_untenanted_graph(kanban_home, monkeypatch)
         include_untenanted=True,
     )
     assert _cmd_gc(args) == 0
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         statuses = [kb.get_task(conn, task_id).status for task_id in ids]
     assert statuses == ["archived"] * len(ids)
 
@@ -324,7 +325,7 @@ def test_cli_partial_dead_graph_is_not_counted_as_fully_archived(
     from hermes_cli import kanban as cli_kanban
     from hermes_cli.kanban import _cmd_gc
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         ids = _swarm(conn, tenant=None)
         _age(conn, ids, 30 * 24 * 3600)
 
@@ -351,7 +352,7 @@ def test_cli_partial_dead_graph_is_not_counted_as_fully_archived(
     assert _cmd_gc(args) == 0
     assert any("partially archived" in alert for alert in alerts)
     assert all("Roots:" not in alert for alert in alerts)
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         assert kb.get_task(conn, ids[0]).status != "archived"
 
 
@@ -376,7 +377,7 @@ class TestGcCommandGuards:
     def test_dry_run_does_not_purge_events(self, kanban_home, capsys):
         from hermes_cli.kanban import _cmd_gc
 
-        with kb.connect() as conn:
+        with kbc.connect() as conn:
             root, w1, w2, verifier = _swarm(conn)
             _age(conn, [root, w1, w2, verifier], 30 * 24 * 3600)
             before = conn.execute(
@@ -386,7 +387,7 @@ class TestGcCommandGuards:
         assert _cmd_gc(self._args(dead_graphs=True, dry_run=True,
                                   tenant="gc-test")) == 0
 
-        with kb.connect() as conn:
+        with kbc.connect() as conn:
             after = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
             assert kb.get_task(conn, verifier).status != "archived"
         assert after == before, "a dry run deleted event rows"

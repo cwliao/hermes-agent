@@ -280,7 +280,7 @@ def test_missing_db_pin_never_resolves_an_ambient_board(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     with kbc.connect() as conn:
         task_id = kb.create_task(conn, title="ambient live task")
         assert kb.claim_task(conn, task_id, claimer="lk", ttl_seconds=3600) is not None

@@ -26,7 +26,7 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -142,7 +142,7 @@ def test_cli_specify_tenant_filter(kanban_home, capsys):
 def test_specify_refuses_task_with_contract(kanban_home):
     contract_line = '[swarm:contract] {"role": "worker", "root_id": "t_root"}'
     body_with_contract = f"Do work.\n{contract_line}"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="swarm worker", body=body_with_contract, triage=True)
 
     content = jsonlib.dumps({
@@ -155,7 +155,7 @@ def test_specify_refuses_task_with_contract(kanban_home):
 
     assert outcome.ok is False
     assert "refusing to auto-decompose" in outcome.reason
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body_with_contract
@@ -168,13 +168,13 @@ def test_specify_refuses_task_with_contract(kanban_home):
 
 def test_specify_refuses_task_with_malformed_contract(kanban_home):
     body_with_malformed = "Do work.\n[swarm:contract] {bad-json"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="swarm worker", body=body_with_malformed, triage=True)
 
     outcome = spec.specify_task(tid, author="ace")
     assert outcome.ok is False
     assert "refusing to auto-decompose" in outcome.reason
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body_with_malformed

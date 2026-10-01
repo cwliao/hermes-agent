@@ -14,7 +14,7 @@ def test_worker_create_keeps_durable_origin(tmp_path, monkeypatch, linked, expli
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    kb.init_db()
+    kbc.init_db()
     with kbc.connect_closing() as conn:
         owner = kb.create_task(conn, title="owner", session_id="durable")
         kn.add_notify_sub(conn, task_id=owner, platform="discord", chat_id="chat",
@@ -53,7 +53,7 @@ def test_tool_subscription_captures_conversation_anchors(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    kb.init_db()
+    kbc.init_db()
     tokens = set_session_vars(platform="discord", chat_id="thread", chat_type="thread",
                              scope_id="guild", parent_chat_id="forum", profile="default")
     try:
@@ -79,7 +79,7 @@ def test_tool_create_only_stamps_persisted_ambient_session(tmp_path, monkeypatch
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    kb.init_db()
+    kbc.init_db()
     state = SessionDB(db_path=tmp_path / "state.db")
     if persisted:
         state.create_session(session_id, source="cli")
@@ -106,7 +106,7 @@ def test_tool_create_stamps_request_scoped_session_over_process_env(tmp_path, mo
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.setenv("HERMES_SESSION_ID", "other-session")
-    kb.init_db()
+    kbc.init_db()
     state = SessionDB(db_path=tmp_path / "state.db")
     for sid in ("other-session", "ordering-session"):
         state.create_session(sid, source="cli")

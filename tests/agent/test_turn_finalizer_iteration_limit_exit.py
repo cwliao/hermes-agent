@@ -198,7 +198,7 @@ def test_kanban_terminal_success_at_budget_boundary_is_not_recorded_as_timeout(m
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-terminal")
     record = MagicMock(name="record_task_failure")
     conn = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
+    monkeypatch.setattr("hermes_cli.kanban_db_connect.connect", lambda: conn)
     monkeypatch.setattr("hermes_cli.kanban_db._record_task_failure", record)
     agent = _LimitAgent()
 

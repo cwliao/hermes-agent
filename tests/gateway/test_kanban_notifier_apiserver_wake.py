@@ -106,7 +106,7 @@ def test_apiserver_sub_wakes_subscription_destination_via_self_post(tmp_path, mo
     """An api_server subscription wakes its chat_id destination, not the
     task's worker-session provenance or a build_session_key()-derived session."""
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver.db"))
-    kb.init_db()
+    kbc.init_db()
     tid = _create_completed_subscription(
         "api_server", "origin-session", session_id="worker-session",
     )
@@ -148,7 +148,7 @@ def test_apiserver_subscriptions_have_independent_wake_destinations(
     tmp_path, monkeypatch,
 ):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver-multi.db"))
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         tid = kb.create_task(
@@ -189,7 +189,7 @@ def test_apiserver_wake_failure_rewinds_then_retries_destination(
     tmp_path, monkeypatch,
 ):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "apiserver-retry.db"))
-    kb.init_db()
+    kbc.init_db()
     tid = _create_completed_subscription(
         "api_server", "origin-session", session_id="worker-session",
     )

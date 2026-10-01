@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.kanban_swarm import (
     _WORKER_RESPONSE_DEADLINE_SECONDS,
@@ -28,7 +29,7 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -103,7 +104,7 @@ def _lane_specs():
 def test_overdue_running_worker_is_confirmed_dead_and_excused(
     kanban_home, monkeypatch,
 ):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         root_id, worker_id = _make_deadline_worker(conn, status="running")
         monkeypatch.setattr(kb, "_claimer_id", lambda: "test-host:dispatcher")
@@ -125,7 +126,7 @@ def test_overdue_running_worker_is_confirmed_dead_and_excused(
 def test_overdue_running_worker_that_survives_termination_is_deferred(
     kanban_home, monkeypatch,
 ):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         root_id, worker_id = _make_deadline_worker(conn, status="running")
         monkeypatch.setattr(kb, "_claimer_id", lambda: "test-host:dispatcher")
@@ -153,7 +154,7 @@ def test_overdue_running_worker_that_survives_termination_is_deferred(
 def test_overdue_sticky_needs_input_worker_emits_root_excuse_event(
     kanban_home,
 ):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         root_id, worker_id = _make_deadline_worker(conn, status="blocked")
 
@@ -177,7 +178,7 @@ def test_overdue_sticky_needs_input_worker_emits_root_excuse_event(
 def test_overdue_ready_or_todo_worker_is_excused_without_event(
     kanban_home, status,
 ):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         root_id, worker_id = _make_deadline_worker(conn, status=status)
         before = len(kb.list_events(conn, root_id))
@@ -195,7 +196,7 @@ def test_overdue_ready_or_todo_worker_is_excused_without_event(
 
 
 def test_not_yet_overdue_worker_is_untouched(kanban_home):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         root_id, worker_id = _make_deadline_worker(conn, overdue=False)
         worker_events = kb.list_events(conn, worker_id)
@@ -211,7 +212,7 @@ def test_not_yet_overdue_worker_is_untouched(kanban_home):
 
 
 def test_excuse_overdue_workers_is_idempotent_after_archiving(kanban_home):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         root_id, worker_id = _make_deadline_worker(conn)
 
@@ -226,7 +227,7 @@ def test_excuse_overdue_workers_is_idempotent_after_archiving(kanban_home):
 
 
 def test_dispatcher_reports_overdue_excuses(kanban_home, monkeypatch):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         monkeypatch.setattr(ks, "excuse_overdue_workers", lambda connection: 3)
         monkeypatch.setattr(
@@ -241,7 +242,7 @@ def test_dispatcher_reports_overdue_excuses(kanban_home, monkeypatch):
 def test_dynamic_verifier_count_uses_excused_worker_ids_and_has_floor(
     kanban_home,
 ):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         created = create_swarm(
             conn,
@@ -300,7 +301,7 @@ def test_dynamic_verifier_count_uses_excused_worker_ids_and_has_floor(
 
 
 def test_complete_task_uses_dynamic_verifier_count_from_blackboard(kanban_home):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         created = create_swarm(
             conn,

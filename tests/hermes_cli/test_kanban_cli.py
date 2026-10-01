@@ -20,7 +20,7 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -155,7 +155,7 @@ def test_board_override_is_isolated_per_concurrent_call(kanban_home, monkeypatch
     kc.build_parser(sub)
 
     barrier = threading.Barrier(2)
-    original_init_db = kb.init_db
+    original_init_db = kbc.init_db
 
     def slow_init_db(*args, **kwargs):
         try:
@@ -349,7 +349,7 @@ def test_cmd_swarm_subscribes_terminal_lanes_when_session_context_present(
     assert rc == 0
     created = json.loads(capsys.readouterr().out)
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         subs = kb.list_notify_subs(conn, created["synthesizer_id"])
         assert len(subs) == 1, subs
@@ -380,7 +380,7 @@ def test_cmd_swarm_no_subscription_without_session_context(
     assert rc == 0
     created = json.loads(capsys.readouterr().out)
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         subs = kb.list_notify_subs(conn, created["synthesizer_id"])
     finally:
@@ -420,7 +420,7 @@ def test_cmd_swarm_respects_auto_subscribe_on_create_false(
     assert rc == 0
     created = json.loads(capsys.readouterr().out)
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         subs = kb.list_notify_subs(conn, created["synthesizer_id"])
     finally:
@@ -442,7 +442,7 @@ def test_cmd_swarm_tui_fallback_subscribes_via_session_key(
     assert rc == 0
     created = json.loads(capsys.readouterr().out)
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         subs = kb.list_notify_subs(conn, created["synthesizer_id"])
     finally:

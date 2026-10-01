@@ -72,7 +72,7 @@ def test_zero_sub_board_is_never_opened_writable(tmp_path, monkeypatch):
     """A board with zero subscriptions must be skipped BEFORE `_kb.connect`."""
     db_path = tmp_path / "zero-subs.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
-    kb.init_db()
+    kbc.init_db()
     _create_completed_task(subscribe=False)
 
     adapter = RecordingAdapter()

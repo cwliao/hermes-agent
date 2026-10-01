@@ -14,7 +14,7 @@ rather than a fixed constant; that it is *bounded* is the point.
 
 import pytest
 
-from hermes_cli.kanban_db import (
+from hermes_cli.kanban_db_dispatch import (
     derive_default_max_in_progress,
     resolve_max_in_progress as _resolve,
 )
@@ -23,9 +23,10 @@ from hermes_cli.kanban_db import (
 @pytest.fixture(autouse=True)
 def _no_memory_sample(monkeypatch):
     """Pin the derived default so these tests don't depend on host memory."""
-    from hermes_cli import kanban_db
+    from hermes_cli import kanban_db as kanban_db_core
+    from hermes_cli import kanban_db_dispatch as kanban_db
 
-    monkeypatch.setattr(kanban_db, "_system_memory_sample", lambda: {})
+    monkeypatch.setattr(kanban_db_core, "_system_memory_sample", lambda: {})
 
 
 def test_unset_is_bounded_not_unlimited():

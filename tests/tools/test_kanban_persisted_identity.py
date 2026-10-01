@@ -30,7 +30,7 @@ def board_env(tmp_path, monkeypatch):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="identity-test", assignee="alpha")

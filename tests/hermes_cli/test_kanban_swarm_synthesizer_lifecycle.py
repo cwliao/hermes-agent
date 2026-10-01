@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 
 SYNTH_BODY = (
     "Completion contract (the kernel rejects a completion that omits any "
@@ -38,7 +39,7 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -74,7 +75,7 @@ def _backdate_run_start(conn, tid, seconds_ago):
 
 def test_synthesizer_first_timeout_then_retry_succeeds(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)  # confirmed dead
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
@@ -118,7 +119,7 @@ def test_synthesizer_first_timeout_then_retry_succeeds(kanban_home, monkeypatch)
 
 def test_synthesizer_second_timeout_exhausts_budget(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
@@ -161,7 +162,7 @@ def test_synthesizer_unconfirmed_termination_blocks_without_retry(
     # e.g. a zombie/defunct process or a permission failure on signal
     # delivery.
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: True)
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
@@ -193,7 +194,7 @@ def test_synthesizer_unconfirmed_termination_blocks_without_retry(
 
 def test_synthesizer_overall_deadline_forces_exhaustion(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         # max_retries=2 -- matching create_swarm()'s real synthesizer default
         # (see kanban_swarm.py's DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS *
@@ -223,7 +224,7 @@ def test_synthesizer_deadline_checked_after_termination_polling(
     kanban_home, monkeypatch,
 ):
     """The overall deadline includes time spent confirming worker death."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _make_synth_task(conn, max_retries=2)
         loop_start = int(time.time())
@@ -274,7 +275,7 @@ def test_synthesizer_deadline_checked_after_termination_polling(
 
 def test_enforce_max_runtime_duplicate_tick_is_idempotent(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
@@ -304,7 +305,7 @@ def test_enforce_max_runtime_duplicate_tick_is_idempotent(kanban_home, monkeypat
 
 def test_late_old_run_completion_rejected_after_timeout(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _make_synth_task(conn, max_retries=2)
         old_run_id = kb.get_task(conn, tid).current_run_id
@@ -336,7 +337,7 @@ def test_synthesizer_mixed_timeout_then_crash_exhausts_budget(
     kanban_home, monkeypatch,
 ):
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
@@ -381,7 +382,7 @@ def test_root_status_unaffected_by_synthesizer_exhaustion(kanban_home, monkeypat
     guards against a future change accidentally coupling the two.
     """
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         root_id = kb.create_task(conn, title="swarm root", initial_status="blocked")
         from hermes_cli import kanban_swarm as ks
@@ -423,7 +424,7 @@ def test_root_status_unaffected_by_synthesizer_exhaustion(kanban_home, monkeypat
 
 def test_gave_up_event_payload_is_notifier_truthful(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _make_synth_task(conn, max_retries=2)
         _backdate_run_start(conn, tid, seconds_ago=400)
@@ -460,7 +461,7 @@ def test_gave_up_event_payload_is_notifier_truthful(kanban_home, monkeypatch):
 
 
 def test_output_contract_rejection_is_retryable(kanban_home, monkeypatch):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _make_synth_task(conn, max_retries=2)
         with kb.write_txn(conn):
@@ -499,7 +500,7 @@ def test_output_contract_rejection_is_retryable(kanban_home, monkeypatch):
 
 def test_non_synthesizer_role_keeps_legacy_timeout_behavior(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn, title="worker", body="role = \"worker\"", assignee="w",

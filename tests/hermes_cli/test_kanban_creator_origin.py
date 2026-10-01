@@ -9,7 +9,7 @@ def test_creator_origin_survives_without_dependency_parent(tmp_path, monkeypatch
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    kb.init_db()
+    kbc.init_db()
     with kbc.connect_closing() as conn:
         owner = kb.create_task(conn, title="owner", session_id="durable", triage=True)
         kn.add_notify_sub(conn, task_id=owner, platform="telegram", chat_id="chat",

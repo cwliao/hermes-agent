@@ -6,6 +6,7 @@ from agent.kanban_execution_guard import (
     try_finalization,
     request_requires_four_lane_swarm,
 )
+from hermes_cli import kanban_db_connect as kbc
 
 
 PROMPT = (
@@ -482,8 +483,8 @@ def test_find_active_swarms_for_session_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setattr(_Path, "home", lambda: tmp_path)
 
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
-    conn = kb.connect()
+    kbc.init_db()
+    conn = kbc.connect()
     try:
         # Create an active swarm in session-A
         swarm_a = ks.create_swarm(
@@ -529,4 +530,3 @@ def test_find_active_swarms_for_session_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_SESSION_KEY", "session-C")
     active_c = guard._find_active_swarms_for_session()
     assert len(active_c) == 0
-

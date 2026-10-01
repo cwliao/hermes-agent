@@ -32,6 +32,7 @@ from gateway.kanban_watchers_dispatcher import (
 from agent.auxiliary_client import async_call_llm
 from agent.i18n import t
 from hermes_cli.config import cfg_get
+from hermes_cli import kanban_db_dispatch as kbd
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
@@ -118,9 +119,9 @@ def _notifier_llm_enabled() -> bool:
         return True
 
 
-def _resolve_gateway_max_in_progress(kanban_cfg: dict, kb: Any):
+def _resolve_gateway_max_in_progress(kanban_cfg: dict, kb: Any = None):
     """Use the shared resolver for the embedded dispatcher configuration."""
-    return kb.resolve_max_in_progress(
+    return kbd.resolve_max_in_progress(
         kanban_cfg.get("max_in_progress"), warn=logger.warning,
     )
 _SWARM_SUPERVISOR_DEFAULT_INTERVAL = 30.0

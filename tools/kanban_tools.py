@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from agent.redact import redact_sensitive_text
 from hermes_cli import kanban_swarm as _KS
+from hermes_cli import kanban_db_notify as kbn
 from hermes_cli.goals import judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
@@ -1517,8 +1518,8 @@ def _handle_create(args: dict, **kw) -> str:
             if guard:
                 return guard
         _assignee_name = str(assignee).strip()
-        if kb.assignee_availability(conn, _assignee_name) is None:
-            return tool_error(kb.assignee_unavailable_message(conn, _assignee_name))
+        if kbn.assignee_availability(conn, _assignee_name) is None:
+            return tool_error(kbn.assignee_unavailable_message(conn, _assignee_name))
         from gateway.session_context import get_session_env
         from tools.async_delegation import _current_origin_session_id
         self_tid = (os.environ.get("HERMES_KANBAN_TASK")
@@ -1855,10 +1856,10 @@ def _handle_swarm(args: dict, **kw) -> str:
             ("synthesizer_assignee", str(synthesizer_assignee)),
         ])
         for field_name, assignee_name in routing:
-            if kb.assignee_availability(conn, assignee_name) is None:
+            if kbn.assignee_availability(conn, assignee_name) is None:
                 return tool_error(
                     f"kanban_swarm: {field_name}={assignee_name!r} is unavailable. "
-                    f"{kb.assignee_unavailable_message(conn, assignee_name)}"
+                    f"{kbn.assignee_unavailable_message(conn, assignee_name)}"
                 )
         origin = {}
         from gateway.session_context import resolve_notify_origin

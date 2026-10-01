@@ -21,7 +21,7 @@ from hermes_cli import kanban_db_dispatch as kbd
 def _build_board_db(db_path: Path, tasks: int = 12) -> None:
     """Create a real board DB with data so indexes have entries."""
     kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
-    kb.init_db(db_path=db_path)
+    kbc.init_db(db_path=db_path)
     with kbc.connect(db_path=db_path) as conn:
         for i in range(tasks):
             kb.create_task(conn, title=f"task-{i}")

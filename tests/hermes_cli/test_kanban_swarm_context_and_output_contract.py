@@ -53,7 +53,7 @@ def test_worker_context_aggregate_cap_preserves_swarm_contract(tmp_path):
 
 
 def test_synthesizer_context_renders_live_excused_lanes(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -234,7 +234,7 @@ def test_completion_rejects_malformed_worker_summary_without_rewriting(tmp_path)
 
 def test_completion_reports_all_contract_defects_in_one_retry(tmp_path):
     """A bad first call must not make the model repair one field per turn."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,

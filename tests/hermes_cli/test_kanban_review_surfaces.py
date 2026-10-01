@@ -24,7 +24,7 @@ def review_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
     (home / "profiles" / "reviewer").mkdir(parents=True)
     (home / "profiles" / "reviewer" / "config.yaml").write_text("{}\n")  # identity marker
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
     with kbc.connect() as conn:
         task_id = kb.create_task(conn, title="Review tool contract", assignee="builder")
         task = kb.claim_task(conn, task_id, claimer="builder:1")
@@ -126,7 +126,7 @@ def test_review_cli_round_trip_preserves_handoff(
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
 
     with kbc.connect() as conn:
         task_id = kb.create_task(conn, title="CLI review", assignee="builder")
@@ -274,7 +274,7 @@ def test_goal_mode_review_handoff_cannot_bypass_judge(
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
 
     with kbc.connect() as conn:
         tool_task = kb.create_task(
@@ -377,7 +377,7 @@ def test_cli_and_dashboard_receive_graph_aware_deadlock_diagnostic(
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
 
     with kbc.connect() as conn:
         parent_id = kb.create_task(conn, title="Implementation", assignee="builder")

@@ -744,7 +744,12 @@ def connect_closing(db_path: Optional[Path] = None, *, board: Optional[str] = No
 
     See #33159 for the production incident.
     """
-    conn = connect(db_path=db_path, board=board)
+    # Preserve the zero-argument call seam used by lightweight CLI callers and
+    # tests; only pass optional selectors when they were actually supplied.
+    if db_path is None and board is None:
+        conn = connect()
+    else:
+        conn = connect(db_path=db_path, board=board)
     try:
         yield conn
     finally:

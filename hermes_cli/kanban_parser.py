@@ -27,8 +27,10 @@ def _cmd(name: str, args=(), *, children=None, **parser_kw):
 def _add_commands(sub: argparse._SubParsersAction, specs) -> None:
     for name, parser_kw, args, children in specs:
         p = sub.add_parser(name, **parser_kw)
+        gc_scope = p.add_mutually_exclusive_group() if name == "gc" else None
         for flags, kw in args:
-            p.add_argument(*flags, **kw)
+            target = gc_scope if gc_scope is not None and set(flags) & {"--tenant", "--include-untenanted"} else p
+            target.add_argument(*flags, **kw)
         if children:
             dest, child_specs = children
             _add_commands(p.add_subparsers(dest=dest), child_specs)
@@ -370,6 +372,8 @@ _SPECS = [
     _cmd("dispatch", [
         _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),
         _arg("--max", type=int, help="Cap number of spawns this pass"),
+        _arg("--max-in-progress", type=int,
+             help="Global cap on concurrently running Kanban tasks"),
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
              help=f"Auto-block a task after this many consecutive non-success attempts "
                   f"(spawn_failed, timed_out, or crashed; default: {kbd.DEFAULT_FAILURE_LIMIT})"),
@@ -392,6 +396,27 @@ _SPECS = [
              help="Comma-separated event kinds to include (e.g. 'completed,blocked,gave_up,crashed,timed_out')"),
         _arg("--interval", type=float, default=0.5, help="Poll interval in seconds (default: 0.5)"),
     ], help="Live-stream task_events to the terminal (Ctrl+C to exit)"),
+    _cmd("watcher", children=("watcher_action", [
+        _cmd("register", [
+            _arg("--assignee", required=True),
+            _arg("--watcher-id", help="Stable watcher identity (default: $HERMES_WATCHER_ID or host:pid)"),
+            _arg("--ttl", type=int, default=kb.EXTERNAL_WATCHER_DEFAULT_TTL_SECONDS),
+            _arg("--capability", action="append", default=[]),
+            _arg("--metadata", help="JSON metadata object"),
+            _json_flag(),
+        ], help="Register or refresh a watcher lease"),
+        _cmd("heartbeat", [
+            _arg("--assignee", required=True),
+            _arg("--watcher-id"),
+            _arg("--ttl", type=int, default=kb.EXTERNAL_WATCHER_DEFAULT_TTL_SECONDS),
+            _json_flag(),
+        ], help="Extend an existing watcher lease"),
+        _cmd("unregister", [
+            _arg("--assignee", required=True), _arg("--watcher-id"), _json_flag(),
+        ], help="Remove a watcher lease"),
+        _cmd("list", [_arg("--all", action="store_true", dest="include_expired"), _json_flag()],
+             help="List active watcher leases"),
+    ]), help="Register and heartbeat an external terminal assignee lease"),
     _cmd("stats", [_json_flag()], help="Per-status + per-assignee counts + oldest-ready age"),
     _cmd("notify-subscribe", [
         _TASK_ID,
@@ -446,6 +471,16 @@ _SPECS = [
              help="Delete task_events older than N days for terminal tasks (default: 30; 0 disables)"),
         _arg("--log-retention-days", type=_nonnegative_int, default=30,
              help="Delete worker log files older than N days (default: 30; 0 disables)"),
+        _arg("--dead-graphs", action="store_true",
+             help="Also archive abandoned task graphs"),
+        _arg("--dead-graph-days", type=int, default=7,
+             help="A graph is abandoned after N days with no event (default: 7)"),
+        _arg("--tenant", help="With --dead-graphs, sweep only this tenant"),
+        _arg("--include-untenanted", action="store_true",
+             help="With --dead-graphs, sweep only multi-card graphs with no tenant"),
+        _arg("--max-dead-graphs", type=_nonnegative_int, default=kb.DEFAULT_DEAD_GRAPH_ARCHIVE_CAP,
+             help="Refuse to archive when more than N candidates are found"),
+        _arg("--dry-run", action="store_true", help="With --dead-graphs, print what would be archived"),
     ], help="Garbage-collect archived-task workspaces, old events, and old logs"),
     _cmd("repair", [_json_flag(help="Emit the repair report as JSON")],
          help="Check kanban.db integrity and auto-repair index-only corruption",

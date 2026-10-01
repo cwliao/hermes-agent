@@ -25,7 +25,7 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -368,7 +368,7 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
 def test_decompose_refuses_task_with_contract_fanout_true(kanban_home):
     contract_line = '[swarm:contract] {"role": "verifier", "root_id": "t_root", "verifier_id": "t_v"}'
     body_with_contract = f"Review work.\n{contract_line}"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="swarm verifier", body=body_with_contract, triage=True)
 
     llm_payload = jsonlib.dumps({
@@ -391,7 +391,7 @@ def test_decompose_refuses_task_with_contract_fanout_true(kanban_home):
 
     assert outcome.ok is False
     assert "refusing to auto-decompose" in outcome.reason
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body_with_contract
@@ -405,7 +405,7 @@ def test_decompose_refuses_task_with_contract_fanout_true(kanban_home):
 def test_decompose_refuses_task_with_contract_fanout_false(kanban_home):
     contract_line = '[swarm:contract] {"role": "worker", "root_id": "t_root"}'
     body_with_contract = f"Do work.\n{contract_line}"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="swarm worker", body=body_with_contract, triage=True)
 
     llm_payload = jsonlib.dumps({
@@ -427,7 +427,7 @@ def test_decompose_refuses_task_with_contract_fanout_false(kanban_home):
 
     assert outcome.ok is False
     assert "refusing to auto-decompose" in outcome.reason
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body_with_contract
@@ -437,7 +437,7 @@ def test_decompose_refuses_task_with_contract_fanout_false(kanban_home):
 
 def test_decompose_refuses_task_with_malformed_contract(kanban_home):
     body_with_malformed = "Do work.\n[swarm:contract] {invalid-json"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="broken swarm", body=body_with_malformed, triage=True)
 
     patches = _patch_list_profiles(["orchestrator"])
@@ -451,7 +451,7 @@ def test_decompose_refuses_task_with_malformed_contract(kanban_home):
 
     assert outcome.ok is False
     assert "refusing to auto-decompose" in outcome.reason
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body_with_malformed
@@ -462,7 +462,7 @@ def test_decompose_refuses_task_with_malformed_contract(kanban_home):
 def test_decompose_refuses_task_with_contract_fanout_true(kanban_home):
     contract_line = '[swarm:contract] {"role": "verifier", "root_id": "t_root", "verifier_id": "t_v"}'
     body_with_contract = f"Review work.\n{contract_line}"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="swarm verifier", body=body_with_contract, triage=True)
 
     llm_payload = jsonlib.dumps({
@@ -485,7 +485,7 @@ def test_decompose_refuses_task_with_contract_fanout_true(kanban_home):
 
     assert outcome.ok is False
     assert "refusing to auto-decompose" in outcome.reason
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body_with_contract
@@ -499,7 +499,7 @@ def test_decompose_refuses_task_with_contract_fanout_true(kanban_home):
 def test_decompose_refuses_task_with_contract_fanout_false(kanban_home):
     contract_line = '[swarm:contract] {"role": "worker", "root_id": "t_root"}'
     body_with_contract = f"Do work.\n{contract_line}"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="swarm worker", body=body_with_contract, triage=True)
 
     llm_payload = jsonlib.dumps({
@@ -521,7 +521,7 @@ def test_decompose_refuses_task_with_contract_fanout_false(kanban_home):
 
     assert outcome.ok is False
     assert "refusing to auto-decompose" in outcome.reason
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body_with_contract
@@ -531,7 +531,7 @@ def test_decompose_refuses_task_with_contract_fanout_false(kanban_home):
 
 def test_decompose_refuses_task_with_malformed_contract(kanban_home):
     body_with_malformed = "Do work.\n[swarm:contract] {invalid-json"
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(conn, title="broken swarm", body=body_with_malformed, triage=True)
 
     patches = _patch_list_profiles(["orchestrator"])
@@ -545,7 +545,7 @@ def test_decompose_refuses_task_with_malformed_contract(kanban_home):
 
     assert outcome.ok is False
     assert "refusing to auto-decompose" in outcome.reason
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task = kb.get_task(conn, tid)
         assert task.status == "triage"
         assert task.body == body_with_malformed

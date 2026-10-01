@@ -26,7 +26,7 @@ def running_child_with_parent(monkeypatch, tmp_path):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     kb._INITIALIZED_PATHS.clear()
-    kb.init_db()
+    kbc.init_db()
     conn = kbc.connect()
     try:
         parent_id = kb.create_task(conn, title="parent gate", assignee="op")

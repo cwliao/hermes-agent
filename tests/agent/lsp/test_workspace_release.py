@@ -122,7 +122,7 @@ def _kanban_scratch(project, tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="scratch")
         ws = kbw.resolve_workspace(kb.get_task(conn, tid))

@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 
 OK = 200
 BOARD_PATH = "/api/plugins/kanban/board"
@@ -31,7 +32,7 @@ async def test_board_burst_preserves_http_worker_capacity(tmp_path, monkeypatch)
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     plugin_path = Path(os.environ.get(
         "HERMES_TEST_KANBAN_PLUGIN",
         str(Path(__file__).resolve().parents[2] / "plugins/kanban/dashboard/plugin_api.py"),

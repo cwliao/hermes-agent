@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.kanban_swarm import (
     MULTI_AGENT_LANE_IDS,
     SwarmWorkerSpec,
@@ -27,7 +28,7 @@ def _lane_specs():
 
 
 def test_worker_context_aggregate_cap_preserves_swarm_contract(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -52,7 +53,7 @@ def test_worker_context_aggregate_cap_preserves_swarm_contract(tmp_path):
 
 
 def test_synthesizer_context_renders_live_excused_lanes(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -201,7 +202,7 @@ def test_synthesizer_rejects_result_for_previous_goal():
 
 
 def test_completion_rejects_malformed_worker_summary_without_rewriting(tmp_path):
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,
@@ -233,7 +234,7 @@ def test_completion_rejects_malformed_worker_summary_without_rewriting(tmp_path)
 
 def test_completion_reports_all_contract_defects_in_one_retry(tmp_path):
     """A bad first call must not make the model repair one field per turn."""
-    conn = kb.connect(tmp_path / "kanban.db")
+    conn = kbc.connect(tmp_path / "kanban.db")
     try:
         created = create_swarm(
             conn,

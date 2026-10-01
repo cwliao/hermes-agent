@@ -20,6 +20,7 @@ from hermes_cli.kanban_swarm import (
     post_blackboard_update,
     validate_completion,
 )
+from hermes_cli import kanban_db_dispatch as kbd
 
 
 @pytest.fixture
@@ -233,7 +234,7 @@ def test_dispatcher_reports_overdue_excuses(kanban_home, monkeypatch):
         monkeypatch.setattr(
             ks, "excuse_blocked_workers_below_quorum", lambda connection: 0,
         )
-        result = kb._dispatch_once_locked(conn, reconcile_orphans=False)
+        result = kbd._dispatch_once_locked(conn, reconcile_orphans=False)
         assert result.overdue_excused == 3
     finally:
         conn.close()

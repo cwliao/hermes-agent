@@ -6,6 +6,7 @@ import gateway.kanban_watchers as kanban_watchers
 from gateway.run import GatewayRunner
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
 
 
 class RecordingAdapter:
@@ -56,7 +57,7 @@ def _create_completed_subscription(tmp_path, monkeypatch):
     conn = kbc.connect()
     try:
         task_id = kb.create_task(conn, title="notify once")
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=task_id,
             platform="telegram",

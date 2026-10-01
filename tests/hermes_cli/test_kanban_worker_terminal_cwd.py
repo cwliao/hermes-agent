@@ -14,6 +14,7 @@ Pinning ``TERMINAL_CWD`` to the workspace fixes both.
 from __future__ import annotations
 
 import subprocess
+from hermes_cli import kanban_db_dispatch as kbd
 
 
 def _make_task(kb, *, assignee: str = "w"):

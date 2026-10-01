@@ -1047,8 +1047,15 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
         from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{task.id}")
         try:
+            contract = ks.extract_contract(getattr(task, "body", None))
+            acceptance = (contract or {}).get("acceptance")
+            goal = (
+                f"{task.title}\n\n{acceptance}".strip()
+                if isinstance(acceptance, str) and acceptance.strip()
+                else f"{task.title}\n\n{task.body or ''}".strip()
+            )
             verdict, reason, _, _, transport_failed = judge_goal(
-                goal=f"{task.title}\n\n{task.body or ''}".strip(),
+                goal=goal,
                 last_response=evidence.strip())
         finally:
             if affinity_token is not None:
@@ -1617,7 +1624,10 @@ def _cmd_gc(args: argparse.Namespace) -> int:
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     """Run one dispatcher pass, preserving the facade resolver seam."""
     try:
-        cfg = load_config()
+        # Late-bind the loader so monkeypatches on hermes_cli.config remain the
+        # seam used by this facade after the kanban split.
+        from hermes_cli.config import load_config as _load_config
+        cfg = _load_config()
         section = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
         default_assignee = (section.get("default_assignee") or "").strip() or None
         per_profile = kbd._positive_int(section.get("max_in_progress_per_profile"), None)

@@ -5803,3 +5803,8 @@ from hermes_cli.kanban_db_dispatch import (
     _worker_terminal_timeout_env,
 )
 from hermes_cli.kanban_db_dispatch import _system_memory_sample  # noqa: E402,F401
+
+# Keep the facade seam used by the CLI swarm path and external callers.  The
+# implementation lives in the notification sibling, but monkeypatching the
+# facade must continue to intercept the call.
+from hermes_cli.kanban_db_notify import add_notify_sub  # noqa: E402,F401

@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 
 import pytest
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_workspace as kbw
+from hermes_cli import kanban_db_notify as kbn
 
 
 # ---------------------------------------------------------------------------
@@ -2335,7 +2338,7 @@ def test_swarm_subscribes_synthesizer_when_session_context_present(
     from hermes_cli import kanban_db as kb
     conn = kbc.connect()
     try:
-        subs = kb.list_notify_subs(conn, d["synthesizer_id"])
+        subs = kbn.list_notify_subs(conn, d["synthesizer_id"])
     finally:
         conn.close()
     assert len(subs) == 1

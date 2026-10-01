@@ -3,6 +3,8 @@ from gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 from gateway.session_context import get_session_env
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
 
 
 def test_session_route_anchors_reach_metadata_and_context_then_clear(monkeypatch):

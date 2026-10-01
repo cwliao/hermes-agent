@@ -230,8 +230,12 @@ dependencies = [
   # (confirmed live: a standalone `uv pip install` picked 3.7.0 while `uv lock` picked
   # 2.10.0 for compatibility with the paddlepaddle pin above), which breaks
   # `_extract_images_text_with_paddleocr`'s 2.x-shaped call. Bump both together deliberately.
-  "paddlepaddle==3.2.2; python_version >= '3.14'",
-  "paddleocr==2.10.0; python_version >= '3.14'",
+  # DORMANT: paddlepaddle 3.2.2 has no cp314 wheel on any platform, and uv.environments
+  # is 3.14-only, so `uv lock` was unsatisfiable with the old `>= '3.14'` marker (the
+  # deploy pipeline already excluded it per-release). Flip back to `>= '3.14'` once
+  # upstream publishes cp314 wheels.
+  "paddlepaddle==3.2.2; python_version < '3.14'",
+  "paddleocr==2.10.0; python_version < '3.14'",
 ]
 
 [project.optional-dependencies]
@@ -636,7 +640,9 @@ default-groups = []
 # 3.11 is an install bridge for pre-PM updaters, never a runtime, so the lock
 # covers 3.14 only. Without this the lock must resolve every supported version,
 # where extras that only ever coexist on 3.14 (kittentts vs neutts) conflict.
-environments = ["python_version >= '3.14'"]
+# Android is excluded: playwright/sherpa-onnx-core/etc. have no android cp314 wheels, so a
+# resolve that includes the android split can never be satisfied. This fork targets Linux hosts.
+environments = ["python_version >= '3.14' and sys_platform != 'android'"]
 override-dependencies = [
   # discord.py's latest published version, 2.7.1, pins pynacl at <1.6. however, pynacl 1.5.0 has known vulnerabilities.
   # discord.py has updated pynacl to 1.6 on `main`, but has not yet published a patch release.

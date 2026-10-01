@@ -558,6 +558,7 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
             fail_code = _single_query_exit_code(
                 None, credentials_rate_limited=getattr(cli, "_credentials_rate_limited", False),
                 credentials_terminal=getattr(cli, "_credentials_terminal", False))
+            print("DEBUG_CREDENTIAL_FLAGS", getattr(cli, "_credentials_rate_limited", None), getattr(cli, "_credentials_terminal", None), os.environ.get("HERMES_KANBAN_TASK"), file=sys.stderr)
             if emitter is not None:
                 emitter.emit_result({"failed": True, "error": "credentials or agent init failed"},
                                     session_id=cli.session_id or "", exit_code=fail_code)

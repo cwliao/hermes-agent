@@ -24,7 +24,7 @@ def kanban_home(tmp_path, monkeypatch):
     # test silently drops files because ``tmp_path`` isn't inside the
     # default ``MEDIA_DELIVERY_SAFE_ROOTS`` cache dirs.
     monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(tmp_path))
-    kb.init_db()
+    kbc.init_db()
     return home
 
 def test_notify_sub_delivery_mode_persists_and_last_write_wins(kanban_home):

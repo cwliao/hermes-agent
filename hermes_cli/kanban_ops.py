@@ -178,7 +178,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
     # Init before printing "started" so the DB path is right and init errors
     # surface immediately.
-    kb.init_db()
+    kbc.init_db()
 
     pidfile = getattr(args, "pidfile", None)
     if pidfile:
@@ -349,7 +349,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
 
 def _cmd_repair(args: argparse.Namespace) -> int:
     """Integrity check + narrow index-REINDEX auto-repair. Dispatched BEFORE
-    the auto ``kb.init_db()`` (init refuses corrupt DBs). Exit 0 = healthy /
+    the auto ``kbc.init_db()`` (init refuses corrupt DBs). Exit 0 = healthy /
     repaired / no DB file, 1 = still corrupt."""
     try:
         report = kbc.repair_db()

@@ -23,6 +23,7 @@ from hermes_cli.kanban_swarm import (
     validate_completion,
 )
 import pytest
+from hermes_cli import kanban_db_dispatch as kbd
 
 
 def test_swarm_context_names_kanban_comment_and_rules_out_observed_failure_modes():
@@ -1208,7 +1209,7 @@ def test_synthesizer_runtime_and_retry_budget_reaches_overall_deadline():
     synthesizer_max_retries = 2
     assert (
         DEFAULT_SYNTHESIZER_MAX_RUNTIME_SECONDS * synthesizer_max_retries
-        >= kb._SYNTHESIZER_OVERALL_DEADLINE_SECONDS
+        >= kbd._SYNTHESIZER_OVERALL_DEADLINE_SECONDS
     )
 
 
@@ -1549,7 +1550,7 @@ def test_recompute_ready_deduplicates_stall_diagnostic_events(tmp_path):
         kb.recompute_ready(conn)
         kb.recompute_ready(conn)
         # Also dispatch_once
-        kb.dispatch_once(conn)
+        kbd.dispatch_once(conn)
 
         events = [e for e in kb.list_events(conn, created.synthesizer_id) if e.kind == "verifier_gate_rejected"]
         assert len(events) == 1

@@ -14,6 +14,7 @@ import json
 import pytest
 
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+from hermes_cli import kanban_db_connect as kbc
 
 
 @pytest.fixture

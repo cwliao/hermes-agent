@@ -13,6 +13,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
+from hermes_cli import kanban_db_connect as kbc
 
 logger = logging.getLogger(__name__)
 

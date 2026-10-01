@@ -32,6 +32,7 @@ from agent.kanban_turn_recovery import (
     worker_claim_is_live,
 )
 from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+from hermes_cli import kanban_db_connect as kbc
 
 KANBAN_ENV = (
     "HERMES_KANBAN_TASK",

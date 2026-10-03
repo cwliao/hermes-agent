@@ -129,9 +129,10 @@ def test_restart_failure_restores_previous_dropin(tmp_path: Path, monkeypatch):
     repo = make_repo(tmp_path)
     state = tmp_path / "state"
     write_candidate(repo, state, created="2026-09-05T00:00:00Z")
-    old_dropin = tmp_path / "old.conf"
+    dropin_dir = tmp_path / "drop-ins"
+    dropin_dir.mkdir()
+    old_dropin = dropin_dir / ("z" * 20 + "-upstream-1111111111.conf")
     old_dropin.write_text("previous-release\n", encoding="utf-8")
-    new_dropin = tmp_path / "new.conf"
 
     real_run = apply_module._run
 
@@ -143,7 +144,7 @@ def test_restart_failure_restores_previous_dropin(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(apply_module, "_run", fake_run)
     args = Namespace(
         repo=str(repo), state_dir=str(state), run_id="run", release_root=str(tmp_path / "releases"),
-        systemd_dropin=str(new_dropin), systemd_unit="hermes-gateway.service", previous_release="previous-release",
+        systemd_dropin=str(dropin_dir), systemd_unit="hermes-gateway.service", previous_release="previous-release",
         previous_dropin=str(old_dropin), upstream_remote="upstream", upstream_ref="main",
         review_ttl_seconds=7 * 24 * 60 * 60, now="2026-09-05T10:00:00Z", execute=True,
     )
@@ -153,5 +154,6 @@ def test_restart_failure_restores_previous_dropin(tmp_path: Path, monkeypatch):
     assert code == 1
     assert result["status"] == "FAILED"
     assert old_dropin.read_text(encoding="utf-8") == "previous-release\n"
+    assert len(list(dropin_dir.iterdir())) == 1
     assert json.loads((state / "candidates" / "run.json").read_text())["status"] == "FAILED"
     assert not (state / "apply-worktrees" / "run").exists()

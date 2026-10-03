@@ -157,3 +157,52 @@ def test_restart_failure_restores_previous_dropin(tmp_path: Path, monkeypatch):
     assert len(list(dropin_dir.iterdir())) == 1
     assert json.loads((state / "candidates" / "run.json").read_text())["status"] == "FAILED"
     assert not (state / "apply-worktrees" / "run").exists()
+
+
+def test_cleanup_failure_keeps_verified_deploy_done(tmp_path: Path, monkeypatch):
+    repo = make_repo(tmp_path)
+    state = tmp_path / "state"
+    write_candidate(repo, state, created="2026-09-05T00:00:00Z")
+    dropin_dir = tmp_path / "drop-ins"
+    dropin_dir.mkdir()
+    old_dropin = dropin_dir / ("z" * 20 + "-upstream-1111111111.conf")
+    old_dropin.write_text("previous-release\n", encoding="utf-8")
+    release_root = tmp_path / "releases"
+    venv_dir = tmp_path / "venv"
+
+    monkeypatch.setattr(apply_module, "run_preflight", lambda args: (0, {}))
+    monkeypatch.setattr(apply_module, "_git", lambda *args: git(repo, "rev-parse", "HEAD"))
+    monkeypatch.setattr(apply_module, "build_snapshot", lambda worktree, destination, sha: destination.mkdir(parents=True))
+    monkeypatch.setattr(apply_module, "_provision_release_venv", lambda *args: (venv_dir, []))
+    monkeypatch.setattr(apply_module, "_render_dropin", lambda *args: "new-release\n")
+    monkeypatch.setattr(apply_module, "_prune_after_write", lambda *args: (_ for _ in ()).throw(RuntimeError("prune failed")))
+    monkeypatch.setattr(apply_module.time, "sleep", lambda seconds: None)
+
+    def fake_run(command, *, check=False):
+        if command[:3] == ["systemctl", "--user", "restart"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ["systemctl", "--user", "is-active"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ["systemctl", "--user", "show"]:
+            if "ActiveState" in command:
+                return subprocess.CompletedProcess(command, 0, "ActiveState=active\n", "")
+            return subprocess.CompletedProcess(command, 0, f"WorkingDirectory={release_root / 'release-run'}\nEnvironment=HERMES_RELEASE_SHA=" + git(repo, "rev-parse", "HEAD") + f"\nExecStart={venv_dir}/bin/python\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(apply_module, "_run", fake_run)
+    args = Namespace(
+        repo=str(repo), state_dir=str(state), run_id="run", release_root=str(release_root),
+        systemd_dropin=str(dropin_dir), systemd_unit="hermes-gateway.service", previous_release="previous-release",
+        previous_dropin=str(old_dropin), upstream_remote="upstream", upstream_ref="main",
+        review_ttl_seconds=7 * 24 * 60 * 60, now="2026-09-05T10:00:00Z", execute=True,
+    )
+
+    code, result = apply_module.apply(args)
+
+    assert code == 0
+    assert result["status"] == "DONE"
+    assert result["cleanup_warning"] == "prune failed"
+    new_dropins = [path for path in dropin_dir.iterdir() if path != old_dropin]
+    assert len(new_dropins) == 1
+    assert new_dropins[0].read_text(encoding="utf-8") == "new-release\n"
+    assert json.loads((state / "candidates" / "run.json").read_text())["status"] == "DONE"

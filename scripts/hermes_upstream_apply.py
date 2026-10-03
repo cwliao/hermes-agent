@@ -166,7 +166,7 @@ def _dropin_directive_keys(path: Path) -> set[str]:
     return keys
 
 
-def _prune_superseded_dropins(dropin_dir: Path) -> list[str]:
+def _prune_superseded_dropins(dropin_dir: Path, *, keep: Path | None = None) -> list[str]:
     """Delete every drop-in whose entire set of directive keys is also set by some
     later-sorting file in the same directory -- provably dead weight, since systemd's
     per-key lexical merge means a later file already re-asserts everything it touched.
@@ -180,10 +180,13 @@ def _prune_superseded_dropins(dropin_dir: Path) -> list[str]:
     if not dropin_dir.is_dir():
         return []
     entries = sorted(dropin_dir.iterdir(), key=lambda p: p.name)
+    keep_path = keep.resolve() if keep is not None else None
     file_keys = {entry.name: _dropin_directive_keys(entry) for entry in entries}
     names = [entry.name for entry in entries]
     removed = []
     for i, name in enumerate(names):
+        if keep_path is not None and (dropin_dir / name).resolve() == keep_path:
+            continue
         my_keys = file_keys[name]
         if not my_keys:
             continue  # no directives parsed (comment-only/unusual file) -- leave it alone
@@ -205,23 +208,11 @@ def _compute_dropin_path(dropin_dir: Path, candidate_sha: str) -> Path:
     This repo's convention (see docs/plans/2026-09-25-upstream-rebase-005.md)
     is that each new deploy's filename carries strictly more leading ``z``
     characters than every prior one, so the newest deploy always sorts last
-    and wins. First prunes every provably-dead prior drop-in (see
-    ``_prune_superseded_dropins``), then removes any *remaining* file matching
-    this function's own naming scheme (``z+-upstream-<sha>.conf``) outright:
-    the new file about to be written always carries forward every key from
-    whatever was live (``_render_dropin``'s contract), so a prior entry in
-    this exact self-managed sequence is unconditionally superseded the moment
-    the new one exists -- unlike an unrelated hand-added drop-in (a kanban
-    feature flag, say), which the cross-file key check above must not touch
-    just because it also happens to have a long ``z`` prefix.
-    Only then is max_z computed fresh from whatever real files remain, so a
-    stale guess can't silently lose to a drop-in added after the guess.
+    and wins. This function is intentionally pure: pruning happens only after
+    the new file has been written and the service has passed its health checks.
+    The max is computed from every file currently present, so a stale guess
+    can't silently lose to a drop-in added after the guess.
     """
-    _prune_superseded_dropins(dropin_dir)
-    if dropin_dir.is_dir():
-        for entry in list(dropin_dir.iterdir()):
-            if _SELF_MANAGED_DROPIN_RE.match(entry.name):
-                entry.unlink()
     max_z = 0
     if dropin_dir.is_dir():
         for entry in dropin_dir.iterdir():
@@ -229,6 +220,18 @@ def _compute_dropin_path(dropin_dir: Path, candidate_sha: str) -> Path:
             if match:
                 max_z = max(max_z, len(match.group(1)))
     return dropin_dir / f"{'z' * (max_z + 20)}-upstream-{candidate_sha[:10]}.conf"
+
+
+def _prune_after_write(dropin_dir: Path, keep: Path) -> list[str]:
+    """Prune superseded drop-ins after ``keep`` is live, preserving ``keep``."""
+    removed = _prune_superseded_dropins(dropin_dir, keep=keep)
+    keep_path = keep.resolve()
+    if dropin_dir.is_dir():
+        for entry in list(dropin_dir.iterdir()):
+            if entry.resolve() != keep_path and _SELF_MANAGED_DROPIN_RE.match(entry.name):
+                entry.unlink()
+                removed.append(entry.name)
+    return removed
 
 
 def _render_dropin(previous_content: str, venv_dir: Path, destination: Path, candidate_sha: str) -> str:
@@ -393,6 +396,7 @@ def apply(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         settle = _run(["systemctl", "--user", "show", args.systemd_unit, "-p", "ActiveState", "-p", "NRestarts"])
         if "ActiveState=active" not in settle.stdout:
             raise RuntimeError(f"service did not stay active after restart:\n{settle.stdout}")
+        _prune_after_write(dropin_dir, dropin)
         result.update(status="DONE", candidate_sha=candidate["candidate_sha"], release_path=str(destination), venv_path=str(venv_dir), dropin_path=str(dropin), verification=identity.stdout, next_step="保留 rollback artifacts，檢查 systemd effective identity 與 health logs")
         candidate["status"] = "DONE"
         candidate["applied_main_sha"] = source_sha

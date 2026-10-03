@@ -14,7 +14,6 @@ import hermes_upstream_apply as apply_module  # noqa: E402
 from hermes_upstream_apply import (  # noqa: E402
     _compute_dropin_path,
     _prune_after_write,
-    _prune_superseded_dropins,
     _provision_release_venv,
     _render_dropin,
     _target_python_version,
@@ -141,32 +140,6 @@ Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 """
 
 
-def test_prune_superseded_dropins_removes_fully_overridden_files_only(tmp_path: Path):
-    dropin_dir = tmp_path / "drop-ins"
-    dropin_dir.mkdir()
-    # Three self-managed releases in sort order: the last one's key set is a superset of
-    # the earlier two, so both earlier ones are provably dead once it exists.
-    (dropin_dir / ("z" * 20 + "-upstream-1111111111.conf")).write_text(
-        _FULL_DROPIN_TEMPLATE.format(sha="1111111111"), encoding="utf-8")
-    (dropin_dir / ("z" * 60 + "-upstream-2222222222.conf")).write_text(
-        _FULL_DROPIN_TEMPLATE.format(sha="2222222222"), encoding="utf-8")
-    (dropin_dir / ("z" * 100 + "-upstream-3333333333.conf")).write_text(
-        _FULL_DROPIN_TEMPLATE.format(sha="3333333333"), encoding="utf-8")
-    # A foundational, unrelated drop-in that only sets a key nothing later sets --
-    # must survive since it is not provably dead.
-    (dropin_dir / "10-corporate-tls-ca.conf").write_text(
-        "[Service]\nEnvironment=CORPORATE_CA_ONLY=1\n", encoding="utf-8")
-
-    removed = _prune_superseded_dropins(dropin_dir)
-
-    assert set(removed) == {
-        "z" * 20 + "-upstream-1111111111.conf",
-        "z" * 60 + "-upstream-2222222222.conf",
-    }
-    remaining = {p.name for p in dropin_dir.iterdir()}
-    assert remaining == {"z" * 100 + "-upstream-3333333333.conf", "10-corporate-tls-ca.conf"}
-
-
 def test_prune_after_write_keeps_new_file_and_removes_superseded_dropins(tmp_path: Path, monkeypatch):
     dropin_dir = tmp_path / "drop-ins"
     dropin_dir.mkdir()
@@ -181,6 +154,37 @@ def test_prune_after_write_keeps_new_file_and_removes_superseded_dropins(tmp_pat
     assert final.is_file()
     assert final.name == "z" * 20 + "-upstream-2222222222.conf"
     assert list(dropin_dir.iterdir()) == [final]
+
+
+def test_prune_after_write_does_not_rename_same_name_through_symlink(tmp_path: Path, monkeypatch):
+    real_dir = tmp_path / "real-drop-ins"
+    real_dir.mkdir()
+    symlink_dir = tmp_path / "drop-ins"
+    symlink_dir.symlink_to(real_dir, target_is_directory=True)
+    keep = symlink_dir / ("z" * 20 + "-upstream-2222222222.conf")
+    keep.write_text(_FULL_DROPIN_TEMPLATE.format(sha="2222222222"), encoding="utf-8")
+
+    monkeypatch.setattr(apply_module, "_run", lambda command: subprocess.CompletedProcess(command, 0, "", ""))
+    final = _prune_after_write(symlink_dir, keep)
+
+    assert final.name == keep.name
+    assert final.is_file()
+    assert keep.is_file()
+
+
+def test_prune_after_write_raises_when_daemon_reload_fails(tmp_path: Path, monkeypatch):
+    dropin_dir = tmp_path / "drop-ins"
+    dropin_dir.mkdir()
+    keep = dropin_dir / ("z" * 20 + "-upstream-2222222222.conf")
+    keep.write_text(_FULL_DROPIN_TEMPLATE.format(sha="2222222222"), encoding="utf-8")
+
+    monkeypatch.setattr(
+        apply_module,
+        "_run",
+        lambda command: subprocess.CompletedProcess(command, 1, "", "reload failed"),
+    )
+    with pytest.raises(RuntimeError, match="daemon-reload failed: reload failed"):
+        _prune_after_write(dropin_dir, keep)
 
 
 def test_compute_dropin_path_stays_short_after_many_releases(tmp_path: Path, monkeypatch):
@@ -273,6 +277,26 @@ def test_target_python_version_reads_compound_tool_uv_environment(tmp_path: Path
     assert _target_python_version(pyproject) == "3.14"
 
 
+def test_target_python_version_falls_back_for_empty_environments(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[tool.uv]\nenvironments = []\n", encoding="utf-8")
+    assert _target_python_version(pyproject) == f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '["python_version >= \'3.14\'", "python_version >= \'3.15\'"]',
+        '["python_version >= \'3.14\' or python_version < \'3.12\'"]',
+    ],
+)
+def test_target_python_version_rejects_ambiguous_environments(tmp_path: Path, value: str):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(f"[tool.uv]\nenvironments = {value}\n", encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        _target_python_version(pyproject)
+
+
 def test_target_python_version_falls_back_when_undeclared(tmp_path: Path):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text("[project]\nname = \"x\"\n", encoding="utf-8")
@@ -309,6 +333,7 @@ def test_provision_release_venv_rejects_python_version_mismatch(tmp_path: Path, 
         return subprocess.CompletedProcess(command, 0, stdout="3.12\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    with pytest.raises(RuntimeError, match=r"Python 3\.12.*target is Python 3\.14"):
+    with pytest.raises(RuntimeError, match=r"Python 3\.12.*target is Python 3\.14") as exc_info:
         _provision_release_venv(destination, "candidate1234567890", [])
+    assert "if gateway-candidate1 is not the live venv, remove it and retry" in str(exc_info.value)
     assert venv_python.is_file()

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,11 @@ UV = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
 _NO_WHEEL_RE = re.compile(r"because ([a-zA-Z0-9_.-]+)==\S+ has no wheels with a matching Python ABI tag", re.IGNORECASE)
 
 
+_PYTHON_ENVIRONMENT_RE = re.compile(
+    r"python_version\s*>=\s*'([0-9]+(?:\.[0-9]+)*)'(?:\s+and\s+.+)?"
+)
+
+
 def _target_python_version(pyproject_path: Path) -> str:
     """Read ``[tool.uv] environments`` for the interpreter this release targets.
 
@@ -46,14 +52,45 @@ def _target_python_version(pyproject_path: Path) -> str:
     project declares no environments restriction.
     """
     text = pyproject_path.read_text(encoding="utf-8")
-    match = re.search(r"environments\s*=\s*\[\s*\"python_version\s*>=\s*'([0-9.]+)'\"", text)
-    if match:
-        return match.group(1)
-    return f"{sys.version_info.major}.{sys.version_info.minor}"
+    try:
+        pyproject = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError(f"could not parse {pyproject_path} as TOML: {exc}") from exc
+
+    environments = pyproject.get("tool", {}).get("uv", {}).get("environments")
+    if environments is None:
+        return f"{sys.version_info.major}.{sys.version_info.minor}"
+    if not isinstance(environments, list) or len(environments) != 1 or not isinstance(environments[0], str):
+        raise RuntimeError(f"could not parse [tool.uv] environments in {pyproject_path}")
+
+    expression = environments[0]
+    if re.search(r"\bor\b", expression):
+        raise RuntimeError(f"could not parse [tool.uv] environments value in {pyproject_path}: {expression!r}")
+    match = _PYTHON_ENVIRONMENT_RE.fullmatch(expression.strip())
+    if not match:
+        raise RuntimeError(f"could not parse [tool.uv] environments value in {pyproject_path}: {expression!r}")
+    return match.group(1)
 
 
 def _venv_python(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
+
+
+def _assert_venv_python_version(venv_python: Path, target_version: str) -> None:
+    completed = subprocess.run(
+        [str(venv_python), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"unable to inspect venv interpreter {venv_python}:\n{completed.stderr}")
+    actual_version = completed.stdout.strip()
+    target = tuple(int(part) for part in target_version.split(".")[:2])
+    actual = tuple(int(part) for part in actual_version.split(".")[:2])
+    if actual < target:
+        raise RuntimeError(
+            f"venv interpreter {venv_python} is Python {actual_version}, "
+            f"but pyproject.toml requires Python >= {target_version}"
+        )
 
 
 def _install_release(venv_python: Path, release_dir: Path, extras: list[str]) -> list[str]:
@@ -126,7 +163,9 @@ def _provision_release_venv(destination: Path, candidate_sha: str, extras: list[
         completed = subprocess.run([UV, "venv", str(venv_dir), "--python", python_version], capture_output=True, text=True, timeout=300)
         if completed.returncode != 0:
             raise RuntimeError(f"uv venv failed:\n{completed.stderr}")
-    excluded = _install_release(_venv_python(venv_dir), destination, extras)
+    venv_python = _venv_python(venv_dir)
+    _assert_venv_python_version(venv_python, python_version)
+    excluded = _install_release(venv_python, destination, extras)
     return venv_dir, excluded
 
 

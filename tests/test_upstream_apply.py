@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 from hermes_upstream_apply import (  # noqa: E402
     _compute_dropin_path,
@@ -253,8 +255,29 @@ def test_target_python_version_reads_tool_uv_environments(tmp_path: Path):
     assert _target_python_version(pyproject) == "3.14"
 
 
+def test_target_python_version_reads_compound_tool_uv_environment(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "[tool.uv]\n"
+        "environments = [\"python_version >= '3.14' and sys_platform != 'android'\"]\n",
+        encoding="utf-8",
+    )
+    assert _target_python_version(pyproject) == "3.14"
+
+
 def test_target_python_version_falls_back_when_undeclared(tmp_path: Path):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text("[project]\nname = \"x\"\n", encoding="utf-8")
     version = _target_python_version(pyproject)
     assert version == f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def test_target_python_version_rejects_unparseable_environments(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "[tool.uv]\n"
+        "environments = [\"sys_platform != 'android'\"]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="could not parse .*environments value"):
+        _target_python_version(pyproject)

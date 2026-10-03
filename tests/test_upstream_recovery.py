@@ -175,7 +175,11 @@ def test_cleanup_failure_keeps_verified_deploy_done(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(apply_module, "build_snapshot", lambda worktree, destination, sha: destination.mkdir(parents=True))
     monkeypatch.setattr(apply_module, "_provision_release_venv", lambda *args: (venv_dir, []))
     monkeypatch.setattr(apply_module, "_render_dropin", lambda *args: "new-release\n")
-    monkeypatch.setattr(apply_module, "_prune_after_write", lambda *args: (_ for _ in ()).throw(RuntimeError("prune failed")))
+    def fail_prune_after_persisted_status(*args):
+        assert json.loads((state / "candidates" / "run.json").read_text())["status"] == "DONE"
+        raise RuntimeError("prune failed")
+
+    monkeypatch.setattr(apply_module, "_prune_after_write", fail_prune_after_persisted_status)
     monkeypatch.setattr(apply_module.time, "sleep", lambda seconds: None)
 
     def fake_run(command, *, check=False):

@@ -62,12 +62,18 @@ def _target_python_version(pyproject_path: Path) -> str:
     environments = uv_config["environments"]
     if not isinstance(environments, list):
         raise RuntimeError(f"could not parse [tool.uv] environments in {pyproject_path}")
+    if not environments:
+        return f"{sys.version_info.major}.{sys.version_info.minor}"
+    if len(environments) != 1:
+        raise RuntimeError(f"could not select a single [tool.uv] environments value in {pyproject_path}: {environments!r}")
 
-    for expression in environments:
-        if isinstance(expression, str):
-            match = _PYTHON_ENVIRONMENT_RE.search(expression)
-            if match:
-                return ".".join(match.group(1).split(".")[:2])
+    expression = environments[0]
+    if isinstance(expression, str) and re.search(r"\bor\b", expression):
+        raise RuntimeError(f"could not select a single Python target from [tool.uv] environments in {pyproject_path}: {expression!r}")
+    if isinstance(expression, str):
+        match = _PYTHON_ENVIRONMENT_RE.search(expression)
+        if match:
+            return ".".join(match.group(1).split(".")[:2])
     raise RuntimeError(f"could not parse [tool.uv] environments value in {pyproject_path}: {environments!r}")
 
 
@@ -86,7 +92,8 @@ def _assert_venv_python_version(venv_python: Path, target_version: str) -> None:
     if actual_version != target_version:
         raise RuntimeError(
             f"venv interpreter {venv_python} is Python {actual_version}, "
-            f"but the release target is Python {target_version}"
+            f"but the release target is Python {target_version}; "
+            f"if gateway-{venv_python.parent.parent.name.removeprefix('gateway-')} is not the live venv, remove it and retry"
         )
 
 
@@ -188,54 +195,6 @@ def _previous_extras(destination: Path, previous_dropin_content: str) -> list[st
     return installed_extras(destination, previous_venv, python_exe=python_exe)
 
 
-def _dropin_directive_keys(path: Path) -> set[str]:
-    """The set of directive keys a drop-in ``.conf`` sets (``Environment=NAME`` counts
-    NAME, not the whole line, since systemd merges those per-variable-name)."""
-    keys: set[str] = set()
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if line.startswith("Environment="):
-            body = line[len("Environment="):].strip().strip('"')
-            match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", body)
-            keys.add(f"Environment:{match.group(1)}" if match else "Environment:<unparsed>")
-        elif line.startswith(("ExecStart=", "ExecStopPost=", "WorkingDirectory=")):
-            keys.add(line.split("=", 1)[0])
-    return keys
-
-
-def _prune_superseded_dropins(dropin_dir: Path, *, keep: Path | None = None) -> list[str]:
-    """Delete every drop-in whose entire set of directive keys is also set by some
-    later-sorting file in the same directory -- provably dead weight, since systemd's
-    per-key lexical merge means a later file already re-asserts everything it touched.
-
-    Without this, the "each new deploy sorts after every prior one" convention grows the
-    filename by ~20 characters forever with nothing ever removed, until it exceeds the
-    filesystem's NAME_MAX (255) and every future deploy's drop-in write fails outright --
-    exactly what happened after ~30 releases on 2026-09-26. Pruning first keeps the
-    z-prefix small and bounded on every run, not just this one.
-    """
-    if not dropin_dir.is_dir():
-        return []
-    entries = sorted(dropin_dir.iterdir(), key=lambda p: p.name)
-    keep_path = keep.resolve() if keep is not None else None
-    file_keys = {entry.name: _dropin_directive_keys(entry) for entry in entries}
-    names = [entry.name for entry in entries]
-    removed = []
-    for i, name in enumerate(names):
-        if keep_path is not None and (dropin_dir / name).resolve() == keep_path:
-            continue
-        my_keys = file_keys[name]
-        if not my_keys:
-            continue  # no directives parsed (comment-only/unusual file) -- leave it alone
-        later_keys: set[str] = set()
-        for later_name in names[i + 1:]:
-            later_keys |= file_keys[later_name]
-        if my_keys <= later_keys:
-            (dropin_dir / name).unlink()
-            removed.append(name)
-    return removed
-
-
 _SELF_MANAGED_DROPIN_RE = re.compile(r"^z+-upstream-[0-9a-f]{6,}\.conf$")
 
 
@@ -280,9 +239,11 @@ def _prune_after_write(dropin_dir: Path, keep: Path) -> Path:
         if match:
             max_z = max(max_z, len(match.group(1)))
     final_path = dropin_dir / f"{'z' * (max_z + 20)}-upstream-{keep.stem.rsplit('-upstream-', 1)[-1]}.conf"
-    if final_path != keep_path:
+    if final_path.name != keep.name:
         keep.rename(final_path)
-    _run(["systemctl", "--user", "daemon-reload"])
+    completed = _run(["systemctl", "--user", "daemon-reload"])
+    if completed.returncode != 0:
+        raise RuntimeError(f"daemon-reload failed: {completed.stderr.strip()}")
     return final_path
 
 
@@ -449,6 +410,10 @@ def apply(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         if "ActiveState=active" not in settle.stdout:
             raise RuntimeError(f"service did not stay active after restart:\n{settle.stdout}")
         result.update(status="DONE", candidate_sha=candidate["candidate_sha"], release_path=str(destination), venv_path=str(venv_dir), dropin_path=str(dropin), verification=identity.stdout, next_step="保留 rollback artifacts，檢查 systemd effective identity 與 health logs")
+        candidate["status"] = "DONE"
+        candidate["applied_main_sha"] = source_sha
+        candidate["applied_at_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        _write(candidate_path, candidate)
         try:
             dropin = _prune_after_write(dropin_dir, dropin)
             result["dropin_path"] = str(dropin)
@@ -467,10 +432,6 @@ def apply(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 if renamed:
                     dropin = max(renamed, key=lambda path: path.name)
                     result["dropin_path"] = str(dropin)
-        candidate["status"] = "DONE"
-        candidate["applied_main_sha"] = source_sha
-        candidate["applied_at_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        _write(candidate_path, candidate)
         return 0, result
     except Exception as exc:
         result.update(status="FAILED", error_code="APPLY_FAILED", message=str(exc), rollback="attempted")

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+import hermes_upstream_apply as apply_module  # noqa: E402
 from hermes_upstream_apply import (  # noqa: E402
     _compute_dropin_path,
     _prune_after_write,
@@ -166,7 +167,7 @@ def test_prune_superseded_dropins_removes_fully_overridden_files_only(tmp_path: 
     assert remaining == {"z" * 100 + "-upstream-3333333333.conf", "10-corporate-tls-ca.conf"}
 
 
-def test_prune_after_write_keeps_new_file_and_removes_superseded_dropins(tmp_path: Path):
+def test_prune_after_write_keeps_new_file_and_removes_superseded_dropins(tmp_path: Path, monkeypatch):
     dropin_dir = tmp_path / "drop-ins"
     dropin_dir.mkdir()
     old = dropin_dir / ("z" * 20 + "-upstream-1111111111.conf")
@@ -174,38 +175,34 @@ def test_prune_after_write_keeps_new_file_and_removes_superseded_dropins(tmp_pat
     keep = dropin_dir / ("z" * 40 + "-upstream-2222222222.conf")
     keep.write_text(_FULL_DROPIN_TEMPLATE.format(sha="2222222222"), encoding="utf-8")
 
-    removed = _prune_after_write(dropin_dir, keep)
+    monkeypatch.setattr(apply_module, "_run", lambda command: subprocess.CompletedProcess(command, 0, "", ""))
+    final = _prune_after_write(dropin_dir, keep)
 
-    assert old.name in removed
-    assert keep.is_file()
-    assert list(dropin_dir.iterdir()) == [keep]
+    assert final.is_file()
+    assert final.name == "z" * 20 + "-upstream-2222222222.conf"
+    assert list(dropin_dir.iterdir()) == [final]
 
 
-def test_compute_dropin_path_stays_short_after_many_releases(tmp_path: Path):
-    """Regression test for the 2026-09-26 incident: after ~30 releases the z-prefix grew
-    past NAME_MAX (255) and every further deploy's drop-in write failed outright. Pruning
-    must keep the computed filename small regardless of how much history precedes it."""
+def test_compute_dropin_path_stays_short_after_many_releases(tmp_path: Path, monkeypatch):
+    """Repeated compute/write/verify/prune cycles keep the name bounded."""
     dropin_dir = tmp_path / "drop-ins"
     dropin_dir.mkdir()
-    z_count = 20
-    for i in range(30):
+    hand_added = dropin_dir / ("z" * 7 + "-operator.conf")
+    hand_added.write_text("[Service]\nEnvironment=OPERATOR_ONLY=1\n", encoding="utf-8")
+    monkeypatch.setattr(apply_module, "_run", lambda command: subprocess.CompletedProcess(command, 0, "", ""))
+
+    for i in range(100):
         sha = f"{i:010x}"
-        (dropin_dir / (("z" * z_count) + f"-upstream-{sha}.conf")).write_text(
-            _FULL_DROPIN_TEMPLATE.format(sha=sha), encoding="utf-8")
-        z_count += 6  # mimics the ever-growing convention across many real deploys
-    # The computed name must remain writable even with the historical files still
-    # present; pruning happens only after the new file is live.
-    assert z_count > 190
+        computed = _compute_dropin_path(dropin_dir, sha)
+        assert sorted([path.name for path in dropin_dir.iterdir()] + [computed.name])[-1] == computed.name
+        computed.write_text(_FULL_DROPIN_TEMPLATE.format(sha=sha), encoding="utf-8")
+        final = _prune_after_write(dropin_dir, computed)
+        assert final.is_file()
+        assert sorted(path.name for path in dropin_dir.iterdir())[-1] == final.name
+        assert len(final.name) <= 60
 
-    computed = _compute_dropin_path(dropin_dir, "abcdef0123456789")
-
-    assert len(computed.name) < 255
-    computed.write_text(_FULL_DROPIN_TEMPLATE.format(sha="abcdef0123"), encoding="utf-8")
-    _prune_after_write(dropin_dir, computed)
-    assert computed.is_file()
-    assert len(computed.name) < 255
-    remaining = list(dropin_dir.iterdir())
-    assert remaining == [computed]  # every prior self-managed release is now provably dead
+    assert hand_added.is_file()
+    assert len(list(dropin_dir.iterdir())) == 2
 
 
 def test_render_dropin_replaces_release_specific_keys_and_preserves_the_rest(tmp_path: Path):
@@ -251,6 +248,16 @@ def test_target_python_version_reads_tool_uv_environments(tmp_path: Path):
         "[tool.uv]\n"
         "default-groups = []\n"
         "environments = [\"python_version >= '3.14'\"]\n",
+        encoding="utf-8",
+    )
+    assert _target_python_version(pyproject) == "3.14"
+
+
+def test_target_python_version_normalizes_patch_component(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "[tool.uv]\n"
+        "environments = [\"python_version >= '3.14.0'\"]\n",
         encoding="utf-8",
     )
     assert _target_python_version(pyproject) == "3.14"
@@ -304,3 +311,4 @@ def test_provision_release_venv_rejects_python_version_mismatch(tmp_path: Path, 
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match=r"Python 3\.12.*target is Python 3\.14"):
         _provision_release_venv(destination, "candidate1234567890", [])
+    assert venv_python.is_file()

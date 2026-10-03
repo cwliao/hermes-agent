@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 from hermes_upstream_apply import (  # noqa: E402
     _compute_dropin_path,
+    _prune_after_write,
     _prune_superseded_dropins,
     _render_dropin,
     _target_python_version,
@@ -106,10 +107,12 @@ def test_compute_dropin_path_sorts_after_every_existing_z_prefixed_file(tmp_path
     (dropin_dir / ("z" * 60 + "-older-release.conf")).write_text("", encoding="utf-8")
     (dropin_dir / "10-corporate-tls-ca.conf").write_text("", encoding="utf-8")
 
+    before = {path.name: path.read_bytes() for path in dropin_dir.iterdir()}
     computed = _compute_dropin_path(dropin_dir, "530cd6ff91f5edc163e37e07a767c0caf585cb66")
 
     existing = sorted(p.name for p in dropin_dir.iterdir())
     assert sorted(existing + [computed.name])[-1] == computed.name
+    assert {path.name: path.read_bytes() for path in dropin_dir.iterdir()} == before
 
 
 def test_compute_dropin_path_on_empty_directory(tmp_path: Path):
@@ -160,6 +163,21 @@ def test_prune_superseded_dropins_removes_fully_overridden_files_only(tmp_path: 
     assert remaining == {"z" * 100 + "-upstream-3333333333.conf", "10-corporate-tls-ca.conf"}
 
 
+def test_prune_after_write_keeps_new_file_and_removes_superseded_dropins(tmp_path: Path):
+    dropin_dir = tmp_path / "drop-ins"
+    dropin_dir.mkdir()
+    old = dropin_dir / ("z" * 20 + "-upstream-1111111111.conf")
+    old.write_text(_FULL_DROPIN_TEMPLATE.format(sha="1111111111"), encoding="utf-8")
+    keep = dropin_dir / ("z" * 40 + "-upstream-2222222222.conf")
+    keep.write_text(_FULL_DROPIN_TEMPLATE.format(sha="2222222222"), encoding="utf-8")
+
+    removed = _prune_after_write(dropin_dir, keep)
+
+    assert old.name in removed
+    assert keep.is_file()
+    assert list(dropin_dir.iterdir()) == [keep]
+
+
 def test_compute_dropin_path_stays_short_after_many_releases(tmp_path: Path):
     """Regression test for the 2026-09-26 incident: after ~30 releases the z-prefix grew
     past NAME_MAX (255) and every further deploy's drop-in write failed outright. Pruning
@@ -172,16 +190,19 @@ def test_compute_dropin_path_stays_short_after_many_releases(tmp_path: Path):
         (dropin_dir / (("z" * z_count) + f"-upstream-{sha}.conf")).write_text(
             _FULL_DROPIN_TEMPLATE.format(sha=sha), encoding="utf-8")
         z_count += 6  # mimics the ever-growing convention across many real deploys
-    # Growing at this rate for a few more releases (unpruned) would exceed NAME_MAX
-    # (255) and fail to write the file at all -- which is exactly what happened in
-    # production after ~30 releases.
+    # The computed name must remain writable even with the historical files still
+    # present; pruning happens only after the new file is live.
     assert z_count > 190
 
     computed = _compute_dropin_path(dropin_dir, "abcdef0123456789")
 
-    assert len(computed.name) < 60
+    assert len(computed.name) < 255
+    computed.write_text(_FULL_DROPIN_TEMPLATE.format(sha="abcdef0123"), encoding="utf-8")
+    _prune_after_write(dropin_dir, computed)
+    assert computed.is_file()
+    assert len(computed.name) < 255
     remaining = list(dropin_dir.iterdir())
-    assert remaining == []  # every prior self-managed release is now provably dead
+    assert remaining == [computed]  # every prior self-managed release is now provably dead
 
 
 def test_render_dropin_replaces_release_specific_keys_and_preserves_the_rest(tmp_path: Path):

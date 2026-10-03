@@ -40,7 +40,7 @@ UV = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
 _NO_WHEEL_RE = re.compile(r"because ([a-zA-Z0-9_.-]+)==\S+ has no wheels with a matching Python ABI tag", re.IGNORECASE)
 
 
-_PYTHON_ENVIRONMENT_RE = re.compile(r"python_version\s*>=\s*['\"]([0-9]+(?:\.[0-9]+)*)['\"]")
+_PYTHON_ENVIRONMENT_RE = re.compile(r"python_version\s*>=\s*['\"]([0-9]+\.[0-9]+(?:\.[0-9]+)*)['\"]")
 
 
 def _target_python_version(pyproject_path: Path) -> str:
@@ -67,7 +67,7 @@ def _target_python_version(pyproject_path: Path) -> str:
         if isinstance(expression, str):
             match = _PYTHON_ENVIRONMENT_RE.search(expression)
             if match:
-                return match.group(1)
+                return ".".join(match.group(1).split(".")[:2])
     raise RuntimeError(f"could not parse [tool.uv] environments value in {pyproject_path}: {environments!r}")
 
 
@@ -151,7 +151,8 @@ def _provision_release_venv(destination: Path, candidate_sha: str, extras: list[
 
     Reusing a venv already built for this exact candidate_sha is safe (same
     source content); anything else starts fresh so a stale/incompatible venv
-    is never silently kept.
+    is never silently kept. A reused venv with the wrong Python version fails
+    fast and is never deleted, because it may be live elsewhere.
     """
     venv_dir = Path.home() / ".hermes" / "venvs" / f"gateway-{candidate_sha[:10]}"
     python_version = _target_python_version(destination / "pyproject.toml")
@@ -258,16 +259,31 @@ def _compute_dropin_path(dropin_dir: Path, candidate_sha: str) -> Path:
     return dropin_dir / f"{'z' * (max_z + 20)}-upstream-{candidate_sha[:10]}.conf"
 
 
-def _prune_after_write(dropin_dir: Path, keep: Path) -> list[str]:
-    """Prune superseded drop-ins after ``keep`` is live, preserving ``keep``."""
-    removed = _prune_superseded_dropins(dropin_dir, keep=keep)
+def _prune_after_write(dropin_dir: Path, keep: Path) -> Path:
+    """Prune superseded drop-ins and rename ``keep`` to its bounded final name.
+
+    The new file is initially additive and sorts after every existing file.
+    Once health has been verified, old self-managed files can be removed and
+    the kept file can be compacted against only the remaining operator-managed
+    files. The daemon reload is deliberately after the rename.
+    """
     keep_path = keep.resolve()
     if dropin_dir.is_dir():
         for entry in list(dropin_dir.iterdir()):
             if entry.resolve() != keep_path and _SELF_MANAGED_DROPIN_RE.match(entry.name):
                 entry.unlink()
-                removed.append(entry.name)
-    return removed
+    max_z = 0
+    for entry in dropin_dir.iterdir():
+        if _SELF_MANAGED_DROPIN_RE.match(entry.name):
+            continue
+        match = re.match(r"^(z+)", entry.name)
+        if match:
+            max_z = max(max_z, len(match.group(1)))
+    final_path = dropin_dir / f"{'z' * (max_z + 20)}-upstream-{keep.stem.rsplit('-upstream-', 1)[-1]}.conf"
+    if final_path != keep_path:
+        keep.rename(final_path)
+    _run(["systemctl", "--user", "daemon-reload"])
+    return final_path
 
 
 def _render_dropin(previous_content: str, venv_dir: Path, destination: Path, candidate_sha: str) -> str:
@@ -432,8 +448,25 @@ def apply(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         settle = _run(["systemctl", "--user", "show", args.systemd_unit, "-p", "ActiveState", "-p", "NRestarts"])
         if "ActiveState=active" not in settle.stdout:
             raise RuntimeError(f"service did not stay active after restart:\n{settle.stdout}")
-        _prune_after_write(dropin_dir, dropin)
         result.update(status="DONE", candidate_sha=candidate["candidate_sha"], release_path=str(destination), venv_path=str(venv_dir), dropin_path=str(dropin), verification=identity.stdout, next_step="保留 rollback artifacts，檢查 systemd effective identity 與 health logs")
+        try:
+            dropin = _prune_after_write(dropin_dir, dropin)
+            result["dropin_path"] = str(dropin)
+        except Exception as cleanup_exc:
+            # Health verification already succeeded. Cleanup is best-effort and
+            # must never turn a verified promotion into a rollback.
+            result["cleanup_warning"] = str(cleanup_exc)
+            # A rename can succeed immediately before daemon-reload fails. Keep
+            # the result pointed at that still-intact new drop-in.
+            if dropin_dir.is_dir():
+                candidate_name = f"-upstream-{str(candidate['candidate_sha'])[:10]}.conf"
+                renamed = [
+                    entry for entry in dropin_dir.iterdir()
+                    if entry.name.endswith(candidate_name) and _SELF_MANAGED_DROPIN_RE.match(entry.name)
+                ]
+                if renamed:
+                    dropin = max(renamed, key=lambda path: path.name)
+                    result["dropin_path"] = str(dropin)
         candidate["status"] = "DONE"
         candidate["applied_main_sha"] = source_sha
         candidate["applied_at_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

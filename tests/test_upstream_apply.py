@@ -14,6 +14,7 @@ from hermes_upstream_apply import (  # noqa: E402
     _compute_dropin_path,
     _prune_after_write,
     _prune_superseded_dropins,
+    _provision_release_venv,
     _render_dropin,
     _target_python_version,
 )
@@ -281,3 +282,25 @@ def test_target_python_version_rejects_unparseable_environments(tmp_path: Path):
     )
     with pytest.raises(RuntimeError, match="could not parse .*environments value"):
         _target_python_version(pyproject)
+
+
+def test_provision_release_venv_rejects_python_version_mismatch(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "release"
+    destination.mkdir()
+    (destination / "pyproject.toml").write_text(
+        "[tool.uv]\nenvironments = [\"python_version >= '3.14'\"]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    venv_python = tmp_path / ".hermes" / "venvs" / "gateway-candidate1" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("fake interpreter\n", encoding="utf-8")
+    monkeypatch.setattr("hermes_upstream_apply._install_release", lambda *args: [])
+
+    def fake_run(command, **kwargs):
+        assert command[0] == str(venv_python)
+        return subprocess.CompletedProcess(command, 0, stdout="3.12\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match=r"Python 3\.12.*target is Python 3\.14"):
+        _provision_release_venv(destination, "candidate1234567890", [])

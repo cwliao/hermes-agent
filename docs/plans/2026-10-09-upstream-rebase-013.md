@@ -1,5 +1,5 @@
 ---
-Status: rebase complete, main moved; push done or pending per operator hand-off below; deploy NOT executed
+Status: rebase complete, main pushed (f0e115b95f); deploy NOT executed
 Priority: high
 Date: 2026-10-09
 Repository: hermes-agent
@@ -57,6 +57,6 @@ Remaining commits applied without conflicts.
 
 ## Operator hand-off
 
-1. Push (remote main was `d168a08b3c`, equal to old main): `git -C ~/.hermes/hermes-agent push --force-with-lease=main:d168a08b3c80fa4e1d51a343cb04ab6445f2ce31 origin main`
+1. Push: DONE (force-with-lease from d168a08b3c).
 2. Deploy: `scripts/hermes_upstream_apply.py` needs the candidate JSON to carry `status: APPROVED` and a non-empty `approved_by`; set by the operator, not by the agent. Live drop-in today: `zzzzzzzzzzzzzzzzzzzz-upstream-d168a08b3c.conf`; pass its release and drop-in as `--previous-release` / `--previous-dropin` for rollback.
 3. Cleanup (superseded rebase worktrees, once main contains their tips): `git worktree remove --force` for `upstream-rebase-012-20261008`, `upstream-rebase-013-20261009`, `rebase009-20261004`, `rebase010-20261005`, `upstream-rebase-007-20261001`, `upstream-rebase-008-20261003`, then `git worktree prune -v`. `upstream-rebase-009-20261006` is not in main: leave it.

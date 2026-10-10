@@ -162,11 +162,15 @@ class StagedPlugin:
             if current != self.target_digest:
                 raise ValueError("Plugin files changed while preparing the update; retry.")
             backup = self.target.parent / f".previous-{uuid.uuid4().hex}"
+            history_previous = _metadata_records(previous)
+            from pm.install_history import render_history_rows
+            history_rows = render_history_rows(history_previous, metadata)
             row = {
                 "kind": "plugin", "target": str(self.target), "backup": str(backup), "metadata": str(self.metadata),
                 "target_existed": self.target.exists(), "facts_before": file_digest(runtime_facts_path(project)),
                 "metadata_before": base64.b64encode(previous).decode() if previous is not None else None,
                 "metadata_after": base64.b64encode(proposed).decode(),
+                "history_rows": history_rows,
             }
             durable_write_bytes(install_state_dir(project) / "publication.json", json.dumps(row).encode())
             if self.target.exists():

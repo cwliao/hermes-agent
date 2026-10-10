@@ -161,19 +161,19 @@ def cmd_adopt(name: str) -> None:
         console.print(f"[red]Error:[/red] The dir's origin url is not installable: {e}")
         sys.exit(1)
 
-    metadata = _pc()._read_install_metadata()
-    if target.name in metadata:
-        console.print(f"[red]Error:[/red] Plugin '{name}' already has a provenance row.")
-        sys.exit(1)
-
     git_exe = _pc()._resolve_git_executable()
     revision = _pc()._git_head_revision(target, git_exe) if git_exe else ""
-    metadata[target.name] = {
+    record = {
         "pinned": False,
         "revision": revision,
         "source": _pc()._canonical_source(prov.origin_url, None),
     }
-    _pc()._write_install_metadata(metadata)
+    def adopt(current):
+        if current is not None:
+            raise _pc().PluginOperationError(f"Plugin '{name}' already has a provenance row.")
+        return record
+
+    _pc()._update_install_record(target.name, adopt, event_override="adopt")
     console.print(
         f"[green]✓[/green] Adopted [bold]{name}[/bold] "
         f"(source: {prov.origin_url}, revision: {revision[:12] or 'unknown'}). "
@@ -222,12 +222,20 @@ def cmd_trust_update_url(name: str) -> None:
             console.print(f"[red]Error:[/red] Plugin '{name}' {exc}. Not trusted.")
             sys.exit(1)
 
-    row["update_url"] = claimed
-    rows[target.name] = row
-    _pc()._write_install_metadata(rows)
+    observed = {"saved": saved}
+
+    def trust(current):
+        if not isinstance(current, dict):
+            raise _pc().PluginOperationError(f"Plugin '{name}' has no provenance row — nothing to trust.")
+        observed["saved"] = current.get("update_url") or None
+        updated = dict(current)
+        updated["update_url"] = claimed
+        return updated
+
+    _pc()._update_install_record(target.name, trust)
     console.print(
         f"[green]✓[/green] Trusted [bold]{name}[/bold] update_url:\n"
-        f"  old: {saved or '(none)'}\n"
+        f"  old: {observed['saved'] or '(none)'}\n"
         f"  new: {claimed or '(none)'}"
     )
 

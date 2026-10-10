@@ -59,4 +59,8 @@ with runtime_lock(project):
     assert json.loads(metadata.read_text(encoding="utf-8"))["example"]["revision"] == ("new" if committed else "old")
     if not committed:
         assert metadata.read_bytes() == previous
+        assert not (target.parent / "INSTALL-HISTORY.md").exists()
+    else:
+        history = (target.parent / "INSTALL-HISTORY.md").read_text(encoding="utf-8").splitlines()
+        assert sum("| example |" in line for line in history) == 1
     assert not list(target.parent.glob(".previous-*"))

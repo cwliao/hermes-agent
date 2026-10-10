@@ -19,6 +19,7 @@ from typing import Callable, Optional
 from hermes_cli._subprocess_compat import noninteractive_git_env
 from hermes_constants import get_hermes_home
 from utils import atomic_write_text
+from pm.install_history import append_install_history
 
 
 def _pc():
@@ -48,11 +49,22 @@ def _read_install_metadata() -> dict[str, dict[str, object]]:
     return value
 
 
-def _write_install_metadata(metadata: dict[str, dict[str, object]]) -> None:
-    """Atomically replace the profile-local plugin install metadata sidecar."""
+def _write_install_metadata(metadata: dict[str, dict[str, object]], *, event_override: str | None = None) -> None:
+    """Atomically update the sidecar and best-effort append its history."""
     path = _install_metadata_path()
-    atomic_write_text(
-        path, json.dumps(metadata, indent=2, sort_keys=True) + "\n", tmp_prefix=f"{path.name}.tmp-")
+    with _install_metadata_lock():
+        try:
+            previous = _read_install_metadata()
+        except Exception:  # health: allow BLE001 -- corrupt sidecar must not block overwriting it
+            _pc().logger.warning("Could not record plugin install history", exc_info=True)
+            previous = None
+        atomic_write_text(
+            path, json.dumps(metadata, indent=2, sort_keys=True) + "\n", tmp_prefix=f"{path.name}.tmp-")
+        if previous is not None:
+            try:
+                append_install_history(path, previous, metadata, event_override=event_override)
+            except Exception:  # health: allow BLE001 -- history logging is best-effort
+                _pc().logger.warning("Could not record plugin install history", exc_info=True)
 
 
 _INSTALL_METADATA_LOCK_HOLDER = threading.local()
@@ -71,7 +83,7 @@ def _install_metadata_lock():
         yield
 
 
-def _update_install_record(name: str, update: Callable[[Optional[dict]], Optional[dict]]) -> None:
+def _update_install_record(name: str, update: Callable[[Optional[dict]], Optional[dict]], *, event_override: str | None = None) -> None:
     """Rewrite one plugin's record in the CURRENT sidecar, under the lock. *update* maps the current
     record (None when absent) to the new one (None removes it); every other record is re-read here,
     never carried over from a caller's earlier snapshot."""
@@ -84,7 +96,7 @@ def _update_install_record(name: str, update: Callable[[Optional[dict]], Optiona
             del metadata[name]
         else:
             metadata[name] = record
-        _pc()._write_install_metadata(metadata)
+        _pc()._write_install_metadata(metadata, event_override=event_override)
 
 
 def pinned_revision(name: str, metadata: Optional[dict] = None) -> Optional[str]:

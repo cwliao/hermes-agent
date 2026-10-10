@@ -70,6 +70,12 @@ def _recover_plugin_publication(project: Path, row: dict, journal: Path) -> None
         raise ValueError("plugin publication paths escape their home")
     committed = row.get("committed") or _digest(runtime_facts_path(project)) != row["facts_before"]
     if committed:
+        if row.get("history_rows"):
+            try:
+                from pm.install_history import append_install_history
+                append_install_history(Path(row["metadata"]), {}, {}, rows=row["history_rows"])
+            except Exception:  # history is an audit aid; never undo a committed publication
+                LOG.warning("Could not record plugin install history", exc_info=True)
         if backup.exists():
             rmtree_force(backup)
     else:
@@ -130,9 +136,17 @@ def recover_publication(project: Path) -> None:
 def finish_publication(project: Path) -> None:
     """Persist a commit even when code/config changed without a new generation."""
     journal = install_state_dir(project) / "publication.json"
+    if not journal.exists():
+        return
     row = json.loads(journal.read_bytes())
     row["committed"] = True
     _atomic_bytes(journal, json.dumps(row).encode())
+    if row.get("kind") == "plugin" and row.get("history_rows"):
+        try:
+            from pm.install_history import append_install_history
+            append_install_history(Path(row["metadata"]), {}, {}, rows=row["history_rows"])
+        except Exception:  # history is an audit aid; never undo a committed publication
+            LOG.warning("Could not record plugin install history", exc_info=True)
     recover_publication(project)
 
 
